@@ -1,0 +1,46 @@
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]'],
+  [/Basic\s+[A-Za-z0-9+/=]{8,}/gi, 'Basic [REDACTED]'],
+  [/AIza[0-9A-Za-z\-_]{20,}/g, 'AIza[REDACTED]'],
+  [/gsk_[0-9A-Za-z]{16,}/g, 'gsk_[REDACTED]'],
+  [/sk-or-v1-[0-9A-Za-z]{16,}/g, 'sk-or-v1-[REDACTED]'],
+  [/sk-[0-9A-Za-z]{20,}/g, 'sk-[REDACTED]'],
+  [/("?(?:access_token|refresh_token|client_secret|api_key|apiKey|password|authorization|token)"?\s*[:=]\s*"?)[^"\s,&}]+/gi, '$1[REDACTED]'],
+  [/([?&](?:key|api_key|token|access_token|client_secret)=)[^&\s]+/gi, '$1[REDACTED]'],
+];
+
+export function redactSecrets(input: string, knownSecrets: string[] = []): string {
+  let output = input;
+  for (const secret of knownSecrets) {
+    if (secret && secret.length >= 6) {
+      output = output.split(secret).join('[REDACTED]');
+    }
+  }
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    output = output.replace(pattern, replacement);
+  }
+  return output;
+}
+
+export function safeErrorMessage(error: unknown, knownSecrets: string[] = []): string {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : 'Unexpected error occurred';
+  return redactSecrets(raw, knownSecrets);
+}
+
+export function assertSecureServerUrl(url: string): void {
+  const trimmed = url.trim();
+  if (
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('virtual://') ||
+    trimmed.startsWith('http://localhost') ||
+    trimmed.startsWith('http://127.0.0.1')
+  ) {
+    return;
+  }
+  throw new Error('Insecure URL rejected: remote MCP servers and OAuth endpoints must use HTTPS.');
+}

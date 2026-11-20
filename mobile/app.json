@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "MCP Hub",
+    "slug": "mcp-hub",
+    "version": "1.0.0",
+    "scheme": "mcphub",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-sqlite",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Unlock MCP Hub to access encrypted API keys and MCP credentials."
+        }
+      ]
+    ],
+    "android": {
+      "package": "app.mcphub.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#2563EB"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "app.mcphub.mobile",
+      "supportsTablet": true
+    }
+  }
+}
