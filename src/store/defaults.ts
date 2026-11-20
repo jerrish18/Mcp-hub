@@ -64,6 +64,8 @@ export const DEFAULT_SANDBOX_SERVER: McpServerConfig = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
+  accentTheme: 'pixel_blue',
+  oledDark: false,
   confirmBeforeWrite: true,
   maxAgentSteps: 10,
   alwaysAllowedTools: [],

@@ -10,10 +10,11 @@ import {
   Terminal,
   Trash2,
 } from 'lucide-react';
-import { FREE_MODELS } from '../../config/models';
+import { mergeModelCatalog } from '../../services/llm/provider';
 import { useHubStore } from '../../store/useHubStore';
 import { type AgentProfile, AgentProfileSchema, type EffortLevel } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
+import { M3Switch } from '../../ui/M3Switch';
 import { triggerHaptic } from '../../utils/haptics';
 
 const AGENT_ICONS: Record<string, typeof Bot> = {
@@ -31,12 +32,15 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
   const {
     agents,
     servers,
+    dynamicModels,
     settings,
     saveAgent,
     duplicateAgent,
     deleteAgent,
     startNewConversation,
   } = useHubStore();
+
+  const allModels = mergeModelCatalog(dynamicModels);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -45,7 +49,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
   const [icon, setIcon] = useState('bot');
   const [description, setDescription] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
-  const [defaultModelId, setDefaultModelId] = useState(FREE_MODELS[0].id);
+  const [defaultModelId, setDefaultModelId] = useState(allModels[0]?.id ?? 'gemini-4-hydrogen');
   const [defaultEffort, setDefaultEffort] = useState<EffortLevel>('medium');
   const [allServersAllowed, setAllServersAllowed] = useState(true);
   const [selectedServerIds, setSelectedServerIds] = useState<string[]>([]);
@@ -57,7 +61,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
     setIcon('bot');
     setDescription('');
     setSystemPrompt('You are a helpful MCP agent.');
-    setDefaultModelId(FREE_MODELS[0].id);
+    setDefaultModelId(allModels[0]?.id ?? 'gemini-4-hydrogen');
     setDefaultEffort('medium');
     setAllServersAllowed(true);
     setSelectedServerIds(servers.map((s) => s.id));
@@ -111,8 +115,11 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-slate-50 dark:bg-slate-950 p-4 sm:p-6">
-      <div className="max-w-4xl mx-auto space-y-5">
+    <div
+      style={{ backgroundColor: 'var(--m3-surface)' }}
+      className="h-full overflow-y-auto p-4 sm:p-6"
+    >
+      <div className="max-w-4xl mx-auto space-y-5 pb-6">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
@@ -125,7 +132,11 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
           <button
             type="button"
             onClick={openCreate}
-            className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 shrink-0 transition-colors"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 shrink-0 transition-opacity hover:opacity-90"
           >
             <Plus className="w-4 h-4" />
             <span>New Agent</span>
@@ -135,17 +146,27 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           {agents.map((agent) => {
             const Icon = AGENT_ICONS[agent.icon] ?? Bot;
-            const modelLabel = FREE_MODELS.find((m) => m.id === agent.defaultModelId)?.label ?? agent.defaultModelId;
+            const modelLabel = allModels.find((m) => m.id === agent.defaultModelId)?.label ?? agent.defaultModelId;
             return (
               <div
                 key={agent.id}
                 data-testid="agent-card"
-                className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex flex-col justify-between gap-4"
+                style={{
+                  backgroundColor: 'var(--m3-surface-container)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="rounded-[24px] border p-4 flex flex-col justify-between gap-4"
               >
                 <div className="space-y-2.5">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <span className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                      <span
+                        style={{
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                        }}
+                        className="w-10 h-10 rounded-2xl flex items-center justify-center shrink-0"
+                      >
                         <Icon className="w-5 h-5" />
                       </span>
                       <div className="min-w-0">
@@ -174,14 +195,18 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-800">
                   <button
                     type="button"
                     onClick={() => {
                       startNewConversation(agent.id);
                       onOpenChat();
                     }}
-                    className="min-h-[44px] px-3.5 rounded-xl bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 dark:hover:bg-slate-700 text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                    style={{
+                      backgroundColor: 'var(--m3-primary-container)',
+                      color: 'var(--m3-on-primary-container)',
+                    }}
+                    className="min-h-[42px] px-4 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 transition-opacity hover:opacity-90"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
                     <span>Chat</span>
@@ -310,7 +335,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                 onChange={(e) => setDefaultModelId(e.target.value)}
                 className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm text-slate-900 dark:text-white"
               >
-                {FREE_MODELS.map((m) => (
+                {allModels.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.label}
                   </option>
@@ -336,15 +361,14 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
           </div>
 
           <div className="space-y-2 rounded-2xl border border-slate-200 dark:border-slate-800 p-3.5">
-            <label className="flex items-center justify-between gap-2 text-sm font-medium text-slate-900 dark:text-white cursor-pointer">
+            <div className="flex items-center justify-between gap-2 text-sm font-medium text-slate-900 dark:text-white">
               <span>Allow all connected MCP servers</span>
-              <input
-                type="checkbox"
+              <M3Switch
                 checked={allServersAllowed}
-                onChange={(e) => setAllServersAllowed(e.target.checked)}
-                className="w-4 h-4 accent-blue-600"
+                ariaLabel="Allow all connected MCP servers"
+                onChange={() => setAllServersAllowed((v) => !v)}
               />
-            </label>
+            </div>
             {!allServersAllowed && (
               <div className="pt-2 space-y-1.5 border-t border-slate-100 dark:border-slate-800">
                 {servers.map((srv) => {
@@ -371,7 +395,11 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
 
           <button
             type="submit"
-            className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
           >
             Save Agent
           </button>

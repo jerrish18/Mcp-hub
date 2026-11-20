@@ -60,6 +60,15 @@ export class RateLimitError extends Error {
   }
 }
 
+export class ModelUnavailableError extends Error {
+  status: number;
+  constructor(message: string, status = 503) {
+    super(message);
+    this.name = 'ModelUnavailableError';
+    this.status = status;
+  }
+}
+
 export class ProviderAuthError extends Error {
   status: number;
   constructor(message: string, status = 401) {
@@ -67,4 +76,20 @@ export class ProviderAuthError extends Error {
     this.name = 'ProviderAuthError';
     this.status = status;
   }
+}
+
+export function extractReadableApiError(rawBody: string): string {
+  const trimmed = rawBody.trim();
+  if (!trimmed) return 'Empty error response';
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { message?: string; status?: string; code?: string | number };
+      message?: string;
+    };
+    const msg = parsed?.error?.message ?? parsed?.message;
+    if (msg) return msg;
+  } catch {
+    // not JSON
+  }
+  return trimmed.length > 260 ? `${trimmed.slice(0, 260)}…` : trimmed;
 }

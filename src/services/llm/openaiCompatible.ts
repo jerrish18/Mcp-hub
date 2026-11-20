@@ -1,11 +1,31 @@
 import { PROVIDER_INFO } from '../../config/models';
 import { redactSecrets } from '../../utils/redact';
 import {
+  extractReadableApiError,
   type LlmToolCall,
+  ModelUnavailableError,
   ProviderAuthError,
   RateLimitError,
   type StreamCompletionRequest,
 } from './types';
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true }
+    );
+  });
+}
 
 export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequest): Promise<void> {
   const { model, apiKey, systemPrompt, effort, messages, tools, signal, onEvent, fetchFn = fetch } = req;
@@ -78,23 +98,42 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     headers['X-Title'] = 'MCP Hub';
   }
 
-  const res = await fetchFn(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  });
+  let res: Response | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    res = await fetchFn(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (res.status === 503 && attempt === 0) {
+      await sleep(650, signal);
+      continue;
+    }
+    break;
+  }
+
+  if (!res) {
+    throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} failed to respond.`, 503);
+  }
 
   if (res.status === 429) {
-    const errText = await res.text();
+    const errText = extractReadableApiError(await res.text());
     throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${redactSecrets(errText, [apiKey])}`);
   }
   if (res.status === 401 || res.status === 403) {
-    const errText = await res.text();
+    const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
   }
+  if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+    const errText = extractReadableApiError(await res.text());
+    throw new ModelUnavailableError(
+      `${model.label} unavailable (${res.status}): ${redactSecrets(errText, [apiKey])}`,
+      res.status
+    );
+  }
   if (!res.ok) {
-    const errText = await res.text();
+    const errText = extractReadableApiError(await res.text());
     throw new Error(`${PROVIDER_INFO[model.provider].name} API error (${res.status}): ${redactSecrets(errText, [apiKey])}`);
   }
   if (!res.body) {

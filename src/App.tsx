@@ -6,6 +6,7 @@ import { OnboardingModal } from './features/onboarding/OnboardingModal';
 import { ServersScreen } from './features/servers/ServersScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
 import { useHubStore } from './store/useHubStore';
+import { applyPixelThemeVars } from './utils/theme';
 
 type TabId = 'chat' | 'servers' | 'agents' | 'settings';
 
@@ -34,18 +35,19 @@ export default function App() {
     void initializeApp(autostart);
   }, [initializeApp]);
 
-  // System + manual theme sync
+  // System + manual theme + Pixel Material You dynamic color sync
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const applyTheme = () => {
       const useDark =
         settings.theme === 'dark' || (settings.theme === 'system' && media.matches);
       document.documentElement.classList.toggle('dark', useDark);
+      applyPixelThemeVars(settings.accentTheme ?? 'pixel_blue', useDark, Boolean(settings.oledDark));
     };
     applyTheme();
     media.addEventListener('change', applyTheme);
     return () => media.removeEventListener('change', applyTheme);
-  }, [settings.theme]);
+  }, [settings.theme, settings.accentTheme, settings.oledDark]);
 
   // Battery-friendly lifecycle: close active MCP SSE streams when backgrounded
   useEffect(() => {
@@ -60,7 +62,10 @@ export default function App() {
 
   if (!initialized) {
     return (
-      <div className="h-dvh flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300 text-sm">
+      <div
+        style={{ backgroundColor: 'var(--m3-surface)' }}
+        className="h-dvh flex items-center justify-center text-slate-600 dark:text-slate-300 text-sm"
+      >
         Initializing MCP Hub...
       </div>
     );
@@ -68,23 +73,42 @@ export default function App() {
 
   if (isLocked) {
     return (
-      <div className="h-dvh flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-6">
-        <div className="w-full max-w-sm rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 text-center space-y-5 shadow-xl">
-          <div className="w-14 h-14 rounded-2xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center mx-auto">
-            <Fingerprint className="w-7 h-7" />
+      <div
+        style={{ backgroundColor: 'var(--m3-surface)' }}
+        className="h-dvh flex items-center justify-center p-6"
+      >
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="w-full max-w-sm rounded-[28px] border p-6 text-center space-y-5 shadow-xl"
+        >
+          <div
+            style={{
+              backgroundColor: 'var(--m3-primary-container)',
+              color: 'var(--m3-on-primary-container)',
+            }}
+            className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto"
+          >
+            <Fingerprint className="w-8 h-8" />
           </div>
           <div className="space-y-1">
-            <h1 className="font-display text-lg font-bold text-slate-900 dark:text-white">
+            <h1 className="font-display text-xl font-bold text-slate-900 dark:text-white">
               MCP Hub Locked
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Authenticate to access encrypted API keys and MCP servers.
+              Verify identity to unlock encrypted API keys and MCP servers.
             </p>
           </div>
           <button
             type="button"
             onClick={unlockApp}
-            className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
           >
             Unlock MCP Hub
           </button>
@@ -94,13 +118,26 @@ export default function App() {
   }
 
   return (
-    <div className="h-dvh flex flex-col lg:flex-row bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-hidden">
-      {/* Desktop Left Navigation Rail */}
+    <div
+      style={{ backgroundColor: 'var(--m3-surface)' }}
+      className="h-dvh flex flex-col lg:flex-row text-slate-900 dark:text-slate-100 overflow-hidden"
+    >
+      {/* Desktop Material 3 Navigation Rail */}
       <nav
         aria-label="Primary navigation"
-        className="hidden lg:flex w-20 shrink-0 flex-col items-center py-4 gap-3 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
+        style={{
+          backgroundColor: 'var(--m3-surface-container)',
+          borderColor: 'var(--m3-outline)',
+        }}
+        className="hidden lg:flex w-20 shrink-0 flex-col items-center py-4 gap-3 border-r"
       >
-        <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center mb-2">
+        <div
+          style={{
+            backgroundColor: 'var(--m3-primary)',
+            color: 'var(--m3-on-primary)',
+          }}
+          className="w-12 h-12 rounded-2xl flex items-center justify-center mb-2 shadow-xs"
+        >
           <Sparkles className="w-5 h-5" />
         </div>
         {NAV_TABS.map(({ id, label, Icon }) => {
@@ -111,14 +148,34 @@ export default function App() {
               type="button"
               onClick={() => setActiveTab(id)}
               aria-current={active ? 'page' : undefined}
-              className={`w-16 min-h-[56px] rounded-2xl flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors ${
-                active
-                  ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
+              className="w-16 min-h-[56px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors group"
             >
-              <Icon className="w-5 h-5" />
-              <span>{label}</span>
+              <span
+                style={
+                  active
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                      }
+                    : undefined
+                }
+                className={`w-14 h-8 rounded-full flex items-center justify-center transition-colors ${
+                  active
+                    ? ''
+                    : 'text-slate-600 dark:text-slate-400 group-hover:bg-slate-200/70 dark:group-hover:bg-slate-800'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+              </span>
+              <span
+                className={
+                  active
+                    ? 'font-semibold text-slate-900 dark:text-white'
+                    : 'text-slate-600 dark:text-slate-400'
+                }
+              >
+                {label}
+              </span>
             </button>
           );
         })}
@@ -132,12 +189,16 @@ export default function App() {
         {activeTab === 'settings' && <SettingsScreen />}
       </main>
 
-      {/* Mobile Bottom Tab Bar (Thumb Zone) */}
+      {/* Pixel Android Material 3 NavigationBar with Tonal Pill Indicator */}
       <nav
         aria-label="Mobile navigation"
-        className="lg:hidden shrink-0 border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md pb-safe"
+        style={{
+          backgroundColor: 'var(--m3-surface-container)',
+          borderColor: 'var(--m3-outline)',
+        }}
+        className="lg:hidden shrink-0 border-t pb-safe"
       >
-        <div className="grid grid-cols-4 h-16 items-center">
+        <div className="grid grid-cols-4 h-[72px] items-center px-1">
           {NAV_TABS.map(({ id, label, Icon }) => {
             const active = activeTab === id;
             return (
@@ -146,14 +207,32 @@ export default function App() {
                 type="button"
                 onClick={() => setActiveTab(id)}
                 aria-current={active ? 'page' : undefined}
-                className={`min-h-[48px] flex flex-col items-center justify-center gap-1 transition-colors ${
-                  active
-                    ? 'text-blue-600 dark:text-blue-400'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
+                className="min-h-[56px] flex flex-col items-center justify-center gap-1 transition-colors"
               >
-                <Icon className="w-[22px] h-[22px]" />
-                <span className="text-[11px] font-medium tracking-tight">{label}</span>
+                <span
+                  style={
+                    active
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                        }
+                      : undefined
+                  }
+                  className={`w-16 h-8 rounded-full flex items-center justify-center transition-all duration-200 ${
+                    active ? '' : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  <Icon className="w-[20px] h-[20px]" />
+                </span>
+                <span
+                  className={`text-[11px] tracking-tight ${
+                    active
+                      ? 'font-semibold text-slate-900 dark:text-white'
+                      : 'font-medium text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  {label}
+                </span>
               </button>
             );
           })}

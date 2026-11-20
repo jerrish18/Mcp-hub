@@ -18,8 +18,8 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
     if (trimmed) {
       await setProviderKeys({ [provider]: trimmed });
       if (provider === 'gemini') setActiveModel('gemini-4-hydrogen');
-      if (provider === 'groq') setActiveModel('llama-3.3-70b-versatile');
-      if (provider === 'openrouter') setActiveModel('meta-llama/llama-3.3-70b-instruct:free');
+      if (provider === 'groq') setActiveModel('openai/gpt-oss-120b');
+      if (provider === 'openrouter') setActiveModel('openrouter/free');
     }
     setStep(2);
   };
@@ -41,10 +41,22 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
       aria-modal="true"
       aria-label="Welcome to MCP Hub"
     >
-      <div className="w-full max-w-md rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-2xl space-y-6">
+      <div
+        style={{
+          backgroundColor: 'var(--m3-surface-container)',
+          borderColor: 'var(--m3-outline)',
+        }}
+        className="w-full max-w-md rounded-[28px] border p-6 shadow-2xl space-y-6"
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <span className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center">
+            <span
+              style={{
+                backgroundColor: 'var(--m3-primary-container)',
+                color: 'var(--m3-on-primary-container)',
+              }}
+              className="w-9 h-9 rounded-2xl flex items-center justify-center"
+            >
               <Sparkles className="w-5 h-5" />
             </span>
             <div>
@@ -115,14 +127,18 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
               <button
                 type="button"
                 onClick={handleUseDemo}
-                className="flex-1 min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                className="flex-1 min-h-[44px] rounded-full border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
               >
                 Explore Demo
               </button>
               <button
                 type="button"
                 onClick={handleSaveKeyAndNext}
-                className="flex-1 min-h-[44px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center justify-center gap-1.5"
+                style={{
+                  backgroundColor: 'var(--m3-primary)',
+                  color: 'var(--m3-on-primary)',
+                }}
+                className="flex-1 min-h-[44px] rounded-full text-sm font-semibold inline-flex items-center justify-center gap-1.5"
               >
                 <span>{apiKeyInput.trim() ? 'Save & Next' : 'Skip'}</span>
                 <ArrowRight className="w-4 h-4" />
@@ -160,14 +176,18 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
                   updateSettings({ onboardingCompleted: true });
                   onComplete('servers');
                 }}
-                className="flex-1 min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200"
+                className="flex-1 min-h-[44px] rounded-full border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200"
               >
                 Add Remote Server
               </button>
               <button
                 type="button"
                 onClick={() => setStep(3)}
-                className="flex-1 min-h-[44px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center justify-center gap-1.5"
+                style={{
+                  backgroundColor: 'var(--m3-primary)',
+                  color: 'var(--m3-on-primary)',
+                }}
+                className="flex-1 min-h-[44px] rounded-full text-sm font-semibold inline-flex items-center justify-center gap-1.5"
               >
                 <span>Next</span>
                 <ArrowRight className="w-4 h-4" />
@@ -188,7 +208,11 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
             <button
               type="button"
               onClick={handleFinish}
-              className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors"
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
             >
               Start Chatting
             </button>

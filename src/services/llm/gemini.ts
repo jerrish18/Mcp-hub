@@ -1,7 +1,9 @@
 import { PROVIDER_INFO } from '../../config/models';
 import { redactSecrets } from '../../utils/redact';
 import {
+  extractReadableApiError,
   type LlmToolCall,
+  ModelUnavailableError,
   ProviderAuthError,
   RateLimitError,
   type StreamCompletionRequest,
@@ -43,6 +45,24 @@ function mapEffortToGeminiThinkingLevel(effort: 'low' | 'medium' | 'high'): stri
     case 'high':
       return 'HIGH';
   }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true }
+    );
+  });
 }
 
 export async function streamGeminiCompletion(req: StreamCompletionRequest): Promise<void> {
@@ -110,26 +130,46 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   }
 
   const endpoint = `${PROVIDER_INFO.gemini.baseUrl}/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse`;
-  const res = await fetchFn(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
+
+  let res: Response | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    res = await fetchFn(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (res.status === 503 && attempt === 0) {
+      await sleep(650, signal);
+      continue;
+    }
+    break;
+  }
+
+  if (!res) {
+    throw new ModelUnavailableError('Gemini failed to respond.', 503);
+  }
 
   if (res.status === 429) {
-    const errText = await res.text();
+    const errText = extractReadableApiError(await res.text());
     throw new RateLimitError(`Gemini rate limit (429): ${redactSecrets(errText, [apiKey])}`);
   }
   if (res.status === 401 || res.status === 403) {
-    const errText = await res.text();
+    const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`Gemini auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
   }
+  if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+    const errText = extractReadableApiError(await res.text());
+    throw new ModelUnavailableError(
+      `${model.label} unavailable (${res.status}): ${redactSecrets(errText, [apiKey])}`,
+      res.status
+    );
+  }
   if (!res.ok) {
-    const errText = await res.text();
+    const errText = extractReadableApiError(await res.text());
     throw new Error(`Gemini API error (${res.status}): ${redactSecrets(errText, [apiKey])}`);
   }
 

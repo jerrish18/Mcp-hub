@@ -200,8 +200,12 @@ export interface PendingApproval {
   resolve: (decision: 'approve' | 'always_allow' | 'deny') => void;
 }
 
+export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'monochrome';
+
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
+  accentTheme: PixelAccentTheme;
+  oledDark: boolean;
   confirmBeforeWrite: boolean;
   maxAgentSteps: number;
   alwaysAllowedTools: string[]; // `${serverId}:${toolName}`

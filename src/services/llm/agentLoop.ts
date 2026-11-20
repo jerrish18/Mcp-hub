@@ -66,6 +66,7 @@ export interface RunAgentLoopParams {
   modelId: string;
   effort: EffortLevel;
   keys: ProviderKeys;
+  dynamicModels?: ModelConfig[];
   servers: McpServerConfig[];
   history: LlmConversationItem[];
   maxSteps: number;
@@ -91,6 +92,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     modelId,
     effort,
     keys,
+    dynamicModels,
     servers,
     maxSteps,
     confirmBeforeWrite,
@@ -130,6 +132,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       const { usedModel } = await streamWithRateLimitFallback({
         primaryModelId: activeModelId,
         keys,
+        dynamicModels,
         systemPrompt: agent.systemPrompt,
         effort,
         messages: workingMessages,

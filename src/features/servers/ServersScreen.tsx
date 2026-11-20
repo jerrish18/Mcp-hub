@@ -29,6 +29,7 @@ import {
   type ServerSecretPayload,
 } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
+import { M3Switch } from '../../ui/M3Switch';
 import { SkeletonCard } from '../../ui/Skeleton';
 import { triggerHaptic } from '../../utils/haptics';
 import { safeErrorMessage } from '../../utils/redact';
@@ -297,8 +298,11 @@ export function ServersScreen() {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-slate-50 dark:bg-slate-950 p-4 sm:p-6">
-      <div className="max-w-4xl mx-auto space-y-5">
+    <div
+      style={{ backgroundColor: 'var(--m3-surface)' }}
+      className="h-full overflow-y-auto p-4 sm:p-6"
+    >
+      <div className="max-w-4xl mx-auto space-y-5 pb-6">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
@@ -311,7 +315,11 @@ export function ServersScreen() {
           <button
             type="button"
             onClick={openNewEditor}
-            className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 shrink-0 transition-colors"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 shrink-0 transition-opacity hover:opacity-90"
           >
             <Plus className="w-4 h-4" />
             <span>Add Server</span>
@@ -319,7 +327,13 @@ export function ServersScreen() {
         </div>
 
         {servers.length === 0 ? (
-          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center space-y-3">
+          <div
+            style={{
+              backgroundColor: 'var(--m3-surface-container)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="rounded-[24px] border p-8 text-center space-y-3"
+          >
             <Server className="w-8 h-8 text-slate-400 mx-auto" />
             <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white">
               No MCP servers configured
@@ -330,7 +344,11 @@ export function ServersScreen() {
             <button
               type="button"
               onClick={openNewEditor}
-              className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-medium"
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="min-h-[44px] px-5 py-2 rounded-full text-sm font-semibold"
             >
               Add your first MCP server
             </button>
@@ -345,7 +363,11 @@ export function ServersScreen() {
                 <div
                   key={srv.id}
                   data-testid="server-card"
-                  className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
+                  style={{
+                    backgroundColor: 'var(--m3-surface-container)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="rounded-[24px] border overflow-hidden"
                 >
                   <div className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <button
@@ -425,7 +447,10 @@ export function ServersScreen() {
                   )}
 
                   {isExpanded && srv.status !== 'connecting' && (
-                    <div className="border-t border-slate-200 dark:border-slate-800 p-4 space-y-4 bg-slate-50/50 dark:bg-slate-950/40">
+                    <div
+                      style={{ backgroundColor: 'var(--m3-surface)' }}
+                      className="border-t border-slate-200/70 dark:border-slate-800 p-4 space-y-4"
+                    >
                       <div>
                         <h3 className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">
                           Tools ({srv.tools.length})
@@ -442,7 +467,11 @@ export function ServersScreen() {
                               return (
                                 <div
                                   key={tool.name}
-                                  className="min-h-[52px] px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between gap-3"
+                                  style={{
+                                    backgroundColor: 'var(--m3-surface-container)',
+                                    borderColor: 'var(--m3-outline)',
+                                  }}
+                                  className="min-h-[52px] px-3.5 py-2.5 rounded-2xl border flex items-center justify-between gap-3"
                                 >
                                   <div className="min-w-0">
                                     <div className="text-sm font-medium font-mono text-slate-900 dark:text-slate-100 truncate">
@@ -453,25 +482,14 @@ export function ServersScreen() {
                                       {tool.description ? ` · ${tool.description}` : ''}
                                     </div>
                                   </div>
-                                  <button
-                                    type="button"
-                                    role="switch"
-                                    aria-checked={enabled}
-                                    aria-label={`Toggle tool ${tool.name}`}
-                                    onClick={() => {
+                                  <M3Switch
+                                    checked={enabled}
+                                    ariaLabel={`Toggle tool ${tool.name}`}
+                                    onChange={() => {
                                       triggerHaptic(settings.hapticsEnabled, 'light');
                                       toggleServerTool(srv.id, tool.name);
                                     }}
-                                    className={`w-12 h-7 rounded-full p-0.5 transition-colors shrink-0 ${
-                                      enabled ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-700'
-                                    }`}
-                                  >
-                                    <span
-                                      className={`block w-6 h-6 rounded-full bg-white shadow transition-transform ${
-                                        enabled ? 'translate-x-5' : 'translate-x-0'
-                                      }`}
-                                    />
-                                  </button>
+                                  />
                                 </div>
                               );
                             })}
@@ -791,7 +809,11 @@ export function ServersScreen() {
 
           <button
             type="submit"
-            className="w-full min-h-[48px] rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
           >
             {editingServerId ? 'Save & Test Connection' : 'Add & Connect Server'}
           </button>

@@ -6,6 +6,27 @@
     --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+    /* Default Material You Pixel Blue tokens */
+    --m3-primary: #0B57D0;
+    --m3-on-primary: #FFFFFF;
+    --m3-primary-container: #D3E3FD;
+    --m3-on-primary-container: #041E49;
+    --m3-surface: #F8FAFD;
+    --m3-surface-container: #EFF3F9;
+    --m3-surface-container-high: #E4EAF4;
+    --m3-outline: #D2D9E5;
+  }
+
+  .dark {
+    --m3-primary: #A8C7FA;
+    --m3-on-primary: #062E6F;
+    --m3-primary-container: #0842A0;
+    --m3-on-primary-container: #D3E3FD;
+    --m3-surface: #111318;
+    --m3-surface-container: #1B1F27;
+    --m3-surface-container-high: #262B35;
+    --m3-outline: #2E3440;
   }
 
   html {
@@ -32,4 +53,13 @@
 
 .pt-safe {
   padding-top: env(safe-area-inset-top, 0px);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }

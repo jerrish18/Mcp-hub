@@ -4,7 +4,7 @@ import {
   buildAgentToolCatalog,
   runAgentLoop,
 } from '../services/llm/agentLoop';
-import { getApiKeyForProvider } from '../services/llm/provider';
+import { getApiKeyForProvider, syncLiveProviderModels } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import { closeAllMcpConnections, connectAndInspectServer } from '../services/mcp/client';
 import { historyDb } from '../services/storage/historyDb';
@@ -22,7 +22,9 @@ import type {
   Conversation,
   EffortLevel,
   McpServerConfig,
+  ModelConfig,
   PendingApproval,
+  ProviderId,
   ProviderKeys,
   ServerSecretPayload,
   ToolCallRecord,
@@ -36,6 +38,7 @@ interface PersistedMeta {
   servers: McpServerConfig[];
   agents: AgentProfile[];
   settings: AppSettings;
+  dynamicModels: ModelConfig[];
 }
 
 function readPersistedMeta(): PersistedMeta {
@@ -47,6 +50,7 @@ function readPersistedMeta(): PersistedMeta {
         servers: parsed.servers && parsed.servers.length > 0 ? parsed.servers : [DEFAULT_SANDBOX_SERVER],
         agents: parsed.agents && parsed.agents.length > 0 ? parsed.agents : BUILT_IN_AGENTS,
         settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
+        dynamicModels: parsed.dynamicModels ?? [],
       };
     }
   } catch {
@@ -56,6 +60,7 @@ function readPersistedMeta(): PersistedMeta {
     servers: [DEFAULT_SANDBOX_SERVER],
     agents: BUILT_IN_AGENTS,
     settings: DEFAULT_SETTINGS,
+    dynamicModels: [],
   };
 }
 
@@ -88,6 +93,7 @@ export interface HubState {
   agents: AgentProfile[];
   settings: AppSettings;
   providerKeys: ProviderKeys;
+  dynamicModels: ModelConfig[];
   conversations: Conversation[];
   activeConversationId: string | null;
   isRunning: boolean;
@@ -98,9 +104,11 @@ export interface HubState {
   unlockApp: () => void;
   lockApp: () => void;
 
-  // Settings & Keys
+  // Settings & Keys & Models
   updateSettings: (patch: Partial<AppSettings>) => void;
   setProviderKeys: (keys: ProviderKeys) => Promise<void>;
+  syncModels: (keysOverride?: ProviderKeys) => Promise<{ count: number; providers: string[] }>;
+  addCustomModel: (provider: ProviderId, modelId: string, label?: string) => void;
   revokeAlwaysAllowedTool: (qualifiedKey: string) => void;
 
   // Servers
@@ -138,6 +146,7 @@ export const useHubStore = create<HubState>((set, get) => {
       servers: s.servers,
       agents: s.agents,
       settings: s.settings,
+      dynamicModels: s.dynamicModels,
     });
   };
 
@@ -148,6 +157,7 @@ export const useHubStore = create<HubState>((set, get) => {
     agents: initialMeta.agents,
     settings: initialMeta.settings,
     providerKeys: {},
+    dynamicModels: initialMeta.dynamicModels,
     conversations: [],
     activeConversationId: null,
     isRunning: false,
@@ -221,6 +231,38 @@ export const useHubStore = create<HubState>((set, get) => {
     setProviderKeys: async (keys) => {
       await saveProviderKeys(keys);
       set({ providerKeys: keys });
+    },
+
+    syncModels: async (keysOverride) => {
+      const keys = keysOverride ?? get().providerKeys;
+      const { models, syncedProviders } = await syncLiveProviderModels(keys);
+      if (models.length > 0) {
+        const existingCustom = get().dynamicModels.filter(
+          (m) => !models.some((fresh) => fresh.id === m.id) && m.description === 'Custom user model'
+        );
+        set({ dynamicModels: [...models, ...existingCustom] });
+        persist();
+      }
+      return { count: models.length, providers: syncedProviders };
+    },
+
+    addCustomModel: (provider, modelId, label) => {
+      const trimmed = modelId.trim();
+      if (!trimmed) return;
+      const custom: ModelConfig = {
+        id: trimmed,
+        provider,
+        label: label?.trim() || `${trimmed} (Custom)`,
+        description: 'Custom user model',
+        contextWindow: 128_000,
+        supportsThinkingLevel: provider === 'gemini',
+        supportsReasoningEffort: provider !== 'gemini',
+        isFreeTier: true,
+      };
+      set((s) => ({
+        dynamicModels: [custom, ...s.dynamicModels.filter((m) => m.id !== trimmed)],
+      }));
+      persist();
     },
 
     revokeAlwaysAllowedTool: (qualifiedKey) => {
@@ -511,7 +553,7 @@ export const useHubStore = create<HubState>((set, get) => {
       if (!conv) return;
 
       const agent = state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0];
-      const model = getModelById(conv.modelId);
+      const model = getModelById(conv.modelId, state.dynamicModels);
       const apiKey = getApiKeyForProvider(model.provider, state.providerKeys);
 
       const userMsg: ChatMessage = {
@@ -610,6 +652,7 @@ export const useHubStore = create<HubState>((set, get) => {
           modelId: conv.modelId,
           effort: conv.effort,
           keys: get().providerKeys,
+          dynamicModels: get().dynamicModels,
           servers: get().servers,
           history: llmHistory,
           maxSteps: get().settings.maxAgentSteps,
@@ -620,11 +663,16 @@ export const useHubStore = create<HubState>((set, get) => {
             onTextDelta: (fullText) => updateAssistantMsg({ content: fullText }),
             onReasoningDelta: (fullReasoning) => updateAssistantMsg({ reasoning: fullReasoning }),
             onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => updateAssistantMsg({ toolCalls }),
-            onFallbackNotice: (fromModel, toModel) => {
+            onFallbackNotice: (fromModel, toModel, reason) => {
+              const shortReason = reason.includes('503')
+                ? 'high demand (503)'
+                : reason.includes('404')
+                  ? 'unavailable (404)'
+                  : 'rate limit (429)';
               const noticeMsg: ChatMessage = {
                 id: `msg_notice_${Date.now()}`,
                 role: 'system_notice',
-                content: `Rate limit (429) on ${fromModel.label}. Automatically switched to ${toModel.label}.`,
+                content: `${fromModel.label} hit ${shortReason}. Automatically switched to ${toModel.label}.`,
                 createdAt: Date.now(),
               };
               patchConv((c) => {
