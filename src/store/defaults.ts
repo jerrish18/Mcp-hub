@@ -5,29 +5,52 @@ import type { AgentProfile, AppSettings, McpServerConfig } from '../types';
 export const DEFAULT_STUDY_INSTRUCTIONS =
   '1. Start with a 2-sentence Clear Overview.\n2. Break down Core Concepts with bullet points and simple real-world analogies.\n3. Show a Worked Example or Code/Formula Walkthrough.\n4. End with 3 Quick Self-Check Questions (answers hidden under a short Answers section).';
 
-export const STUDY_INSTRUCTION_PRESETS: Array<{ id: string; label: string; instructions: string }> = [
+export const STUDY_INSTRUCTION_PRESETS: Array<{
+  id: string;
+  label: string;
+  shortHint: string;
+  instructions: string;
+}> = [
   {
     id: 'step_by_step',
     label: 'Step-by-Step Guide',
+    shortHint: 'Overview, analogies & worked example',
     instructions: DEFAULT_STUDY_INSTRUCTIONS,
   },
   {
-    id: 'exam_prep',
-    label: 'Exam Notes',
+    id: 'socratic_tutor',
+    label: 'Socratic Tutor',
+    shortHint: 'Guides you one question at a time',
     instructions:
-      '1. High-Yield Definition (1–2 lines)\n2. Key Points to Memorize (concise numbered list)\n3. Common Mistakes & Traps to Avoid\n4. 2 Exam-Style Practice Questions with Brief Solutions.',
+      'Act like a patient Socratic tutor (ChatGPT Study Mode style): do NOT dump the entire solution all at once. Give a crisp 2–3 sentence intuitive explanation of ONLY the current concept, provide 1 concrete example, and end with ONE clear check-in question asking the student to reason or predict the next step before proceeding.',
   },
   {
-    id: 'flashcards',
-    label: 'Flashcard Q&A',
+    id: 'exam_prep',
+    label: 'Exam Cheat Sheet',
+    shortHint: 'High-yield points, formulas & traps',
     instructions:
-      'Organize the explanation as 5–7 crisp Front/Back study flashcards using headings (### Card N: Topic) followed by **Question:** and **Answer:** with a one-line memory hook.',
+      '1. High-Yield Definition (1–2 lines)\n2. Core Rules / Formulas to Memorize (concise numbered list)\n3. Clean Markdown Comparison Table if multiple items exist\n4. Common Exam Mistakes & Traps to Avoid\n5. 3 Practice Questions with brief Answer Explanations.',
   },
   {
     id: 'eli5_deep',
-    label: 'Simple + Deep Dive',
+    label: 'Feynman / ELI5',
+    shortHint: 'Zero-jargon intuition then deep dive',
     instructions:
-      '1. Explain Like I’m New (intuitive analogy, zero jargon)\n2. Technical Deep Dive (precise definitions & mechanics)\n3. Quick Summary Table or Key Takeaways.',
+      '1. Explain Like I’m New (zero jargon, everyday analogy)\n2. Technical Deep Dive (precise definitions & how parts interact)\n3. Quick Recap Cheat-Sheet Table.',
+  },
+  {
+    id: 'flashcards',
+    label: 'Flashcard Pack',
+    shortHint: 'Active recall cards ready to flip',
+    instructions:
+      'Organize the explanation as 5–7 crisp Front/Back study flashcards using headings (### Card N: Topic) followed by **Question:**, **Answer:**, and **Memory Hook:** — OR include a ```study-flashcards JSON block.',
+  },
+  {
+    id: 'compare_table',
+    label: 'Compare & Table',
+    shortHint: 'Side-by-side matrix & when to use',
+    instructions:
+      '1. One-sentence summary of why the concepts differ\n2. Clean Markdown Comparison Table with short, scannable cell values (Criteria | Option A | Option B)\n3. Real-World Scenario: When to choose each\n4. Key Takeaway Callout.',
   },
 ];
 

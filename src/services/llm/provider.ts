@@ -1,4 +1,4 @@
-import { FREE_MODELS, getModelById, PROVIDER_INFO } from '../../config/models';
+import { formatReadableModelSlug, FREE_MODELS, getModelById, PROVIDER_INFO } from '../../config/models';
 import type { EffortLevel, ModelConfig, ProviderId, ProviderKeys } from '../../types';
 import { streamDemoCompletion } from './demoProvider';
 import { streamGeminiCompletion } from './gemini';
@@ -42,12 +42,29 @@ export function getApiKeyForProvider(provider: ProviderId, keys: ProviderKeys): 
 }
 
 export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfig[] {
+  const curatedById = new Map<string, ModelConfig>();
   const byId = new Map<string, ModelConfig>();
   for (const m of FREE_MODELS) {
+    curatedById.set(m.id, m);
     byId.set(m.id, m);
   }
   for (const dm of dynamicModels) {
-    byId.set(dm.id, dm);
+    const curated = curatedById.get(dm.id);
+    if (curated) {
+      byId.set(dm.id, {
+        ...dm,
+        label: curated.label,
+        description: curated.description,
+        supportsThinkingLevel: curated.supportsThinkingLevel ?? dm.supportsThinkingLevel,
+        supportsReasoningEffort: curated.supportsReasoningEffort ?? dm.supportsReasoningEffort,
+      });
+    } else {
+      const looksLikeSlug = dm.label.includes('/') || dm.label.startsWith(dm.id);
+      byId.set(dm.id, {
+        ...dm,
+        label: looksLikeSlug ? `${formatReadableModelSlug(dm.id)} (${PROVIDER_INFO[dm.provider].name})` : dm.label,
+      });
+    }
   }
   return Array.from(byId.values());
 }
@@ -248,15 +265,19 @@ export async function syncLiveProviderModels(
               !m.id.includes('tts')
           )
           .slice(0, 8)
-          .map((m): ModelConfig => ({
-            id: m.id,
-            provider: 'groq',
-            label: `${m.id} (Groq Live)`,
-            description: 'Active model synced from your Groq account',
-            contextWindow: m.context_window ?? 128_000,
-            supportsReasoningEffort: m.id.includes('qwen') || m.id.includes('gpt-oss'),
-            isFreeTier: true,
-          }));
+          .map((m): ModelConfig => {
+            const curated = FREE_MODELS.find((f) => f.id === m.id);
+            return {
+              id: m.id,
+              provider: 'groq',
+              label: curated?.label ?? `${formatReadableModelSlug(m.id)} (Groq)`,
+              description: curated?.description ?? 'Active model synced from your Groq account',
+              contextWindow: m.context_window ?? curated?.contextWindow ?? 128_000,
+              supportsReasoningEffort:
+                curated?.supportsReasoningEffort ?? (m.id.includes('qwen') || m.id.includes('gpt-oss')),
+              isFreeTier: true,
+            };
+          });
         if (groqModels.length > 0) {
           discovered.push(...groqModels);
           syncedProviders.push('Groq');

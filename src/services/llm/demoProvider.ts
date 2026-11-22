@@ -42,6 +42,111 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   // Study Session mode — never invokes MCP tools, formats strictly for learning
   if (chatMode === 'study') {
+    if (lower.includes('```study-quiz') || lower.includes('4-question multiple-choice practice quiz')) {
+      const quizJson = JSON.stringify(
+        [
+          {
+            question: 'Why does Self-Attention compute Query, Key, and Value projections separately?',
+            options: [
+              'To allow each token to dynamically measure relevance to every other token regardless of distance',
+              'To eliminate the need for matrix multiplication',
+              'To restrict context strictly to adjacent words only',
+              'To compress weights down to 1-bit integers during inference',
+            ],
+            correctIndex: 0,
+            explanation:
+              'Queries ask "what am I looking for?", Keys advertise "what do I contain?", and Values carry the information aggregated by the attention weights.',
+          },
+          {
+            question: 'Why is the dot product Q·Kᵀ divided by √d_k before applying softmax?',
+            options: [
+              'To increase training learning rate automatically',
+              'To prevent large dot products from pushing softmax into tiny-gradient saturation regions',
+              'To convert causal attention into bidirectional attention',
+              'To normalize token embeddings to zero length',
+            ],
+            correctIndex: 1,
+            explanation:
+              'As dimension d_k grows, raw dot products grow in variance, which makes softmax spiky and gradients vanish; scaling by √d_k keeps variance near 1.',
+          },
+          {
+            question: 'Which matrix dimension captures how strongly token i attends to token j?',
+            options: [
+              'The Value projection bias vector',
+              'The token vocabulary embedding table',
+              'The normalized softmax(QKᵀ / √d_k) attention weight matrix',
+              'The final linear layer output bias',
+            ],
+            correctIndex: 2,
+            explanation:
+              'Each row of softmax(QKᵀ / √d_k) forms a probability distribution over all source tokens.',
+          },
+          {
+            question: 'When studying a complex system using Active Recall, what makes practice testing effective?',
+            options: [
+              'Re-reading highlighted notes five times in a row',
+              'Retrieving answers from memory without peeking, then diagnosing mistakes immediately',
+              'Skipping worked examples completely',
+              'Memorizing variable names without understanding relationships',
+            ],
+            correctIndex: 1,
+            explanation:
+              'Testing yourself forces memory retrieval pathways to strengthen and immediately reveals blind spots.',
+          },
+        ],
+        null,
+        2
+      );
+      const quizReply =
+        `## Practice Quiz\n\n` +
+        `Test your understanding with these 4 interactive questions.\n\n` +
+        `\`\`\`study-quiz\n${quizJson}\n\`\`\``;
+      await streamText(quizReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+      onEvent({ type: 'done' });
+      return;
+    }
+
+    if (lower.includes('```study-flashcards') || lower.includes('high-yield study flashcards')) {
+      const cardsJson = JSON.stringify(
+        [
+          {
+            front: 'Query (Q) Vector',
+            back: 'Represents what the current token is searching for across the rest of the sequence.',
+            memoryHook: 'Think of Q as your search bar query.',
+          },
+          {
+            front: 'Key (K) Vector',
+            back: 'Acts as an index label describing what information each token offers to others.',
+            memoryHook: 'Keys match against Queries like tags on a library shelf.',
+          },
+          {
+            front: 'Value (V) Vector',
+            back: 'Holds the actual semantic content blended together using attention weights.',
+            memoryHook: 'Once Q matches K, you retrieve V.',
+          },
+          {
+            front: 'Scaling Factor (1 / √d_k)',
+            back: 'Keeps dot-product variance stable so softmax gradients remain healthy during training.',
+            memoryHook: 'Stops softmax from saturating.',
+          },
+          {
+            front: 'Multi-Head Attention',
+            back: 'Runs multiple attention heads in parallel so the model tracks syntax, meaning, and long-range links simultaneously.',
+            memoryHook: 'Multiple spotlights reading different patterns at once.',
+          },
+        ],
+        null,
+        2
+      );
+      const cardsReply =
+        `## Study Flashcards\n\n` +
+        `Tap **Flashcards** below to practice active recall.\n\n` +
+        `\`\`\`study-flashcards\n${cardsJson}\n\`\`\``;
+      await streamText(cardsReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+      onEvent({ type: 'done' });
+      return;
+    }
+
     const attachmentSummary =
       userAttachments.length > 0
         ? `\n\n> **Study Source Used:** Referenced your ${userAttachments.length} uploaded file${userAttachments.length > 1 ? 's' : ''} (${userAttachments.map((a) => a.name).join(', ')}).`
@@ -51,26 +156,33 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
     const snippetNote = userAttachments.find((a) => a.textContent)?.textContent?.slice(0, 260);
     const instructionPreview = systemPrompt.includes('[STUDY SESSION INSTRUCTIONS')
-      ? 'Following your custom Study Structure Instructions'
+      ? 'Following your active Study Response Instructions'
       : 'Structured Study Guide';
 
+    const cleanTopic = userText.replace(/[.?!]+$/, '').trim() || userText;
     const studyReply =
-      `## Study Notes: ${userText.slice(0, 60)}${userText.length > 60 ? '…' : ''}\n\n` +
-      `> **${instructionPreview}** · Tap anywhere on this card to open the distraction-free **Study Reader**.\n\n` +
-      `### 1. Clear Overview\n` +
-      `In **Study Session** mode, connected MCP servers stay paused so you can focus purely on learning. You asked about **${userText}**.\n\n` +
-      `### 2. Core Concepts\n` +
-      `- **Foundational Principle:** Break the topic into input, mechanism, and real-world output so each part stays memorable.\n` +
-      `- **Why It Matters:** Understanding the core pattern lets you solve unfamiliar problems instead of memorizing isolated facts.\n` +
+      `## Study Notes: ${cleanTopic.slice(0, 56)}${cleanTopic.length > 56 ? '…' : ''}\n\n` +
+      `> **${instructionPreview}** · MCP servers stay paused in Study Mode so every tool stays focused on learning.\n\n` +
+      `### 1. Clear Overview\n\n` +
+      `You asked about **${cleanTopic}**. The fastest way to master any technical or conceptual topic is pairing **core mental models** with a **side-by-side breakdown** and immediate **active recall**.\n\n` +
+      `### 2. Core Concepts at a Glance\n\n` +
+      `| Component | Role in Practice | Key Question to Ask |\n` +
+      `| :--- | :--- | :--- |\n` +
+      `| **Query (Input)** | Defines what you are looking for right now | What relationship matters here? |\n` +
+      `| **Mechanism (Key)** | Matches relevant signals across context | Which parts connect strongly? |\n` +
+      `| **Synthesis (Value)** | Combines weighted evidence cleanly | What output does this produce? |\n\n` +
+      `- **Intuitive Analogy:** Picture a research librarian scanning every bookshelf at once, scoring relevance, and handing you one focused summary.\n` +
+      `- **Common Trap to Avoid:** Memorizing terminology without tracing how inputs change outputs step by step.\n` +
       (snippetNote ? `- **From Your Uploaded Source:** \`${snippetNote.replace(/\s+/g, ' ').trim()}…\`\n` : '') +
-      `\n### 3. Worked Example\n` +
-      `1. Identify what is given and what outcome is requested.\n` +
-      `2. Apply the core rule step by step.\n` +
-      `3. Verify units, edge cases, or logic before finalizing.\n\n` +
-      `### 4. Quick Self-Check Questions\n` +
-      `1. How would you explain **${userText.slice(0, 40)}** in one plain sentence?\n` +
-      `2. What happens if one key constraint changes?\n\n` +
-      `> **Tip:** Add your free Gemini, Groq, or OpenRouter API key in **Settings** for full cloud study tutoring, live PDF/image vision analysis, and Google Search citations.` +
+      `\n### 3. Worked Walkthrough\n\n` +
+      `1. **Project** each input token into Query, Key, and Value vectors.\n` +
+      `2. **Score** similarity via scaled dot product \`score = (Q · Kᵀ) / √d_k\`.\n` +
+      `3. **Normalize** weights with softmax so every row sums to \`1.0\`.\n\n` +
+      `\`\`\`python\nimport math\nscores = [q @ k.T / math.sqrt(d_k) for k in keys]\nweights = softmax(scores)\noutput = sum(w * v for w, v in zip(weights, values))\n\`\`\`\n\n` +
+      `### 4. Quick Self-Check\n\n` +
+      `1. Why do we scale dot products by \`√d_k\` before softmax?\n` +
+      `2. What happens when two tokens share nearly identical Key vectors?\n\n` +
+      `> **Tip:** Tap **Flashcards**, **Quiz Me**, or **Study Reader** below — or add a free Gemini/Groq/OpenRouter API key in **Settings** for full cloud tutoring & Google Search citations.` +
       attachmentSummary;
 
     await streamText(studyReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);

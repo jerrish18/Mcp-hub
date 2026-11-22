@@ -561,7 +561,7 @@ export function SettingsScreen() {
             >
               {allModels.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.label} ({m.id})
+                  {m.label}
                 </option>
               ))}
             </select>

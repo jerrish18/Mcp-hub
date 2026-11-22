@@ -152,6 +152,30 @@ export function normalizeModelId(modelId: string): string {
   return MODEL_MIGRATION_ALIASES[modelId] ?? modelId;
 }
 
+export function formatReadableModelSlug(modelId: string): string {
+  const withoutVendor = modelId.includes('/') ? modelId.split('/').slice(1).join('/') : modelId;
+  const cleaned = withoutVendor.replace(/:free$/i, '').replace(/[-_]+/g, ' ').trim();
+  return cleaned
+    .split(/\s+/)
+    .map((part) => {
+      if (/^(gpt|oss|llm|ai|vl)$/i.test(part)) return part.toUpperCase();
+      if (/^\d+[bmk]?$/i.test(part)) return part.toUpperCase();
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(' ');
+}
+
+export function getShortModelName(model: Pick<ModelConfig, 'id' | 'label'>): string {
+  if (model.id === 'demo-sandbox') return 'Sandbox Demo';
+  const baseLabel = model.label
+    .replace(/\s*\((?:Hydrogen|Neon|Groq|Groq Live|OpenRouter Free|Synced|Free)\)\s*/gi, '')
+    .trim();
+  if (!baseLabel || baseLabel.includes('/') || baseLabel === model.id) {
+    return formatReadableModelSlug(model.id);
+  }
+  return baseLabel;
+}
+
 export function getModelById(modelId: string, dynamicModels: ModelConfig[] = []): ModelConfig {
   const normalized = normalizeModelId(modelId);
   return (

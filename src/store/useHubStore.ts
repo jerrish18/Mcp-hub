@@ -34,6 +34,7 @@ import type {
   ServerSecretPayload,
   ToolCallRecord,
 } from '../types';
+import type { SavedStudyNote } from '../utils/studyTools';
 import { safeErrorMessage } from '../utils/redact';
 import {
   BUILT_IN_AGENTS,
@@ -43,6 +44,26 @@ import {
 } from './defaults';
 
 const STATE_KEY = 'mcphub_app_state_v1';
+const SAVED_NOTES_KEY = 'mcphub_saved_study_notes_v1';
+
+function readSavedStudyNotes(): SavedStudyNote[] {
+  try {
+    const raw = globalThis.localStorage?.getItem(SAVED_NOTES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as SavedStudyNote[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedStudyNotes(notes: SavedStudyNote[]): void {
+  try {
+    globalThis.localStorage?.setItem(SAVED_NOTES_KEY, JSON.stringify(notes));
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 interface PersistedMeta {
   servers: McpServerConfig[];
@@ -162,6 +183,7 @@ export interface HubState {
   dismissedDefaultServerIds: string[];
   conversations: Conversation[];
   activeConversationId: string | null;
+  savedStudyNotes: SavedStudyNote[];
   isRunning: boolean;
   abortController: AbortController | null;
   pendingApproval: PendingApproval | null;
@@ -213,11 +235,13 @@ export interface HubState {
   setStudyInstructions: (instructions: string) => void;
   sendMessage: (
     text: string,
-    options?: { autoApproveWrites?: boolean; attachments?: ChatAttachment[] }
+    options?: { autoApproveWrites?: boolean; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
   resolvePendingApproval: (decision: 'approve' | 'always_allow' | 'deny') => void;
   enableDemoSandbox: () => Promise<void>;
+  saveStudyNote: (note: Omit<SavedStudyNote, 'id' | 'createdAt'>) => void;
+  removeSavedStudyNote: (noteId: string) => void;
 }
 
 const initialMeta = readPersistedMeta();
@@ -248,6 +272,7 @@ export const useHubStore = create<HubState>((set, get) => {
     dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
     conversations: [],
     activeConversationId: null,
+    savedStudyNotes: readSavedStudyNotes(),
     isRunning: false,
     abortController: null,
     pendingApproval: null,
@@ -716,6 +741,30 @@ export const useHubStore = create<HubState>((set, get) => {
       state.setActiveModel('demo-sandbox');
     },
 
+    saveStudyNote: (note) => {
+      const entry: SavedStudyNote = {
+        ...note,
+        id: `snote_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: Date.now(),
+      };
+      set((s) => {
+        const filtered = note.messageId
+          ? s.savedStudyNotes.filter((n) => n.messageId !== note.messageId)
+          : s.savedStudyNotes;
+        const next = [entry, ...filtered].slice(0, 50);
+        writeSavedStudyNotes(next);
+        return { savedStudyNotes: next };
+      });
+    },
+
+    removeSavedStudyNote: (noteId) => {
+      set((s) => {
+        const next = s.savedStudyNotes.filter((n) => n.id !== noteId);
+        writeSavedStudyNotes(next);
+        return { savedStudyNotes: next };
+      });
+    },
+
     sendMessage: async (rawText, options) => {
       const attachments = options?.attachments ?? [];
       const text = rawText.trim() || (attachments.length > 0 ? 'Analyze the attached file(s).' : '');
@@ -736,10 +785,12 @@ export const useHubStore = create<HubState>((set, get) => {
       const knowledgeSource = conv.knowledgeSource ?? 'auto';
       const studyInstructions = conv.studyInstructions ?? '';
 
+      const displayLabel = options?.displayText?.trim();
       const userMsg: ChatMessage = {
         id: `msg_u_${Date.now()}`,
         role: 'user',
         content: text,
+        displayContent: displayLabel && displayLabel !== text ? displayLabel : undefined,
         attachments: attachments.length > 0 ? attachments : undefined,
         chatMode,
         knowledgeSource,
@@ -763,11 +814,12 @@ export const useHubStore = create<HubState>((set, get) => {
         isStreaming: true,
       };
 
+      const titleSource = displayLabel || text;
       const isFirstUserMsg = conv.messages.filter((m) => m.role === 'user').length === 0;
       const derivedTitle = isFirstUserMsg
-        ? text.length > 42
-          ? `${text.slice(0, 42)}…`
-          : text
+        ? titleSource.length > 42
+          ? `${titleSource.slice(0, 42)}…`
+          : titleSource
         : conv.title;
 
       const patchConv = (updater: (c: Conversation) => Conversation) => {

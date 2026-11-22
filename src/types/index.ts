@@ -201,6 +201,7 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system_notice';
   content: string;
+  displayContent?: string;
   reasoning?: string;
   toolCalls?: ToolCallRecord[];
   attachments?: ChatAttachment[];

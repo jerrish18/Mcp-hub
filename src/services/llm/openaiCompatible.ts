@@ -138,6 +138,13 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       await sleep(650, signal);
       continue;
     }
+    if (res.status === 400 && attempt === 0 && 'reasoning_effort' in body) {
+      const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
+      if (errPreview.includes('reasoning')) {
+        delete body.reasoning_effort;
+        continue;
+      }
+    }
     break;
   }
 

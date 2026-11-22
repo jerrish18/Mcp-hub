@@ -73,6 +73,10 @@ export function composeEffectiveSystemPrompt(params: {
     parts.push(
       '[STUDY SESSION MODE — MCP TOOLS DISABLED]\n' +
         'You are helping the user learn and understand deeply. Do NOT attempt to invoke MCP servers.\n' +
+        '[EDITORIAL FORMATTING RULES]\n' +
+        '- Always leave a blank line before and after headings (##, ###), bullet lists, numbered lists, code fences, and tables.\n' +
+        '- When rendering Markdown tables, keep every row on a single line with concise cell text (never insert raw line breaks or ASCII separator bars inside cells).\n' +
+        '- Highlight key terms in **bold**, use `inline code` for commands/variables, and use > blockquote callouts sparingly for Key Takeaways or Memory Hooks.\n' +
         (customStructure
           ? `[STUDY SESSION INSTRUCTIONS — STRICTLY FOLLOW THIS RESPONSE STRUCTURE]\nYou MUST organize and format your entire response strictly according to these user instructions:\n${customStructure}`
           : 'Format your explanation cleanly with Markdown headings, key-takeaway callouts (> quote blocks), clear examples, and scannable bullet points so it reads like a polished study guide.')
@@ -86,7 +90,7 @@ export function composeEffectiveSystemPrompt(params: {
   switch (params.knowledgeSource) {
     case 'uploaded':
       parts.push(
-        '[KNOWLEDGE SOURCE: UPLOADED FILES & IMAGES ONLY]\nAnswer strictly from the user’s attached files or images. Quote or cite relevant parts of the uploaded material. If the uploaded files do not contain the answer, clearly state what is missing rather than inventing facts.'
+        '[KNOWLEDGE SOURCE: UPLOADED FILES & IMAGES ONLY]\nAnswer strictly from the user’s attached files or images. Quote or cite relevant parts of the uploaded material. If no file or image has been attached yet or it lacks the answer, politely ask the user to attach or clarify rather than inventing facts.'
       );
       break;
     case 'web':

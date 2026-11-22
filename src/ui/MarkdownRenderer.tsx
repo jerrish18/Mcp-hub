@@ -1,12 +1,135 @@
-import React, { useState } from 'react';
-import { Check, Copy } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Check, Copy, HelpCircle, Layers, Sparkles } from 'lucide-react';
+import {
+  parseInlineTokens,
+  parseMarkdownBlocks,
+  type InlineToken,
+  type MarkdownBlock,
+} from '../utils/markdownParser';
 
 interface MarkdownRendererProps {
   content: string;
+  onOpenInteractiveFlashcards?: () => void;
+  onOpenInteractiveQuiz?: () => void;
 }
 
-function CodeBlock({ language, code }: { language: string; code: string }) {
+function CodeBlock({
+  language,
+  code,
+  onOpenInteractiveFlashcards,
+  onOpenInteractiveQuiz,
+}: {
+  language: string;
+  code: string;
+  onOpenInteractiveFlashcards?: () => void;
+  onOpenInteractiveQuiz?: () => void;
+}) {
   const [copied, setCopied] = useState(false);
+
+  const normalizedLang = language.toLowerCase();
+  if (normalizedLang === 'study-flashcards' && onOpenInteractiveFlashcards) {
+    let count = 0;
+    try {
+      const parsed = JSON.parse(code) as unknown[];
+      if (Array.isArray(parsed)) count = parsed.length;
+    } catch {
+      // streaming partial JSON
+    }
+    return (
+      <div
+        style={{
+          backgroundColor: 'var(--m3-surface-container)',
+          borderColor: 'var(--m3-outline)',
+        }}
+        className="my-3 rounded-2xl border p-4 flex items-center justify-between gap-3"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <span
+            style={{
+              backgroundColor: 'var(--m3-primary-container)',
+              color: 'var(--m3-on-primary-container)',
+            }}
+            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+          >
+            <Layers className="w-5 h-5" />
+          </span>
+          <div className="min-w-0">
+            <div className="font-display text-sm font-semibold text-slate-900 dark:text-white">
+              Interactive Flashcard Deck
+            </div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              {count > 0 ? `${count} active-recall cards ready to flip` : 'Generating cards...'}
+            </div>
+          </div>
+        </div>
+        {count > 0 && (
+          <button
+            type="button"
+            onClick={onOpenInteractiveFlashcards}
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="min-h-[40px] px-4 rounded-full text-xs font-semibold whitespace-nowrap shrink-0 hover:opacity-90"
+          >
+            Practice Cards
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (normalizedLang === 'study-quiz' && onOpenInteractiveQuiz) {
+    let count = 0;
+    try {
+      const parsed = JSON.parse(code) as unknown[];
+      if (Array.isArray(parsed)) count = parsed.length;
+    } catch {
+      // streaming partial JSON
+    }
+    return (
+      <div
+        style={{
+          backgroundColor: 'var(--m3-surface-container)',
+          borderColor: 'var(--m3-outline)',
+        }}
+        className="my-3 rounded-2xl border p-4 flex items-center justify-between gap-3"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <span
+            style={{
+              backgroundColor: 'var(--m3-primary-container)',
+              color: 'var(--m3-on-primary-container)',
+            }}
+            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+          >
+            <HelpCircle className="w-5 h-5" />
+          </span>
+          <div className="min-w-0">
+            <div className="font-display text-sm font-semibold text-slate-900 dark:text-white">
+              Interactive Practice Quiz
+            </div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              {count > 0 ? `${count} questions with instant explanations` : 'Preparing quiz...'}
+            </div>
+          </div>
+        </div>
+        {count > 0 && (
+          <button
+            type="button"
+            onClick={onOpenInteractiveQuiz}
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="min-h-[40px] px-4 rounded-full text-xs font-semibold whitespace-nowrap shrink-0 hover:opacity-90"
+          >
+            Start Quiz
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const handleCopy = async () => {
     try {
@@ -19,14 +142,14 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   };
 
   return (
-    <div className="my-2.5 overflow-hidden rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100">
-      <div className="flex items-center justify-between px-3.5 py-1.5 border-b border-slate-800 bg-slate-900/90 text-xs text-slate-400">
-        <span className="font-mono">{language || 'text'}</span>
+    <div className="my-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100">
+      <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-800 bg-slate-900/90 text-xs text-slate-400">
+        <span className="font-mono lowercase">{language || 'text'}</span>
         <button
           type="button"
           onClick={handleCopy}
           aria-label="Copy code block"
-          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
         >
           {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
           <span>{copied ? 'Copied' : 'Copy'}</span>
@@ -39,189 +162,240 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   );
 }
 
-function renderInline(text: string): React.ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_)/g);
-  return tokens.map((token, idx) => {
-    if (token.startsWith('`') && token.endsWith('`') && token.length > 2) {
-      return (
-        <code
-          key={idx}
-          className="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800 font-mono text-[13px] text-slate-900 dark:text-slate-100"
-        >
-          {token.slice(1, -1)}
-        </code>
-      );
+export function renderInlineNodes(tokens: InlineToken[]): React.ReactNode[] {
+  return tokens.map((tok, idx) => {
+    switch (tok.type) {
+      case 'code':
+        return (
+          <code
+            key={idx}
+            className="px-1.5 py-0.5 rounded-md bg-slate-200/75 dark:bg-slate-800 font-mono text-[0.86em] text-slate-900 dark:text-slate-100"
+          >
+            {tok.text}
+          </code>
+        );
+      case 'bold':
+        return (
+          <strong key={idx} className="font-semibold text-slate-950 dark:text-white">
+            {tok.text}
+          </strong>
+        );
+      case 'italic':
+        return (
+          <em key={idx} className="italic">
+            {tok.text}
+          </em>
+        );
+      case 'strike':
+        return (
+          <del key={idx} className="line-through opacity-75">
+            {tok.text}
+          </del>
+        );
+      case 'math':
+        return (
+          <code
+            key={idx}
+            className="px-1.5 py-0.5 rounded-md bg-blue-500/10 text-blue-700 dark:text-blue-300 font-mono text-[0.9em]"
+          >
+            {tok.text}
+          </code>
+        );
+      case 'link':
+        return (
+          <a
+            key={idx}
+            href={tok.url}
+            target="_blank"
+            rel="noreferrer"
+            className="underline decoration-blue-500/60 underline-offset-2 text-blue-600 dark:text-blue-400 hover:opacity-80"
+          >
+            {tok.label}
+          </a>
+        );
+      default:
+        return <React.Fragment key={idx}>{tok.text}</React.Fragment>;
     }
-    if (token.startsWith('**') && token.endsWith('**') && token.length > 4) {
-      return (
-        <strong key={idx} className="font-semibold text-slate-950 dark:text-white">
-          {token.slice(2, -2)}
-        </strong>
-      );
-    }
-    if (
-      ((token.startsWith('*') && token.endsWith('*')) ||
-        (token.startsWith('_') && token.endsWith('_'))) &&
-      token.length > 2
-    ) {
-      return (
-        <em key={idx} className="italic">
-          {token.slice(1, -1)}
-        </em>
-      );
-    }
-    return <React.Fragment key={idx}>{token}</React.Fragment>;
   });
 }
 
-function renderTextBlocks(text: string, keyPrefix: string): React.ReactNode[] {
-  const lines = text.split('\n');
-  const nodes: React.ReactNode[] = [];
-  let i = 0;
-  let blockIdx = 0;
+function renderInline(text: string): React.ReactNode[] {
+  return renderInlineNodes(parseInlineTokens(text));
+}
 
-  while (i < lines.length) {
-    const line = lines[i];
-    const trimmed = line.trim();
-    if (!trimmed) {
-      i++;
-      continue;
-    }
+function renderBlock(
+  block: MarkdownBlock,
+  key: number,
+  onOpenInteractiveFlashcards?: () => void,
+  onOpenInteractiveQuiz?: () => void
+): React.ReactNode {
+  switch (block.type) {
+    case 'code':
+      return (
+        <CodeBlock
+          key={key}
+          language={block.language}
+          code={block.code}
+          onOpenInteractiveFlashcards={onOpenInteractiveFlashcards}
+          onOpenInteractiveQuiz={onOpenInteractiveQuiz}
+        />
+      );
 
-    // Headings (#, ##, ###) apply strictly to that single line
-    const headingMatch = /^(#{1,3})\s+(.+)$/.exec(trimmed);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
-      const title = headingMatch[2];
-      if (level === 1) {
-        nodes.push(
-          <h2 key={`${keyPrefix}-${blockIdx++}`} className="font-display text-lg font-bold text-slate-950 dark:text-white pt-1.5">
-            {renderInline(title)}
+    case 'heading': {
+      if (block.level === 1) {
+        return (
+          <h2
+            key={key}
+            className="font-display text-xl font-bold tracking-tight text-slate-950 dark:text-white pt-3 pb-1 border-b border-slate-200/70 dark:border-slate-800/80"
+          >
+            {renderInline(block.text)}
           </h2>
         );
-      } else if (level === 2) {
-        nodes.push(
-          <h3 key={`${keyPrefix}-${blockIdx++}`} className="font-display text-[16px] font-bold text-slate-900 dark:text-white pt-1.5">
-            {renderInline(title)}
+      }
+      if (block.level === 2) {
+        return (
+          <h3
+            key={key}
+            className="font-display text-[17px] font-bold tracking-tight text-slate-950 dark:text-white pt-3"
+          >
+            {renderInline(block.text)}
           </h3>
         );
-      } else {
-        nodes.push(
-          <h4 key={`${keyPrefix}-${blockIdx++}`} className="font-display text-[15px] font-semibold text-slate-900 dark:text-white pt-1">
-            {renderInline(title)}
-          </h4>
-        );
       }
-      i++;
-      continue;
-    }
-
-    // Blockquote lines (> ...)
-    if (/^\s*>/.test(line)) {
-      const quoteLines: string[] = [];
-      while (i < lines.length && /^\s*>/.test(lines[i])) {
-        quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
-        i++;
-      }
-      nodes.push(
-        <blockquote
-          key={`${keyPrefix}-${blockIdx++}`}
-          style={{
-            backgroundColor: 'var(--m3-surface-container-high)',
-            borderLeftColor: 'var(--m3-primary)',
-          }}
-          className="rounded-r-xl border-l-[3px] px-3 py-2 text-[14px] text-slate-700 dark:text-slate-200 whitespace-pre-wrap"
-        >
-          {renderInline(quoteLines.join('\n'))}
-        </blockquote>
+      return (
+        <h4 key={key} className="font-display text-[15px] font-semibold text-slate-900 dark:text-white pt-2">
+          {renderInline(block.text)}
+        </h4>
       );
-      continue;
     }
 
-    // Bullet lists (- or *)
-    if (/^\s*[-*]\s+/.test(line)) {
-      const listItems: string[] = [];
-      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        listItems.push(lines[i].replace(/^\s*[-*]\s+/, ''));
-        i++;
-      }
-      nodes.push(
-        <ul key={`${keyPrefix}-${blockIdx++}`} className="list-disc pl-5 space-y-1">
-          {listItems.map((item, li) => (
-            <li key={li}>{renderInline(item)}</li>
+    case 'hr':
+      return <hr key={key} className="my-3 border-slate-200 dark:border-slate-800" />;
+
+    case 'table':
+      return (
+        <div
+          key={key}
+          style={{ borderColor: 'var(--m3-outline)' }}
+          className="my-3 overflow-x-auto rounded-2xl border bg-white/70 dark:bg-slate-950/50"
+        >
+          <table className="w-full text-left border-collapse text-[13px] sm:text-[13.5px]">
+            <thead>
+              <tr
+                style={{
+                  backgroundColor: 'var(--m3-surface-container)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="border-b"
+              >
+                {block.headers.map((h, hi) => (
+                  <th
+                    key={hi}
+                    style={{ textAlign: block.alignments[hi] ?? 'left' }}
+                    className="px-3.5 py-2.5 font-semibold text-slate-900 dark:text-white whitespace-nowrap"
+                  >
+                    {renderInline(h)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/80 tabular-nums">
+              {block.rows.map((row, ri) => (
+                <tr key={ri} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/40 transition-colors">
+                  {row.map((cell, ci) => (
+                    <td
+                      key={ci}
+                      style={{ textAlign: block.alignments[ci] ?? 'left' }}
+                      className="px-3.5 py-2.5 text-slate-700 dark:text-slate-300 align-top leading-relaxed min-w-[110px]"
+                    >
+                      {renderInline(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+
+    case 'blockquote':
+      return (
+        <div
+          key={key}
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="my-2.5 rounded-2xl border px-4 py-3 text-[14px] leading-relaxed text-slate-700 dark:text-slate-200 flex items-start gap-2.5"
+        >
+          <Sparkles style={{ color: 'var(--m3-primary)' }} className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="min-w-0 space-y-1 whitespace-pre-wrap">
+            {renderInline(block.lines.join('\n'))}
+          </div>
+        </div>
+      );
+
+    case 'ul':
+      return (
+        <ul key={key} className="space-y-1.5 pl-1">
+          {block.items.map((item, li) => (
+            <li key={li} className="flex items-start gap-2.5 leading-relaxed">
+              {typeof item.checked === 'boolean' ? (
+                <span
+                  aria-label={item.checked ? 'Completed' : 'Pending'}
+                  className={`mt-1 w-4 h-4 rounded border flex items-center justify-center shrink-0 text-[10px] ${
+                    item.checked
+                      ? 'bg-emerald-600 border-emerald-600 text-white'
+                      : 'border-slate-300 dark:border-slate-700'
+                  }`}
+                >
+                  {item.checked && <Check className="w-3 h-3" />}
+                </span>
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="mt-2.5 w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500 shrink-0"
+                />
+              )}
+              <span className="min-w-0 flex-1">{renderInline(item.text)}</span>
+            </li>
           ))}
         </ul>
       );
-      continue;
-    }
 
-    // Numbered lists (1. )
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const listItems: string[] = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        listItems.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
-        i++;
-      }
-      nodes.push(
-        <ol key={`${keyPrefix}-${blockIdx++}`} className="list-decimal pl-5 space-y-1">
-          {listItems.map((item, li) => (
-            <li key={li}>{renderInline(item)}</li>
+    case 'ol':
+      return (
+        <ol key={key} className="list-decimal pl-5 space-y-1.5 marker:font-semibold marker:text-slate-500 dark:marker:text-slate-400">
+          {block.items.map((item, li) => (
+            <li key={li} className="pl-1 leading-relaxed">
+              {renderInline(item)}
+            </li>
           ))}
         </ol>
       );
-      continue;
-    }
 
-    // Regular paragraph lines until blank line or structural prefix
-    const paraLines: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== '' &&
-      !/^(#{1,3})\s+/.test(lines[i].trim()) &&
-      !/^\s*>/.test(lines[i]) &&
-      !/^\s*[-*]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i])
-    ) {
-      paraLines.push(lines[i]);
-      i++;
-    }
-    nodes.push(
-      <p key={`${keyPrefix}-${blockIdx++}`} className="whitespace-pre-wrap">
-        {renderInline(paraLines.join('\n'))}
-      </p>
-    );
+    case 'paragraph':
+      return (
+        <p key={key} className="leading-[1.68] whitespace-pre-wrap">
+          {renderInline(block.text)}
+        </p>
+      );
   }
-
-  return nodes;
 }
 
-export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+export function MarkdownRenderer({
+  content,
+  onOpenInteractiveFlashcards,
+  onOpenInteractiveQuiz,
+}: MarkdownRendererProps) {
+  const blocks = useMemo(() => parseMarkdownBlocks(content), [content]);
   if (!content) return null;
 
-  const segments: Array<{ type: 'text' | 'code'; content: string; lang?: string }> = [];
-  const fenceRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = fenceRegex.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: 'text', content: content.slice(lastIndex, match.index) });
-    }
-    segments.push({ type: 'code', lang: match[1] || 'text', content: match[2].replace(/\n$/, '') });
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < content.length) {
-    segments.push({ type: 'text', content: content.slice(lastIndex) });
-  }
-
   return (
-    <div className="space-y-2 text-[15px] leading-relaxed text-slate-800 dark:text-slate-200 break-words">
-      {segments.map((seg, i) => {
-        if (seg.type === 'code') {
-          return <CodeBlock key={i} language={seg.lang ?? 'text'} code={seg.content} />;
-        }
-        return renderTextBlocks(seg.content, `seg-${i}`);
-      })}
+    <div className="space-y-3 text-[15px] leading-[1.68] text-slate-800 dark:text-slate-200 break-words">
+      {blocks.map((block, i) =>
+        renderBlock(block, i, onOpenInteractiveFlashcards, onOpenInteractiveQuiz)
+      )}
     </div>
   );
 }

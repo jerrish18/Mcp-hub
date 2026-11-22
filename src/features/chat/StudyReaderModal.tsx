@@ -6,6 +6,8 @@ import {
   Clock,
   Copy,
   ExternalLink,
+  HelpCircle,
+  Layers,
   MessageSquarePlus,
   Moon,
   Sparkles,
@@ -16,6 +18,13 @@ import {
   X,
 } from 'lucide-react';
 import type { GroundingCitation } from '../../types';
+import {
+  extractOutlineHeadings,
+  parseInlineTokens,
+  parseMarkdownBlocks,
+  stripMarkdownForSpeech,
+  type MarkdownBlock,
+} from '../../utils/markdownParser';
 import { M3_EMPHASIZED_EASE } from '../../utils/motion';
 
 export type ReaderTheme = 'warm_paper' | 'daylight' | 'night_slate';
@@ -30,12 +39,8 @@ interface StudyReaderModalProps {
   citations?: GroundingCitation[];
   onClose: () => void;
   onAskFollowUp?: (excerpt?: string) => void;
-}
-
-interface OutlineHeading {
-  id: string;
-  level: number;
-  text: string;
+  onOpenFlashcards?: () => void;
+  onOpenQuiz?: () => void;
 }
 
 const THEME_STYLES: Record<
@@ -63,7 +68,7 @@ const THEME_STYLES: Record<
     muted: '#6F6353',
     heading: '#1B160F',
     calloutBg: '#F1E9D8',
-    calloutBorder: '#C79B52',
+    calloutBorder: '#B07D2B',
     codeBg: '#EFE7D6',
     chipBg: '#ECE3D1',
   },
@@ -95,48 +100,279 @@ const THEME_STYLES: Record<
   },
 };
 
-function slugifyHeading(text: string, index: number): string {
-  const base = text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
-  return `study-sec-${base || 'part'}-${index}`;
+function renderStudyInline(text: string, theme: (typeof THEME_STYLES)[ReaderTheme]): React.ReactNode[] {
+  const tokens = parseInlineTokens(text);
+  return tokens.map((tok, idx) => {
+    switch (tok.type) {
+      case 'code':
+        return (
+          <code
+            key={idx}
+            style={{ backgroundColor: theme.codeBg, color: theme.heading }}
+            className="px-1.5 py-0.5 rounded-md font-mono text-[0.87em]"
+          >
+            {tok.text}
+          </code>
+        );
+      case 'bold':
+        return (
+          <strong key={idx} style={{ color: theme.heading }} className="font-semibold">
+            {tok.text}
+          </strong>
+        );
+      case 'italic':
+        return (
+          <em key={idx} className="italic">
+            {tok.text}
+          </em>
+        );
+      case 'strike':
+        return (
+          <del key={idx} className="line-through opacity-75">
+            {tok.text}
+          </del>
+        );
+      case 'math':
+        return (
+          <code
+            key={idx}
+            style={{ backgroundColor: theme.calloutBg, color: theme.calloutBorder }}
+            className="px-1.5 py-0.5 rounded-md font-mono text-[0.9em]"
+          >
+            {tok.text}
+          </code>
+        );
+      case 'link':
+        return (
+          <a
+            key={idx}
+            href={tok.url}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: theme.calloutBorder }}
+            className="underline underline-offset-2 hover:opacity-80"
+          >
+            {tok.label}
+          </a>
+        );
+      default:
+        return <React.Fragment key={idx}>{tok.text}</React.Fragment>;
+    }
+  });
 }
 
-function renderStudyInline(text: string, theme: (typeof THEME_STYLES)[ReaderTheme]): React.ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_)/g);
-  return tokens.map((token, idx) => {
-    if (token.startsWith('`') && token.endsWith('`') && token.length > 2) {
+function renderStudyBlock(
+  block: MarkdownBlock,
+  key: number,
+  theme: (typeof THEME_STYLES)[ReaderTheme],
+  onOpenFlashcards?: () => void,
+  onOpenQuiz?: () => void
+): React.ReactNode {
+  switch (block.type) {
+    case 'code': {
+      const lang = block.language.toLowerCase();
+      if (lang === 'study-flashcards' && onOpenFlashcards) {
+        return (
+          <div
+            key={key}
+            style={{ backgroundColor: theme.calloutBg, borderColor: theme.border }}
+            className="my-4 rounded-2xl border p-4 flex items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Layers style={{ color: theme.calloutBorder }} className="w-5 h-5 shrink-0" />
+              <span style={{ color: theme.heading }} className="text-sm font-semibold">
+                Flashcards Deck Ready
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenFlashcards();
+              }}
+              style={{ backgroundColor: theme.heading, color: theme.surface }}
+              className="min-h-[38px] px-4 rounded-full text-xs font-semibold shrink-0"
+            >
+              Open Flashcards
+            </button>
+          </div>
+        );
+      }
+      if (lang === 'study-quiz' && onOpenQuiz) {
+        return (
+          <div
+            key={key}
+            style={{ backgroundColor: theme.calloutBg, borderColor: theme.border }}
+            className="my-4 rounded-2xl border p-4 flex items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <HelpCircle style={{ color: theme.calloutBorder }} className="w-5 h-5 shrink-0" />
+              <span style={{ color: theme.heading }} className="text-sm font-semibold">
+                Practice Quiz Ready
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenQuiz();
+              }}
+              style={{ backgroundColor: theme.heading, color: theme.surface }}
+              className="min-h-[38px] px-4 rounded-full text-xs font-semibold shrink-0"
+            >
+              Start Quiz
+            </button>
+          </div>
+        );
+      }
+
       return (
-        <code
-          key={idx}
-          style={{ backgroundColor: theme.codeBg, color: theme.heading }}
-          className="px-1.5 py-0.5 rounded-md font-mono text-[0.88em]"
+        <div
+          key={key}
+          style={{ backgroundColor: theme.codeBg, borderColor: theme.border }}
+          className="my-4 rounded-2xl border overflow-hidden"
         >
-          {token.slice(1, -1)}
-        </code>
+          <div
+            style={{ borderColor: theme.border, color: theme.muted }}
+            className="px-4 py-1.5 border-b text-xs font-mono"
+          >
+            {block.language || 'code'}
+          </div>
+          <pre
+            style={{ color: theme.heading }}
+            className="p-4 overflow-x-auto text-[14px] leading-relaxed font-mono"
+          >
+            <code>{block.code}</code>
+          </pre>
+        </div>
       );
     }
-    if (token.startsWith('**') && token.endsWith('**') && token.length > 4) {
+
+    case 'heading':
+      if (block.level === 1) {
+        return (
+          <h1
+            key={key}
+            id={block.id}
+            style={{ color: theme.heading, borderColor: theme.border }}
+            className="font-display text-2xl sm:text-[28px] font-bold pt-2 pb-2 border-b scroll-mt-4"
+          >
+            {renderStudyInline(block.text, theme)}
+          </h1>
+        );
+      }
+      if (block.level === 2) {
+        return (
+          <h2
+            key={key}
+            id={block.id}
+            style={{ color: theme.heading }}
+            className="font-display text-xl sm:text-[22px] font-bold pt-3 scroll-mt-4"
+          >
+            {renderStudyInline(block.text, theme)}
+          </h2>
+        );
+      }
       return (
-        <strong key={idx} style={{ color: theme.heading }} className="font-semibold">
-          {token.slice(2, -2)}
-        </strong>
+        <h3
+          key={key}
+          id={block.id}
+          style={{ color: theme.heading }}
+          className="font-display text-lg font-semibold pt-2 scroll-mt-4"
+        >
+          {renderStudyInline(block.text, theme)}
+        </h3>
       );
-    }
-    if (
-      ((token.startsWith('*') && token.endsWith('*')) ||
-        (token.startsWith('_') && token.endsWith('_'))) &&
-      token.length > 2
-    ) {
+
+    case 'hr':
+      return <hr key={key} style={{ borderColor: theme.border }} className="my-4" />;
+
+    case 'table':
       return (
-        <em key={idx} className="italic">
-          {token.slice(1, -1)}
-        </em>
+        <div
+          key={key}
+          style={{ borderColor: theme.border, backgroundColor: theme.bg }}
+          className="my-4 overflow-x-auto rounded-2xl border"
+        >
+          <table className="w-full text-left border-collapse text-[0.86em]">
+            <thead>
+              <tr style={{ backgroundColor: theme.calloutBg, borderColor: theme.border }} className="border-b">
+                {block.headers.map((h, hi) => (
+                  <th
+                    key={hi}
+                    style={{ color: theme.heading, textAlign: block.alignments[hi] ?? 'left' }}
+                    className="px-4 py-2.5 font-semibold whitespace-nowrap"
+                  >
+                    {renderStudyInline(h, theme)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="tabular-nums">
+              {block.rows.map((row, ri) => (
+                <tr key={ri} style={{ borderColor: theme.border }} className="border-t">
+                  {row.map((cell, ci) => (
+                    <td
+                      key={ci}
+                      style={{ color: theme.text, textAlign: block.alignments[ci] ?? 'left' }}
+                      className="px-4 py-2.5 align-top leading-relaxed min-w-[120px]"
+                    >
+                      {renderStudyInline(cell, theme)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       );
-    }
-    return <React.Fragment key={idx}>{token}</React.Fragment>;
-  });
+
+    case 'blockquote':
+      return (
+        <div
+          key={key}
+          style={{
+            backgroundColor: theme.calloutBg,
+            borderColor: theme.border,
+            color: theme.heading,
+          }}
+          className="my-3 rounded-2xl border px-4 py-3 text-[0.95em] flex items-start gap-2.5"
+        >
+          <Sparkles style={{ color: theme.calloutBorder }} className="w-4 h-4 shrink-0 mt-1" />
+          <div className="min-w-0 whitespace-pre-wrap">{renderStudyInline(block.lines.join('\n'), theme)}</div>
+        </div>
+      );
+
+    case 'ul':
+      return (
+        <ul key={key} className="space-y-2 pl-1">
+          {block.items.map((item, li) => (
+            <li key={li} className="flex items-start gap-2.5">
+              <span
+                aria-hidden="true"
+                style={{ backgroundColor: theme.calloutBorder }}
+                className="mt-2.5 w-1.5 h-1.5 rounded-full shrink-0"
+              />
+              <span className="min-w-0 flex-1">{renderStudyInline(item.text, theme)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+
+    case 'ol':
+      return (
+        <ol key={key} className="list-decimal pl-6 space-y-2">
+          {block.items.map((item, li) => (
+            <li key={li}>{renderStudyInline(item, theme)}</li>
+          ))}
+        </ol>
+      );
+
+    case 'paragraph':
+      return (
+        <p key={key} className="whitespace-pre-wrap">
+          {renderStudyInline(block.text, theme)}
+        </p>
+      );
+  }
 }
 
 export function StudyReaderModal({
@@ -147,6 +383,8 @@ export function StudyReaderModal({
   citations,
   onClose,
   onAskFollowUp,
+  onOpenFlashcards,
+  onOpenQuiz,
 }: StudyReaderModalProps) {
   const [themeKey, setThemeKey] = useState<ReaderTheme>('warm_paper');
   const [fontSize, setFontSize] = useState<ReaderFontSize>('comfortable');
@@ -163,41 +401,10 @@ export function StudyReaderModal({
     return { words, minutes };
   }, [content]);
 
-  const { segments, headings } = useMemo(() => {
-    const segs: Array<{ type: 'text' | 'code'; content: string; lang?: string }> = [];
-    const fenceRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = fenceRegex.exec(content)) !== null) {
-      if (match.index > lastIndex) {
-        segs.push({ type: 'text', content: content.slice(lastIndex, match.index) });
-      }
-      segs.push({ type: 'code', lang: match[1] || 'text', content: match[2].replace(/\n$/, '') });
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < content.length) {
-      segs.push({ type: 'text', content: content.slice(lastIndex) });
-    }
-
-    const foundHeadings: OutlineHeading[] = [];
-    let hCounter = 0;
-    for (const seg of segs) {
-      if (seg.type !== 'text') continue;
-      for (const line of seg.content.split('\n')) {
-        const m = /^(#{1,3})\s+(.+)$/.exec(line.trim());
-        if (m) {
-          const clean = m[2].replace(/\*\*/g, '').replace(/`/g, '').trim();
-          foundHeadings.push({
-            id: slugifyHeading(clean, hCounter++),
-            level: m[1].length,
-            text: clean,
-          });
-        }
-      }
-    }
-
-    return { segments: segs, headings: foundHeadings };
+  const { blocks, headings } = useMemo(() => {
+    const parsed = parseMarkdownBlocks(content);
+    const foundHeadings = extractOutlineHeadings(parsed);
+    return { blocks: parsed, headings: foundHeadings };
   }, [content]);
 
   useEffect(() => {
@@ -247,7 +454,7 @@ export function StudyReaderModal({
       return;
     }
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(content.replace(/[#*`>]/g, ''));
+    const utterance = new SpeechSynthesisUtterance(stripMarkdownForSpeech(content));
     utterance.onend = () => setSpeaking(false);
     utterance.onerror = () => setSpeaking(false);
     setSpeaking(true);
@@ -260,8 +467,6 @@ export function StudyReaderModal({
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
-
-  let headingRenderIdx = 0;
 
   return (
     <motion.div
@@ -292,7 +497,7 @@ export function StudyReaderModal({
             <div style={{ color: theme.heading }} className="font-display text-sm font-bold truncate">
               {title || 'Study Reader'}
             </div>
-            <div style={{ color: theme.muted }} className="text-[11px] flex items-center gap-2 truncate">
+            <div style={{ color: theme.muted }} className="text-[11px] flex items-center gap-2 truncate tabular-nums">
               <span className="inline-flex items-center gap-1">
                 <Clock className="w-3 h-3" />
                 {stats.minutes} min read · {stats.words} words
@@ -304,7 +509,6 @@ export function StudyReaderModal({
 
         {/* Reading Comfort Controls */}
         <div className="flex items-center gap-1.5 flex-wrap">
-          {/* Paper / Daylight / Night Switcher */}
           <div
             style={{ backgroundColor: theme.chipBg, borderColor: theme.border }}
             className="flex items-center gap-0.5 p-0.5 rounded-full border"
@@ -340,7 +544,6 @@ export function StudyReaderModal({
             })}
           </div>
 
-          {/* Font Size Cycle */}
           <button
             type="button"
             onClick={() => {
@@ -355,7 +558,6 @@ export function StudyReaderModal({
             <span className="capitalize hidden md:inline">{fontSize}</span>
           </button>
 
-          {/* Sans / Serif Toggle */}
           <button
             type="button"
             onClick={() => setFontFamily((f) => (f === 'sans' ? 'serif' : 'sans'))}
@@ -366,7 +568,6 @@ export function StudyReaderModal({
             {fontFamily === 'serif' ? 'Serif' : 'Sans'}
           </button>
 
-          {/* Listen TTS */}
           <button
             type="button"
             onClick={handleToggleListen}
@@ -378,7 +579,6 @@ export function StudyReaderModal({
             <span className="hidden md:inline">{speaking ? 'Stop' : 'Listen'}</span>
           </button>
 
-          {/* Copy Notes */}
           <button
             type="button"
             onClick={() => void handleCopy()}
@@ -435,173 +635,14 @@ export function StudyReaderModal({
             borderColor: theme.border,
             ...fontFamilyStyle,
           }}
-          className="max-w-[72ch] mx-auto rounded-[28px] border px-5 sm:px-10 py-7 sm:py-10 shadow-sm space-y-5"
+          className="max-w-[74ch] mx-auto rounded-[28px] border px-5 sm:px-10 py-7 sm:py-10 shadow-sm space-y-5"
         >
           <div className={`space-y-4 ${fontSizeClass}`}>
-            {segments.map((seg, i) => {
-              if (seg.type === 'code') {
-                return (
-                  <div
-                    key={i}
-                    style={{ backgroundColor: theme.codeBg, borderColor: theme.border }}
-                    className="my-4 rounded-2xl border overflow-hidden"
-                  >
-                    <div
-                      style={{ borderColor: theme.border, color: theme.muted }}
-                      className="px-4 py-1.5 border-b text-xs font-mono"
-                    >
-                      {seg.lang || 'code'}
-                    </div>
-                    <pre
-                      style={{ color: theme.heading }}
-                      className="p-4 overflow-x-auto text-[14px] leading-relaxed font-mono"
-                    >
-                      <code>{seg.content}</code>
-                    </pre>
-                  </div>
-                );
-              }
-
-              const lines = seg.content.split('\n');
-              const nodes: React.ReactNode[] = [];
-              let idx = 0;
-              let bIdx = 0;
-
-              while (idx < lines.length) {
-                const line = lines[idx];
-                const trimmed = line.trim();
-                if (!trimmed) {
-                  idx++;
-                  continue;
-                }
-
-                const headingMatch = /^(#{1,3})\s+(.+)$/.exec(trimmed);
-                if (headingMatch) {
-                  const level = headingMatch[1].length;
-                  const cleanText = headingMatch[2].replace(/\*\*/g, '').replace(/`/g, '').trim();
-                  const assignedId = headings[headingRenderIdx]?.id ?? slugifyHeading(cleanText, headingRenderIdx);
-                  headingRenderIdx++;
-
-                  if (level === 1) {
-                    nodes.push(
-                      <h1
-                        key={`${i}-${bIdx++}`}
-                        id={assignedId}
-                        style={{ color: theme.heading, borderColor: theme.border }}
-                        className="font-display text-2xl sm:text-[28px] font-bold pt-2 pb-2 border-b scroll-mt-4"
-                      >
-                        {renderStudyInline(headingMatch[2], theme)}
-                      </h1>
-                    );
-                  } else if (level === 2) {
-                    nodes.push(
-                      <h2
-                        key={`${i}-${bIdx++}`}
-                        id={assignedId}
-                        style={{ color: theme.heading }}
-                        className="font-display text-xl sm:text-[22px] font-bold pt-3 flex items-center gap-2 scroll-mt-4"
-                      >
-                        <span
-                          style={{ backgroundColor: theme.calloutBorder }}
-                          className="w-1.5 h-5 rounded-full shrink-0"
-                        />
-                        <span>{renderStudyInline(headingMatch[2], theme)}</span>
-                      </h2>
-                    );
-                  } else {
-                    nodes.push(
-                      <h3
-                        key={`${i}-${bIdx++}`}
-                        id={assignedId}
-                        style={{ color: theme.heading }}
-                        className="font-display text-lg font-semibold pt-2 scroll-mt-4"
-                      >
-                        {renderStudyInline(headingMatch[2], theme)}
-                      </h3>
-                    );
-                  }
-                  idx++;
-                  continue;
-                }
-
-                if (/^\s*>/.test(line)) {
-                  const quoteLines: string[] = [];
-                  while (idx < lines.length && /^\s*>/.test(lines[idx])) {
-                    quoteLines.push(lines[idx].replace(/^\s*>\s?/, ''));
-                    idx++;
-                  }
-                  nodes.push(
-                    <blockquote
-                      key={`${i}-${bIdx++}`}
-                      style={{
-                        backgroundColor: theme.calloutBg,
-                        borderLeftColor: theme.calloutBorder,
-                        color: theme.heading,
-                      }}
-                      className="my-3 rounded-r-2xl border-l-4 px-4 py-3 text-[0.96em] whitespace-pre-wrap"
-                    >
-                      {renderStudyInline(quoteLines.join('\n'), theme)}
-                    </blockquote>
-                  );
-                  continue;
-                }
-
-                if (/^\s*[-*]\s+/.test(line)) {
-                  const listItems: string[] = [];
-                  while (idx < lines.length && /^\s*[-*]\s+/.test(lines[idx])) {
-                    listItems.push(lines[idx].replace(/^\s*[-*]\s+/, ''));
-                    idx++;
-                  }
-                  nodes.push(
-                    <ul key={`${i}-${bIdx++}`} className="list-disc pl-6 space-y-2">
-                      {listItems.map((item, li) => (
-                        <li key={li}>{renderStudyInline(item, theme)}</li>
-                      ))}
-                    </ul>
-                  );
-                  continue;
-                }
-
-                if (/^\s*\d+\.\s+/.test(line)) {
-                  const listItems: string[] = [];
-                  while (idx < lines.length && /^\s*\d+\.\s+/.test(lines[idx])) {
-                    listItems.push(lines[idx].replace(/^\s*\d+\.\s+/, ''));
-                    idx++;
-                  }
-                  nodes.push(
-                    <ol key={`${i}-${bIdx++}`} className="list-decimal pl-6 space-y-2">
-                      {listItems.map((item, li) => (
-                        <li key={li}>{renderStudyInline(item, theme)}</li>
-                      ))}
-                    </ol>
-                  );
-                  continue;
-                }
-
-                const paraLines: string[] = [];
-                while (
-                  idx < lines.length &&
-                  lines[idx].trim() !== '' &&
-                  !/^(#{1,3})\s+/.test(lines[idx].trim()) &&
-                  !/^\s*>/.test(lines[idx]) &&
-                  !/^\s*[-*]\s+/.test(lines[idx]) &&
-                  !/^\s*\d+\.\s+/.test(lines[idx])
-                ) {
-                  paraLines.push(lines[idx]);
-                  idx++;
-                }
-                nodes.push(
-                  <p key={`${i}-${bIdx++}`} className="whitespace-pre-wrap">
-                    {renderStudyInline(paraLines.join('\n'), theme)}
-                  </p>
-                );
-              }
-
-              return nodes;
-            })}
+            {blocks.map((block, i) =>
+              renderStudyBlock(block, i, theme, onOpenFlashcards, onOpenQuiz)
+            )}
           </div>
 
-          {/* Grounded Web Citations */}
           {citations && citations.length > 0 && (
             <div style={{ borderColor: theme.border }} className="pt-5 border-t space-y-2.5">
               <div style={{ color: theme.muted }} className="text-xs font-semibold uppercase tracking-wide">
@@ -632,13 +673,45 @@ export function StudyReaderModal({
           {/* Bottom Learning Actions */}
           <div
             style={{ borderColor: theme.border }}
-            className="pt-5 border-t flex flex-wrap items-center justify-between gap-3"
+            className="pt-5 border-t flex flex-wrap items-center justify-between gap-2.5"
           >
-            <div style={{ color: theme.muted }} className="text-xs inline-flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Focused Study Reader · Distraction-free mode</span>
-            </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {onOpenFlashcards && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenFlashcards();
+                  }}
+                  style={{
+                    backgroundColor: theme.chipBg,
+                    color: theme.heading,
+                    borderColor: theme.border,
+                  }}
+                  className="min-h-[40px] px-3.5 rounded-full border text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Flashcards</span>
+                </button>
+              )}
+              {onOpenQuiz && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenQuiz();
+                  }}
+                  style={{
+                    backgroundColor: theme.chipBg,
+                    color: theme.heading,
+                    borderColor: theme.border,
+                  }}
+                  className="min-h-[40px] px-3.5 rounded-full border text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  <span>Quiz Me</span>
+                </button>
+              )}
               {onAskFollowUp && (
                 <button
                   type="button"
@@ -651,24 +724,25 @@ export function StudyReaderModal({
                     color: theme.calloutBorder,
                     borderColor: theme.border,
                   }}
-                  className="min-h-[40px] px-4 rounded-full border text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90"
+                  className="min-h-[40px] px-3.5 rounded-full border text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90"
                 >
                   <MessageSquarePlus className="w-3.5 h-3.5" />
-                  <span>Ask a follow-up</span>
+                  <span>Ask follow-up</span>
                 </button>
               )}
-              <button
-                type="button"
-                onClick={onClose}
-                style={{
-                  backgroundColor: theme.heading,
-                  color: theme.surface,
-                }}
-                className="min-h-[40px] px-4 rounded-full text-xs font-semibold hover:opacity-90"
-              >
-                Done Reading
-              </button>
             </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                backgroundColor: theme.heading,
+                color: theme.surface,
+              }}
+              className="min-h-[40px] px-5 rounded-full text-xs font-semibold hover:opacity-90"
+            >
+              Done Reading
+            </button>
           </div>
         </article>
       </div>
