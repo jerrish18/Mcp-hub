@@ -1,4 +1,11 @@
-import type { EffortLevel, ModelConfig } from '../../types';
+import type {
+  ChatAttachment,
+  ChatMode,
+  EffortLevel,
+  GroundingCitation,
+  KnowledgeSourceMode,
+  ModelConfig,
+} from '../../types';
 
 export interface LlmToolDefinition {
   qualifiedName: string; // e.g. `srv_1__workspace_search_notes`
@@ -20,7 +27,7 @@ export interface LlmToolCall {
 }
 
 export type LlmConversationItem =
-  | { role: 'user'; text: string }
+  | { role: 'user'; text: string; attachments?: ChatAttachment[] }
   | {
       role: 'assistant';
       text: string;
@@ -38,6 +45,7 @@ export type LlmStreamEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'reasoning_delta'; delta: string }
   | { type: 'tool_calls'; calls: LlmToolCall[] }
+  | { type: 'citations'; citations: GroundingCitation[] }
   | { type: 'done' };
 
 export interface StreamCompletionRequest {
@@ -45,6 +53,8 @@ export interface StreamCompletionRequest {
   apiKey: string;
   systemPrompt: string;
   effort: EffortLevel;
+  chatMode?: ChatMode;
+  knowledgeSource?: KnowledgeSourceMode;
   messages: LlmConversationItem[];
   tools: LlmToolDefinition[];
   signal?: AbortSignal;

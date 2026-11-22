@@ -17,6 +17,28 @@ export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'demo']);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
+export const ChatModeSchema = z.enum(['general', 'professional', 'study']);
+export type ChatMode = z.infer<typeof ChatModeSchema>;
+
+export const KnowledgeSourceModeSchema = z.enum(['auto', 'uploaded', 'web', 'general']);
+export type KnowledgeSourceMode = z.infer<typeof KnowledgeSourceModeSchema>;
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: 'image' | 'file';
+  size: number;
+  dataBase64?: string;
+  textContent?: string;
+  previewUrl?: string;
+}
+
+export interface GroundingCitation {
+  title: string;
+  url: string;
+}
+
 export interface ModelConfig {
   id: string;
   provider: ProviderId;
@@ -142,6 +164,8 @@ export const AgentProfileSchema = z.object({
   systemPrompt: z.string().min(1, 'System prompt is required'),
   defaultModelId: z.string().min(1),
   defaultEffort: EffortLevelSchema.default('medium'),
+  defaultChatMode: ChatModeSchema.default('professional'),
+  studyInstructions: z.string().max(4000).default(''),
   allowedServerIds: z.array(z.string()).nullable(), // null = all connected servers
   allowedToolNames: z.array(z.string()).nullable(), // null = all enabled tools on allowed servers
   isBuiltIn: z.boolean().default(false),
@@ -179,6 +203,10 @@ export interface ChatMessage {
   content: string;
   reasoning?: string;
   toolCalls?: ToolCallRecord[];
+  attachments?: ChatAttachment[];
+  citations?: GroundingCitation[];
+  chatMode?: ChatMode;
+  knowledgeSource?: KnowledgeSourceMode;
   modelId?: string;
   agentId?: string;
   effort?: EffortLevel;
@@ -193,6 +221,9 @@ export interface Conversation {
   agentId: string;
   modelId: string;
   effort: EffortLevel;
+  chatMode: ChatMode;
+  knowledgeSource: KnowledgeSourceMode;
+  studyInstructions: string;
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;

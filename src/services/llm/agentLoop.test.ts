@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAgentToolCatalog, runAgentLoop } from './agentLoop';
+import { buildAgentToolCatalog, composeEffectiveSystemPrompt, runAgentLoop } from './agentLoop';
 import { syncLiveProviderModels } from './provider';
 import { extractReadableApiError } from './types';
 import type { AgentProfile, McpServerConfig, ProviderKeys } from '../../types';
@@ -13,6 +13,8 @@ const baseAgent: AgentProfile = {
   systemPrompt: 'You are a test agent.',
   defaultModelId: 'openai/gpt-oss-120b',
   defaultEffort: 'medium',
+  defaultChatMode: 'professional',
+  studyInstructions: '',
   allowedServerIds: null,
   allowedToolNames: null,
   isBuiltIn: false,
@@ -448,3 +450,60 @@ test('agentLoop unblocks pending write approval immediately on AbortSignal and t
   assert.equal(fallbackTriggered, true);
   assert.equal(sseRes.finalText, 'Recovered after SSE error!');
 });
+
+test('study and general chatModes strip all MCP tools and enforce custom study instructions & knowledge source', async () => {
+  const capturedBodies: Array<{ tools?: unknown[]; messages?: Array<{ role: string; content: string }> }> = [];
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as {
+      tools?: unknown[];
+      messages?: Array<{ role: string; content: string }>;
+    };
+    capturedBodies.push(body);
+    return makeOpenAiSseResponse([{ choices: [{ delta: { content: 'Structured study response.' } }] }]);
+  }) as typeof fetch;
+
+  // Study mode with connected virtualServer must send ZERO tools and embed study instructions
+  const studyRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'openai/gpt-oss-120b',
+    effort: 'medium',
+    chatMode: 'study',
+    studyInstructions: '1. Overview\n2. Flashcards',
+    knowledgeSource: 'uploaded',
+    keys: { groq: 'gsk_test_123456' },
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Teach me recursion' }],
+    maxSteps: 5,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    fetchFn: mockFetch,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: async () => 'approve',
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.equal(studyRes.toolCalls.length, 0);
+  assert.equal(studyRes.finalText, 'Structured study response.');
+  assert.equal(capturedBodies[0].tools, undefined);
+  const sysMsg = capturedBodies[0].messages?.find((m) => m.role === 'system')?.content ?? '';
+  assert.ok(sysMsg.includes('1. Overview\n2. Flashcards'));
+  assert.ok(sysMsg.includes('UPLOADED FILES & IMAGES ONLY'));
+
+  // General mode also suppresses MCP tools
+  const generalPrompt = composeEffectiveSystemPrompt({
+    basePrompt: 'Base prompt',
+    chatMode: 'general',
+    knowledgeSource: 'web',
+  });
+  assert.ok(generalPrompt.includes('GENERAL CHAT MODE — MCP TOOLS DISABLED'));
+  assert.ok(generalPrompt.includes('KNOWLEDGE SOURCE: WEB SEARCH'));
+});
+

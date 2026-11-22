@@ -40,7 +40,7 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
 }
 
 function renderInline(text: string): React.ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|_[^_]+_)/g);
+  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_)/g);
   return tokens.map((token, idx) => {
     if (token.startsWith('`') && token.endsWith('`') && token.length > 2) {
       return (
@@ -59,7 +59,11 @@ function renderInline(text: string): React.ReactNode[] {
         </strong>
       );
     }
-    if (token.startsWith('_') && token.endsWith('_') && token.length > 2) {
+    if (
+      ((token.startsWith('*') && token.endsWith('*')) ||
+        (token.startsWith('_') && token.endsWith('_'))) &&
+      token.length > 2
+    ) {
       return (
         <em key={idx} className="italic">
           {token.slice(1, -1)}
@@ -68,6 +72,127 @@ function renderInline(text: string): React.ReactNode[] {
     }
     return <React.Fragment key={idx}>{token}</React.Fragment>;
   });
+}
+
+function renderTextBlocks(text: string, keyPrefix: string): React.ReactNode[] {
+  const lines = text.split('\n');
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+  let blockIdx = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+
+    // Headings (#, ##, ###) apply strictly to that single line
+    const headingMatch = /^(#{1,3})\s+(.+)$/.exec(trimmed);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const title = headingMatch[2];
+      if (level === 1) {
+        nodes.push(
+          <h2 key={`${keyPrefix}-${blockIdx++}`} className="font-display text-lg font-bold text-slate-950 dark:text-white pt-1.5">
+            {renderInline(title)}
+          </h2>
+        );
+      } else if (level === 2) {
+        nodes.push(
+          <h3 key={`${keyPrefix}-${blockIdx++}`} className="font-display text-[16px] font-bold text-slate-900 dark:text-white pt-1.5">
+            {renderInline(title)}
+          </h3>
+        );
+      } else {
+        nodes.push(
+          <h4 key={`${keyPrefix}-${blockIdx++}`} className="font-display text-[15px] font-semibold text-slate-900 dark:text-white pt-1">
+            {renderInline(title)}
+          </h4>
+        );
+      }
+      i++;
+      continue;
+    }
+
+    // Blockquote lines (> ...)
+    if (/^\s*>/.test(line)) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
+        i++;
+      }
+      nodes.push(
+        <blockquote
+          key={`${keyPrefix}-${blockIdx++}`}
+          style={{
+            backgroundColor: 'var(--m3-surface-container-high)',
+            borderLeftColor: 'var(--m3-primary)',
+          }}
+          className="rounded-r-xl border-l-[3px] px-3 py-2 text-[14px] text-slate-700 dark:text-slate-200 whitespace-pre-wrap"
+        >
+          {renderInline(quoteLines.join('\n'))}
+        </blockquote>
+      );
+      continue;
+    }
+
+    // Bullet lists (- or *)
+    if (/^\s*[-*]\s+/.test(line)) {
+      const listItems: string[] = [];
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        listItems.push(lines[i].replace(/^\s*[-*]\s+/, ''));
+        i++;
+      }
+      nodes.push(
+        <ul key={`${keyPrefix}-${blockIdx++}`} className="list-disc pl-5 space-y-1">
+          {listItems.map((item, li) => (
+            <li key={li}>{renderInline(item)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // Numbered lists (1. )
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const listItems: string[] = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        listItems.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
+        i++;
+      }
+      nodes.push(
+        <ol key={`${keyPrefix}-${blockIdx++}`} className="list-decimal pl-5 space-y-1">
+          {listItems.map((item, li) => (
+            <li key={li}>{renderInline(item)}</li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    // Regular paragraph lines until blank line or structural prefix
+    const paraLines: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !/^(#{1,3})\s+/.test(lines[i].trim()) &&
+      !/^\s*>/.test(lines[i]) &&
+      !/^\s*[-*]\s+/.test(lines[i]) &&
+      !/^\s*\d+\.\s+/.test(lines[i])
+    ) {
+      paraLines.push(lines[i]);
+      i++;
+    }
+    nodes.push(
+      <p key={`${keyPrefix}-${blockIdx++}`} className="whitespace-pre-wrap">
+        {renderInline(paraLines.join('\n'))}
+      </p>
+    );
+  }
+
+  return nodes;
 }
 
 export function MarkdownRenderer({ content }: MarkdownRendererProps) {
@@ -95,48 +220,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
         if (seg.type === 'code') {
           return <CodeBlock key={i} language={seg.lang ?? 'text'} code={seg.content} />;
         }
-
-        const blocks = seg.content.split(/\n{2,}/).filter((b) => b.trim().length > 0);
-        return blocks.map((block, bIdx) => {
-          const lines = block.split('\n');
-          if (lines.every((l) => /^\s*[-*]\s+/.test(l))) {
-            return (
-              <ul key={`${i}-${bIdx}`} className="list-disc pl-5 space-y-1">
-                {lines.map((l, li) => (
-                  <li key={li}>{renderInline(l.replace(/^\s*[-*]\s+/, ''))}</li>
-                ))}
-              </ul>
-            );
-          }
-          if (lines.every((l) => /^\s*\d+\.\s+/.test(l))) {
-            return (
-              <ol key={`${i}-${bIdx}`} className="list-decimal pl-5 space-y-1">
-                {lines.map((l, li) => (
-                  <li key={li}>{renderInline(l.replace(/^\s*\d+\.\s+/, ''))}</li>
-                ))}
-              </ol>
-            );
-          }
-          if (block.startsWith('### ')) {
-            return (
-              <h4 key={`${i}-${bIdx}`} className="font-display text-base font-semibold text-slate-900 dark:text-white pt-1">
-                {renderInline(block.slice(4))}
-              </h4>
-            );
-          }
-          if (block.startsWith('## ')) {
-            return (
-              <h3 key={`${i}-${bIdx}`} className="font-display text-lg font-semibold text-slate-900 dark:text-white pt-1">
-                {renderInline(block.slice(3))}
-              </h3>
-            );
-          }
-          return (
-            <p key={`${i}-${bIdx}`} className="whitespace-pre-wrap">
-              {renderInline(block)}
-            </p>
-          );
-        });
+        return renderTextBlocks(seg.content, `seg-${i}`);
       })}
     </div>
   );

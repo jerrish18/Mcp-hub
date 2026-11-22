@@ -118,8 +118,17 @@ export function AgentModelSwitcherSheet({
                       <Sparkles className="w-4 h-4" />
                     </span>
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                        {agent.name}
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                          {agent.name}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded-md bg-slate-200/70 dark:bg-slate-800 text-[10px] font-semibold uppercase text-slate-600 dark:text-slate-300 shrink-0">
+                          {agent.defaultChatMode === 'study'
+                            ? 'Study'
+                            : agent.defaultChatMode === 'general'
+                              ? 'General'
+                              : 'MCP Pro'}
+                        </span>
                       </div>
                       <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
                         {agent.description || 'Custom agent'}

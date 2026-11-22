@@ -1,6 +1,9 @@
 import type {
   AgentProfile,
+  ChatMode,
   EffortLevel,
+  GroundingCitation,
+  KnowledgeSourceMode,
   McpServerConfig,
   ModelConfig,
   PendingApproval,
@@ -57,10 +60,57 @@ export function buildAgentToolCatalog(
   return { tools, lookup };
 }
 
+export function composeEffectiveSystemPrompt(params: {
+  basePrompt: string;
+  chatMode: ChatMode;
+  studyInstructions?: string;
+  knowledgeSource?: KnowledgeSourceMode;
+}): string {
+  const parts: string[] = [params.basePrompt.trim()];
+
+  if (params.chatMode === 'study') {
+    const customStructure = params.studyInstructions?.trim();
+    parts.push(
+      '[STUDY SESSION MODE — MCP TOOLS DISABLED]\n' +
+        'You are helping the user learn and understand deeply. Do NOT attempt to invoke MCP servers.\n' +
+        (customStructure
+          ? `[STUDY SESSION INSTRUCTIONS — STRICTLY FOLLOW THIS RESPONSE STRUCTURE]\nYou MUST organize and format your entire response strictly according to these user instructions:\n${customStructure}`
+          : 'Format your explanation cleanly with Markdown headings, key-takeaway callouts (> quote blocks), clear examples, and scannable bullet points so it reads like a polished study guide.')
+    );
+  } else if (params.chatMode === 'general') {
+    parts.push(
+      '[GENERAL CHAT MODE — MCP TOOLS DISABLED]\nProvide a helpful, natural everyday response directly without calling external MCP tools.'
+    );
+  }
+
+  switch (params.knowledgeSource) {
+    case 'uploaded':
+      parts.push(
+        '[KNOWLEDGE SOURCE: UPLOADED FILES & IMAGES ONLY]\nAnswer strictly from the user’s attached files or images. Quote or cite relevant parts of the uploaded material. If the uploaded files do not contain the answer, clearly state what is missing rather than inventing facts.'
+      );
+      break;
+    case 'web':
+      parts.push(
+        '[KNOWLEDGE SOURCE: WEB SEARCH]\nPrioritize up-to-date, verifiable web facts and cite sources clearly.'
+      );
+      break;
+    case 'general':
+      parts.push(
+        '[KNOWLEDGE SOURCE: GENERAL AI KNOWLEDGE]\nAnswer using your broad general training knowledge clearly and directly.'
+      );
+      break;
+    default:
+      break;
+  }
+
+  return parts.join('\n\n');
+}
+
 export interface AgentLoopCallbacks {
   onTextDelta: (fullText: string) => void;
   onReasoningDelta: (fullReasoning: string) => void;
   onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => void;
+  onCitationsUpdated?: (citations: GroundingCitation[]) => void;
   onFallbackNotice: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
   requestApproval: (approval: Omit<PendingApproval, 'resolve'>) => Promise<'approve' | 'always_allow' | 'deny'>;
   onAlwaysAllowTool: (qualifiedKey: string) => void;
@@ -72,6 +122,9 @@ export interface RunAgentLoopParams {
   agent: AgentProfile;
   modelId: string;
   effort: EffortLevel;
+  chatMode?: ChatMode;
+  studyInstructions?: string;
+  knowledgeSource?: KnowledgeSourceMode;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
   servers: McpServerConfig[];
@@ -88,6 +141,7 @@ export interface AgentLoopResult {
   finalText: string;
   finalReasoning: string;
   toolCalls: ToolCallRecord[];
+  citations: GroundingCitation[];
   usedModelId: string;
   stoppedByUser: boolean;
   stepsExecuted: number;
@@ -98,6 +152,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     agent,
     modelId,
     effort,
+    chatMode = 'professional',
+    studyInstructions,
+    knowledgeSource = 'auto',
     keys,
     dynamicModels,
     servers,
@@ -109,9 +166,20 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   } = params;
 
   const localAlwaysAllow = new Set(params.alwaysAllowedTools);
-  const { tools, lookup } = buildAgentToolCatalog(agent, servers);
+  // Only expose MCP tools in Professional mode; General and Study Session never invoke MCPs
+  const built = buildAgentToolCatalog(agent, servers);
+  const tools = chatMode === 'professional' ? built.tools : [];
+  const lookup = chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
+  const effectiveSystemPrompt = composeEffectiveSystemPrompt({
+    basePrompt: agent.systemPrompt,
+    chatMode,
+    studyInstructions,
+    knowledgeSource,
+  });
+
   const workingMessages: LlmConversationItem[] = [...params.history];
   const allToolRecords: ToolCallRecord[] = [];
+  const allCitations = new Map<string, GroundingCitation>();
 
   let activeModelId = modelId;
   let accumulatedText = '';
@@ -124,6 +192,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         finalText: accumulatedText,
         finalReasoning: accumulatedReasoning,
         toolCalls: allToolRecords,
+        citations: Array.from(allCitations.values()),
         usedModelId: activeModelId,
         stoppedByUser: true,
         stepsExecuted,
@@ -140,8 +209,10 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         primaryModelId: activeModelId,
         keys,
         dynamicModels,
-        systemPrompt: agent.systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         effort,
+        chatMode,
+        knowledgeSource,
         messages: workingMessages,
         tools,
         signal,
@@ -159,6 +230,11 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             stepReasoning += ev.delta;
             accumulatedReasoning += ev.delta;
             callbacks.onReasoningDelta(accumulatedReasoning);
+          } else if (ev.type === 'citations') {
+            for (const c of ev.citations) {
+              allCitations.set(c.url, c);
+            }
+            callbacks.onCitationsUpdated?.(Array.from(allCitations.values()));
           } else if (ev.type === 'tool_calls') {
             proposedCalls = ev.calls;
           }
@@ -171,6 +247,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           finalText: accumulatedText,
           finalReasoning: accumulatedReasoning,
           toolCalls: allToolRecords,
+          citations: Array.from(allCitations.values()),
           usedModelId: activeModelId,
           stoppedByUser: true,
           stepsExecuted,
@@ -190,6 +267,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         finalText: accumulatedText,
         finalReasoning: accumulatedReasoning,
         toolCalls: allToolRecords,
+        citations: Array.from(allCitations.values()),
         usedModelId: activeModelId,
         stoppedByUser: false,
         stepsExecuted,
@@ -203,6 +281,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           finalText: accumulatedText,
           finalReasoning: accumulatedReasoning,
           toolCalls: allToolRecords,
+          citations: Array.from(allCitations.values()),
           usedModelId: activeModelId,
           stoppedByUser: true,
           stepsExecuted,
@@ -331,6 +410,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             finalText: accumulatedText,
             finalReasoning: accumulatedReasoning,
             toolCalls: allToolRecords,
+            citations: Array.from(allCitations.values()),
             usedModelId: activeModelId,
             stoppedByUser: true,
             stepsExecuted,
@@ -399,6 +479,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             finalText: accumulatedText,
             finalReasoning: accumulatedReasoning,
             toolCalls: allToolRecords,
+            citations: Array.from(allCitations.values()),
             usedModelId: activeModelId,
             stoppedByUser: true,
             stepsExecuted,
@@ -429,10 +510,12 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   accumulatedText += notice;
   callbacks.onTextDelta(accumulatedText);
 
+  // Handle remaining abort/end returns cleanly with citations included
   return {
     finalText: accumulatedText,
     finalReasoning: accumulatedReasoning,
     toolCalls: allToolRecords,
+    citations: Array.from(allCitations.values()),
     usedModelId: activeModelId,
     stoppedByUser: false,
     stepsExecuted,

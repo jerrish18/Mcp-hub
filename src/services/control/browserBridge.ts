@@ -37,6 +37,20 @@ export async function listAppApiKeys(): Promise<{
   keys: PublicApiKeyInfo[];
   activity: ControlActivityEntry[];
 }> {
+  if (!runtimeAdminToken) {
+    const probe = await fetch('/api/control/bridge/status', { headers: uiHeaders(false) });
+    if (probe.ok) {
+      const info = (await probe.json().catch(() => ({}))) as { adminTokenRequired?: boolean };
+      if (info.adminTokenRequired) {
+        return {
+          adminTokenRequired: true,
+          bridgeConnectedCount: 0,
+          keys: [],
+          activity: [],
+        };
+      }
+    }
+  }
   const res = await fetch('/api/control/keys', { headers: uiHeaders(false) });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -470,12 +484,13 @@ export function startBrowserControlBridge(): () => void {
   }
 
   let closed = false;
+  let bridgeAuthorized = false;
   let es: EventSource | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let syncTimer: ReturnType<typeof setTimeout> | null = null;
 
   const pushState = async () => {
-    if (closed) return;
+    if (closed || !bridgeAuthorized) return;
     try {
       await fetch('/api/control/bridge/state', {
         method: 'POST',
@@ -488,7 +503,7 @@ export function startBrowserControlBridge(): () => void {
   };
 
   const connectStream = () => {
-    if (closed) return;
+    if (closed || !bridgeAuthorized) return;
     es = new EventSource('/api/control/bridge/stream');
 
     es.addEventListener('connected', () => {
@@ -541,15 +556,27 @@ export function startBrowserControlBridge(): () => void {
     es.onerror = () => {
       es?.close();
       es = null;
-      if (!closed) {
+      if (!closed && bridgeAuthorized) {
         reconnectTimer = setTimeout(connectStream, 3_000);
       }
     };
   };
 
-  connectStream();
+  void (async () => {
+    try {
+      const probe = await fetch('/api/control/bridge/status', { headers: uiHeaders(false) });
+      if (closed || !probe.ok) return;
+      const info = (await probe.json().catch(() => ({}))) as { adminTokenRequired?: boolean };
+      if (info.adminTokenRequired && !runtimeAdminToken) return;
+      bridgeAuthorized = true;
+      connectStream();
+    } catch {
+      // ignore unavailable backend
+    }
+  })();
 
   const unsubscribe = useHubStore.subscribe(() => {
+    if (!bridgeAuthorized) return;
     if (syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(() => {
       void pushState();

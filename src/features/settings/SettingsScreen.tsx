@@ -6,6 +6,8 @@ import {
   EyeOff,
   KeyRound,
   Lock,
+  LogIn,
+  LogOut,
   Moon,
   Palette,
   Plus,
@@ -13,6 +15,7 @@ import {
   Shield,
   Sun,
   Trash2,
+  UserCheck,
   Zap,
 } from 'lucide-react';
 import { PROVIDER_INFO } from '../../config/models';
@@ -28,6 +31,7 @@ import { AppApiKeySection } from './AppApiKeySection';
 
 export function SettingsScreen() {
   const {
+    authUser,
     providerKeys,
     dynamicModels,
     settings,
@@ -37,6 +41,7 @@ export function SettingsScreen() {
     updateSettings,
     revokeAlwaysAllowedTool,
     lockApp,
+    signOutAccount,
   } = useHubStore();
 
   const allModels = mergeModelCatalog(dynamicModels);
@@ -163,9 +168,84 @@ export function SettingsScreen() {
             Settings
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Pixel Material You appearance, encrypted API keys, live model sync & safety
+            Account sign-in, Pixel Material You appearance, encrypted API keys & safety
           </p>
         </motion.div>
+
+        {/* Account & Sign-In Section */}
+        <motion.section
+          variants={cardStaggerItem}
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="rounded-[24px] border p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            {authUser?.photoURL ? (
+              <img
+                src={authUser.photoURL}
+                alt={authUser.displayName}
+                className="w-11 h-11 rounded-2xl object-cover shrink-0"
+              />
+            ) : (
+              <div
+                style={{
+                  backgroundColor: 'var(--m3-primary-container)',
+                  color: 'var(--m3-on-primary-container)',
+                }}
+                className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+              >
+                <UserCheck className="w-5 h-5" />
+              </div>
+            )}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white truncate">
+                  {authUser ? authUser.displayName : 'Local Guest Session'}
+                </h2>
+                {authUser && (
+                  <span
+                    style={{
+                      backgroundColor: 'var(--m3-primary-container)',
+                      color: 'var(--m3-on-primary-container)',
+                    }}
+                    className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase"
+                  >
+                    {authUser.provider === 'google' ? 'Google' : 'App Account'}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                {authUser
+                  ? authUser.email
+                  : 'Sign in with Google or an App account to personalize your hub'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void signOutAccount()}
+            style={{
+              backgroundColor: 'var(--m3-surface-container-high)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="min-h-[42px] px-4 rounded-full border text-xs font-semibold text-slate-900 dark:text-white inline-flex items-center justify-center gap-1.5 shrink-0 hover:opacity-90"
+          >
+            {authUser ? (
+              <>
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Sign Out</span>
+              </>
+            ) : (
+              <>
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In / Google</span>
+              </>
+            )}
+          </button>
+        </motion.section>
 
         {/* Pixel Material You & Appearance Studio */}
         <motion.section

@@ -3,31 +3,53 @@ import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
   ArrowUp,
+  BookOpen,
+  Briefcase,
   Check,
   ChevronDown,
+  ChevronUp,
   Copy,
+  ExternalLink,
+  FileText,
+  Globe,
   History,
   Info,
+  Maximize2,
+  MessageCircle,
   MessageSquarePlus,
   Mic,
   MicOff,
+  Paperclip,
   Share2,
+  SlidersHorizontal,
+  Sparkles,
   Square,
+  Upload,
   Volume2,
   VolumeX,
   Wrench,
+  X,
 } from 'lucide-react';
 import { getModelById } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
+import { DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
 import { useHubStore } from '../../store/useHubStore';
-import type { EffortLevel } from '../../types';
+import type {
+  ChatAttachment,
+  ChatMessage,
+  ChatMode,
+  EffortLevel,
+  KnowledgeSourceMode,
+} from '../../types';
 import { MarkdownRenderer } from '../../ui/MarkdownRenderer';
 import { ToolCallCard } from '../../ui/ToolCallCard';
 import { WriteApprovalBanner } from '../../ui/WriteApprovalBanner';
+import { formatFileSize, processUploadedFiles } from '../../utils/attachments';
 import { triggerHaptic } from '../../utils/haptics';
 import { M3_EMPHASIZED_EASE } from '../../utils/motion';
 import { AgentModelSwitcherSheet } from './AgentModelSwitcherSheet';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
+import { StudyReaderModal } from './StudyReaderModal';
 
 interface ChatScreenProps {
   onOpenSettings: () => void;
@@ -44,20 +66,91 @@ interface SpeechRecognitionInstance {
   stop: () => void;
 }
 
-const STARTER_PROMPTS = [
+const CHAT_MODE_CONFIG: Array<{
+  id: ChatMode;
+  label: string;
+  shortDesc: string;
+  Icon: typeof MessageCircle;
+}> = [
   {
-    label: 'Search workspace notes',
-    prompt: 'Search my workspace notes and summarize what is currently saved.',
+    id: 'general',
+    label: 'General',
+    shortDesc: 'Normal chat · MCP off',
+    Icon: MessageCircle,
   },
   {
-    label: 'Calculate with MCP tool',
-    prompt: 'Calculate (24 * 7) + 12 using the calculator tool.',
+    id: 'professional',
+    label: 'Professional',
+    shortDesc: 'Connected MCP tools active',
+    Icon: Briefcase,
   },
   {
-    label: 'Create a note (write action)',
-    prompt: 'Create a note titled "Sprint Checklist" with my MCP testing priorities.',
+    id: 'study',
+    label: 'Study Session',
+    shortDesc: 'Structured notes · MCP off',
+    Icon: BookOpen,
   },
 ];
+
+const KNOWLEDGE_SOURCE_OPTIONS: Array<{
+  id: KnowledgeSourceMode;
+  label: string;
+  hint: string;
+  Icon: typeof Sparkles;
+}> = [
+  { id: 'auto', label: 'Auto', hint: 'Smart default', Icon: Sparkles },
+  { id: 'uploaded', label: 'Uploaded Source', hint: 'Use attached files/pics', Icon: Upload },
+  { id: 'web', label: 'Web Search', hint: 'Live web grounding', Icon: Globe },
+  { id: 'general', label: 'AI Knowledge', hint: 'Model knowledge', Icon: BookOpen },
+];
+
+const STARTER_PROMPTS_BY_MODE: Record<
+  ChatMode,
+  Array<{ label: string; prompt: string }>
+> = {
+  general: [
+    {
+      label: 'Plan my week clearly',
+      prompt: 'Help me organize a calm, realistic weekly routine for deep work and rest.',
+    },
+    {
+      label: 'Draft a crisp message',
+      prompt: 'Write a polite, clear email following up on a project timeline update.',
+    },
+    {
+      label: 'Brainstorm weekend ideas',
+      prompt: 'Give me 5 creative low-cost ways to spend a relaxing Sunday.',
+    },
+  ],
+  professional: [
+    {
+      label: 'Search workspace notes',
+      prompt: 'Search my workspace notes and summarize what is currently saved.',
+    },
+    {
+      label: 'Calculate with MCP tool',
+      prompt: 'Calculate (24 * 7) + 12 using the calculator tool.',
+    },
+    {
+      label: 'Create a note (write action)',
+      prompt: 'Create a note titled "Sprint Checklist" with my MCP testing priorities.',
+    },
+  ],
+  study: [
+    {
+      label: 'Master a topic step-by-step',
+      prompt: 'Teach me how Transformer self-attention works from intuition to math.',
+    },
+    {
+      label: 'Turn notes into flashcards',
+      prompt: 'Summarize the attached file or topic into high-yield revision notes and self-check questions.',
+    },
+    {
+      label: 'Compare two concepts deeply',
+      prompt: 'Explain the difference between TCP and UDP with real-world analogies and a quick quiz.',
+    },
+  ],
+};
 
 export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const {
@@ -80,16 +173,27 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setActiveAgent,
     setActiveModel,
     setActiveEffort,
+    setChatMode,
+    setKnowledgeSource,
+    setStudyInstructions,
   } = useHubStore();
 
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [uploadError, setUploadError] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [studyPanelExpanded, setStudyPanelExpanded] = useState(false);
+  const [readerMessage, setReaderMessage] = useState<ChatMessage | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [speechNotice, setSpeechNotice] = useState('');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
+
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const speechTimerRef = useRef<number | null>(null);
 
@@ -97,8 +201,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const activeAgent = agents.find((a) => a.id === activeConv?.agentId) ?? agents[0];
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeEffort: EffortLevel = activeConv?.effort ?? activeAgent.defaultEffort;
+  const activeChatMode: ChatMode = activeConv?.chatMode ?? 'professional';
+  const activeKnowledgeSource: KnowledgeSourceMode = activeConv?.knowledgeSource ?? 'auto';
+  const activeStudyInstructions = activeConv?.studyInstructions ?? DEFAULT_STUDY_INSTRUCTIONS;
 
   const { tools } = buildAgentToolCatalog(activeAgent, servers);
+  const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
 
   useEffect(() => {
@@ -114,7 +222,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   ]);
 
   useEffect(() => {
-    // Stop active dictation when switching conversations
     recognitionRef.current?.stop();
     setIsListening(false);
   }, [activeConversationId]);
@@ -131,17 +238,40 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     };
   }, []);
 
+  const handleFilesSelected = async (files: FileList | File[]) => {
+    setUploadError('');
+    const { attachments: parsed, errors } = await processUploadedFiles(files);
+    if (errors.length > 0) {
+      setUploadError(errors.join(' '));
+    }
+    if (parsed.length > 0) {
+      setAttachments((prev) => [...prev, ...parsed].slice(0, 4));
+      if (activeKnowledgeSource === 'auto') {
+        setKnowledgeSource('uploaded');
+      }
+      triggerHaptic(settings.hapticsEnabled, 'light');
+    }
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
+
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!input.trim() || isRunning) return;
+    if ((!input.trim() && attachments.length === 0) || isRunning) return;
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
     }
     const msg = input;
+    const currentAttachments = attachments;
     setInput('');
+    setAttachments([]);
+    setUploadError('');
+    setStudyPanelExpanded(false);
     triggerHaptic(settings.hapticsEnabled, 'light');
-    await sendMessage(msg);
+    await sendMessage(msg, { attachments: currentAttachments });
   };
 
   const handleCycleEffort = () => {
@@ -235,10 +365,26 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     await navigator.clipboard?.writeText(content);
   };
 
+  const starterPrompts = STARTER_PROMPTS_BY_MODE[activeChatMode];
+
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
       className="flex h-full min-h-0"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setIsDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        if (e.dataTransfer?.files?.length) {
+          void handleFilesSelected(e.dataTransfer.files);
+        }
+      }}
     >
       {/* Desktop Conversation History Sidebar */}
       <aside
@@ -269,83 +415,227 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       </aside>
 
       {/* Main Chat Pane */}
-      <div className="flex-1 flex flex-col min-w-0 min-h-0">
-        {/* Pixel Material 3 Top App Bar with Tonal Chips */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
+        {isDragging && (
+          <div className="absolute inset-3 z-30 rounded-[28px] border-2 border-dashed border-blue-500 bg-blue-500/10 backdrop-blur-xs flex items-center justify-center pointer-events-none">
+            <div className="px-5 py-3 rounded-2xl bg-white dark:bg-slate-900 shadow-lg text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+              <Upload className="w-4 h-4 text-blue-500" />
+              Drop images or study files to attach
+            </div>
+          </div>
+        )}
+
+        {/* Top Bar: Agent / Model / Effort + History / New Chat */}
         <header
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="shrink-0 h-14 px-2.5 sm:px-5 border-b flex items-center justify-between gap-1.5 sm:gap-2 pt-safe"
+          className="shrink-0 px-2.5 sm:px-5 py-2 border-b space-y-2 pt-safe"
         >
-          <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1">
-            <button
-              type="button"
-              onClick={() => setSwitcherOpen(true)}
-              aria-label={`Active agent ${activeAgent.name}, tap to switch`}
-              style={{
-                backgroundColor: 'var(--m3-surface-container-high)',
-                borderColor: 'var(--m3-outline)',
-              }}
-              className="min-h-[36px] sm:min-h-[38px] px-2.5 py-1 rounded-full border text-[11px] sm:text-xs font-medium text-slate-900 dark:text-slate-100 inline-flex items-center gap-1 whitespace-nowrap min-w-0 transition-opacity hover:opacity-90"
-            >
-              <span className="max-w-[68px] sm:max-w-[140px] truncate">{activeAgent.name}</span>
-              <ChevronDown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-slate-400 shrink-0" />
-            </button>
+          <div className="flex items-center justify-between gap-1.5 sm:gap-2">
+            <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 flex-1">
+              <button
+                type="button"
+                onClick={() => setSwitcherOpen(true)}
+                aria-label={`Active agent ${activeAgent.name}, tap to switch`}
+                style={{
+                  backgroundColor: 'var(--m3-surface-container-high)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[36px] sm:min-h-[38px] px-2.5 py-1 rounded-full border text-[11px] sm:text-xs font-medium text-slate-900 dark:text-slate-100 inline-flex items-center gap-1 whitespace-nowrap min-w-0 transition-opacity hover:opacity-90"
+              >
+                <span className="max-w-[76px] sm:max-w-[140px] truncate">{activeAgent.name}</span>
+                <ChevronDown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-slate-400 shrink-0" />
+              </button>
 
-            <button
-              type="button"
-              onClick={() => setSwitcherOpen(true)}
-              aria-label={`Active model ${activeModel.label}, tap to switch`}
-              style={{
-                backgroundColor: 'var(--m3-surface-container-high)',
-                borderColor: 'var(--m3-outline)',
-              }}
-              className="min-h-[36px] sm:min-h-[38px] px-2.5 py-1 rounded-full border text-[11px] sm:text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap min-w-0 transition-opacity hover:opacity-90"
-            >
-              <span className="max-w-[74px] sm:max-w-[160px] truncate">{activeModel.label}</span>
-              <ChevronDown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-slate-400 shrink-0" />
-            </button>
+              <button
+                type="button"
+                onClick={() => setSwitcherOpen(true)}
+                aria-label={`Active model ${activeModel.label}, tap to switch`}
+                style={{
+                  backgroundColor: 'var(--m3-surface-container-high)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[36px] sm:min-h-[38px] px-2.5 py-1 rounded-full border text-[11px] sm:text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap min-w-0 transition-opacity hover:opacity-90"
+              >
+                <span className="max-w-[82px] sm:max-w-[170px] truncate">{activeModel.label}</span>
+                <ChevronDown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-slate-400 shrink-0" />
+              </button>
 
-            <button
-              type="button"
-              onClick={handleCycleEffort}
-              aria-label={`Effort level ${activeEffort}, tap to cycle`}
-              data-testid="effort-chip"
-              style={{
-                backgroundColor: 'var(--m3-primary-container)',
-                color: 'var(--m3-on-primary-container)',
-              }}
-              className="min-h-[36px] sm:min-h-[38px] px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-semibold capitalize whitespace-nowrap shrink-0 transition-opacity hover:opacity-90"
-            >
-              {activeEffort}
-            </button>
+              <button
+                type="button"
+                onClick={handleCycleEffort}
+                aria-label={`Effort level ${activeEffort}, tap to cycle`}
+                data-testid="effort-chip"
+                style={{
+                  backgroundColor: 'var(--m3-primary-container)',
+                  color: 'var(--m3-on-primary-container)',
+                }}
+                className="min-h-[36px] sm:min-h-[38px] px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-semibold capitalize whitespace-nowrap shrink-0 transition-opacity hover:opacity-90"
+              >
+                {activeEffort}
+              </button>
+            </div>
+
+            <div className="flex items-center shrink-0">
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(true)}
+                aria-label="Open chat history"
+                className="lg:hidden min-h-[42px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+              >
+                <History className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => startNewConversation(activeAgent.id, activeModel.id)}
+                aria-label="New conversation"
+                className="min-h-[42px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+              >
+                <MessageSquarePlus className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center shrink-0">
-            <button
-              type="button"
-              onClick={() => setHistoryOpen(true)}
-              aria-label="Open chat history"
-              className="lg:hidden min-h-[44px] min-w-[40px] sm:min-w-[44px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+          {/* 3-Option Chat Mode Bar: General | Professional (MCP) | Study Session */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div
+              role="tablist"
+              aria-label="Chat mode"
+              style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
+              className="inline-flex items-center gap-1 p-1 rounded-full max-w-full overflow-x-auto no-scrollbar"
             >
-              <History className="w-5 h-5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => startNewConversation(activeAgent.id, activeModel.id)}
-              aria-label="New conversation"
-              className="min-h-[44px] min-w-[40px] sm:min-w-[44px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
-            >
-              <MessageSquarePlus className="w-5 h-5" />
-            </button>
+              {CHAT_MODE_CONFIG.map(({ id, label, Icon }) => {
+                const active = activeChatMode === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    data-testid={`chat-mode-${id}`}
+                    onClick={() => {
+                      triggerHaptic(settings.hapticsEnabled, 'light');
+                      setChatMode(id);
+                      if (id === 'study' && !activeConv?.messages.length) {
+                        setStudyPanelExpanded(true);
+                      }
+                    }}
+                    style={
+                      active
+                        ? {
+                            backgroundColor: 'var(--m3-primary-container)',
+                            color: 'var(--m3-on-primary-container)',
+                          }
+                        : undefined
+                    }
+                    className={`min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+                      active ? 'shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5 shrink-0" />
+                    <span>{label}</span>
+                    {id === 'professional' && (
+                      <span className="text-[10px] opacity-80 font-mono">({tools.length})</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+              {activeChatMode === 'professional' ? (
+                <span>MCP tools enabled ({activeToolsCount})</span>
+              ) : (
+                <span>MCP tools paused in {activeChatMode === 'study' ? 'Study Session' : 'General'}</span>
+              )}
+            </div>
           </div>
+
+          {/* Study Session Response Instructions Bar */}
+          {activeChatMode === 'study' && (
+            <div
+              style={{
+                backgroundColor: 'var(--m3-surface)',
+                borderColor: 'var(--m3-outline)',
+              }}
+              className="rounded-2xl border px-3 py-2 space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStudyPanelExpanded((v) => !v)}
+                  aria-expanded={studyPanelExpanded}
+                  className="flex items-center gap-2 min-w-0 text-left flex-1"
+                >
+                  <SlidersHorizontal
+                    style={{ color: 'var(--m3-primary)' }}
+                    className="w-3.5 h-3.5 shrink-0"
+                  />
+                  <span className="text-xs font-semibold text-slate-900 dark:text-white shrink-0">
+                    Study Response Instructions
+                  </span>
+                  {!studyPanelExpanded && (
+                    <span className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                      {activeStudyInstructions.replace(/\n+/g, ' · ')}
+                    </span>
+                  )}
+                  {studyPanelExpanded ? (
+                    <ChevronUp className="w-4 h-4 text-slate-400 shrink-0 ml-auto" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4 text-slate-400 shrink-0 ml-auto" />
+                  )}
+                </button>
+              </div>
+
+              {studyPanelExpanded && (
+                <div className="space-y-2 pt-1 border-t border-slate-200/60 dark:border-slate-800">
+                  <div className="flex flex-wrap gap-1.5">
+                    {STUDY_INSTRUCTION_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setStudyInstructions(preset.instructions);
+                          triggerHaptic(settings.hapticsEnabled, 'light');
+                        }}
+                        style={{
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="min-h-[30px] px-2.5 rounded-full border text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:opacity-90"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  <label htmlFor="study-instructions-input" className="sr-only">
+                    Response structure instructions for Study Session
+                  </label>
+                  <textarea
+                    id="study-instructions-input"
+                    data-testid="study-instructions-textarea"
+                    rows={3}
+                    value={activeStudyInstructions}
+                    onChange={(e) => setStudyInstructions(e.target.value)}
+                    placeholder="Define the exact structure the AI must follow (e.g., 1. Overview, 2. Analogies, 3. Practice Quiz)..."
+                    style={{
+                      backgroundColor: 'var(--m3-surface-container)',
+                      borderColor: 'var(--m3-outline)',
+                    }}
+                    className="w-full p-2.5 rounded-xl border text-xs leading-relaxed text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </header>
 
         {/* Scrollable Message Stream */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 space-y-4">
           {(!activeConv || activeConv.messages.length === 0) && (
-            <div className="max-w-xl mx-auto py-8 sm:py-14 text-center space-y-5">
+            <div className="max-w-xl mx-auto py-6 sm:py-12 text-center space-y-5">
               <div
                 style={{
                   backgroundColor: 'var(--m3-primary-container)',
@@ -353,24 +643,42 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 }}
                 className="w-14 h-14 rounded-[20px] flex items-center justify-center mx-auto shadow-xs"
               >
-                <Wrench className="w-6 h-6" />
+                {activeChatMode === 'study' ? (
+                  <BookOpen className="w-6 h-6" />
+                ) : activeChatMode === 'general' ? (
+                  <MessageCircle className="w-6 h-6" />
+                ) : (
+                  <Wrench className="w-6 h-6" />
+                )}
               </div>
               <div className="space-y-1.5">
                 <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white text-balance">
-                  {activeAgent.name} is ready
+                  {activeChatMode === 'study'
+                    ? 'Study Session Ready'
+                    : activeChatMode === 'general'
+                      ? 'Everyday Chat'
+                      : `${activeAgent.name} is ready`}
                 </h1>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                  {activeModel.label} · {tools.length} active MCP tool{tools.length === 1 ? '' : 's'} ·{' '}
-                  <span className="capitalize">{activeEffort}</span> effort
+                  {activeModel.label} ·{' '}
+                  {activeChatMode === 'professional'
+                    ? `${activeToolsCount} active MCP tool${activeToolsCount === 1 ? '' : 's'}`
+                    : activeChatMode === 'study'
+                      ? 'MCPs paused · Click any answer to open Study Reader'
+                      : 'MCPs paused · Direct conversation'}{' '}
+                  · <span className="capitalize">{activeEffort}</span> effort
                 </p>
               </div>
 
-              <div className="flex flex-col gap-2.5 text-left pt-2 w-full min-w-0">
-                {STARTER_PROMPTS.map((item) => (
+              <div className="flex flex-col gap-2.5 text-left pt-1 w-full min-w-0">
+                {starterPrompts.map((item) => (
                   <button
                     key={item.label}
                     type="button"
-                    onClick={() => void sendMessage(item.prompt)}
+                    onClick={() => {
+                      setStudyPanelExpanded(false);
+                      void sendMessage(item.prompt);
+                    }}
                     style={{
                       backgroundColor: 'var(--m3-surface-container)',
                       borderColor: 'var(--m3-outline)',
@@ -414,8 +722,34 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={M3_EMPHASIZED_EASE}
-                  className="max-w-2xl mx-auto flex justify-end"
+                  className="max-w-2xl mx-auto flex flex-col items-end gap-1.5"
                 >
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="flex flex-wrap justify-end gap-2 max-w-[85%]">
+                      {msg.attachments.map((att) =>
+                        att.kind === 'image' && att.previewUrl ? (
+                          <img
+                            key={att.id}
+                            src={att.previewUrl}
+                            alt={att.name}
+                            className="w-28 h-28 object-cover rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xs"
+                          />
+                        ) : (
+                          <span
+                            key={att.id}
+                            style={{
+                              backgroundColor: 'var(--m3-surface-container-high)',
+                              borderColor: 'var(--m3-outline)',
+                            }}
+                            className="px-3 py-1.5 rounded-xl border text-xs text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5"
+                          >
+                            <FileText className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate max-w-[160px]">{att.name}</span>
+                          </span>
+                        )
+                      )}
+                    </div>
+                  )}
                   <div
                     style={{
                       backgroundColor: 'var(--m3-primary)',
@@ -428,6 +762,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </motion.div>
               );
             }
+
+            const isStudyResponse = (msg.chatMode ?? activeChatMode) === 'study';
 
             return (
               <motion.div
@@ -462,24 +798,92 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
                 {msg.content && (
                   <div className="space-y-1.5">
-                    <div
+                    <article
+                      data-testid="assistant-response-card"
+                      onClick={(e) => {
+                        const target = e.target as HTMLElement;
+                        if (target.closest('button, a')) return;
+                        if (isStudyResponse && msg.content.trim()) {
+                          setReaderMessage(msg);
+                        }
+                      }}
                       style={{
                         backgroundColor: 'var(--m3-surface-container)',
-                        borderColor: 'var(--m3-outline)',
+                        borderColor: isStudyResponse ? 'var(--m3-primary)' : 'var(--m3-outline)',
                       }}
-                      className="rounded-[22px] border px-4 py-3"
+                      className={`rounded-[22px] border px-4 py-3 transition-shadow ${
+                        isStudyResponse ? 'cursor-pointer hover:shadow-md' : ''
+                      }`}
                     >
+                      {isStudyResponse && !msg.isStreaming && (
+                        <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-slate-200/60 dark:border-slate-800">
+                          <span
+                            style={{ color: 'var(--m3-primary)' }}
+                            className="text-[11px] font-semibold inline-flex items-center gap-1"
+                          >
+                            <BookOpen className="w-3.5 h-3.5" />
+                            Study Note · Tap anywhere to read comfortably
+                          </span>
+                          <Maximize2 className="w-3.5 h-3.5 text-slate-400" />
+                        </div>
+                      )}
+
                       <MarkdownRenderer content={msg.content} />
-                    </div>
+
+                      {msg.citations && msg.citations.length > 0 && (
+                        <div className="mt-3 pt-2.5 border-t border-slate-200/60 dark:border-slate-800 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mr-1">
+                            Sources:
+                          </span>
+                          {msg.citations.map((c) => (
+                            <a
+                              key={c.url}
+                              href={c.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{
+                                backgroundColor: 'var(--m3-surface-container-high)',
+                                borderColor: 'var(--m3-outline)',
+                              }}
+                              className="px-2.5 py-1 rounded-full border text-[11px] font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 hover:opacity-85"
+                            >
+                              <span className="truncate max-w-[160px]">{c.title}</span>
+                              <ExternalLink className="w-3 h-3 shrink-0" />
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </article>
 
                     {/* Pixel Assistant quick action bar */}
                     {!msg.isStreaming && (
-                      <div className="flex items-center gap-1 px-1">
+                      <div className="flex flex-wrap items-center gap-1 px-1">
+                        <button
+                          type="button"
+                          onClick={() => setReaderMessage(msg)}
+                          data-testid="open-study-reader-btn"
+                          style={
+                            isStudyResponse
+                              ? {
+                                  backgroundColor: 'var(--m3-primary-container)',
+                                  color: 'var(--m3-on-primary-container)',
+                                }
+                              : undefined
+                          }
+                          className={`min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                            isStudyResponse
+                              ? ''
+                              : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          <BookOpen className="w-3.5 h-3.5" />
+                          <span>Study Reader</span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => void handleCopyMessage(msg.id, msg.content)}
                           aria-label="Copy response"
-                          className="min-h-[36px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
+                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
                         >
                           {copiedMsgId === msg.id ? (
                             <Check className="w-3.5 h-3.5 text-emerald-500" />
@@ -492,7 +896,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           type="button"
                           onClick={() => handleSpeakMessage(msg.id, msg.content)}
                           aria-label={speakingMsgId === msg.id ? 'Stop reading aloud' : 'Read aloud'}
-                          className="min-h-[36px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
+                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
                         >
                           {speakingMsgId === msg.id ? (
                             <VolumeX className="w-3.5 h-3.5 text-rose-500" />
@@ -505,7 +909,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           type="button"
                           onClick={() => void handleShareMessage(msg.content)}
                           aria-label="Share response"
-                          className="min-h-[36px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
+                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
                         >
                           <Share2 className="w-3.5 h-3.5" />
                           <span>Share</span>
@@ -569,19 +973,126 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           </div>
         )}
 
-        {/* Pixel Material 3 Pill Composer with Voice Mic & Expressive FAB */}
+        {/* Composer Area: Knowledge Source Selector + Attachment Previews + Pill Input */}
         <form
           onSubmit={handleSend}
           style={{ backgroundColor: 'var(--m3-surface)' }}
-          className="shrink-0 px-3 sm:px-6 py-2.5"
+          className="shrink-0 px-3 sm:px-6 pt-1 pb-2.5 space-y-2"
         >
+          {/* Knowledge Source Selector */}
+          <div className="max-w-2xl mx-auto flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+            <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0 mr-0.5">
+              Source:
+            </span>
+            {KNOWLEDGE_SOURCE_OPTIONS.map(({ id, label, hint, Icon }) => {
+              const active = activeKnowledgeSource === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  title={hint}
+                  data-testid={`source-chip-${id}`}
+                  onClick={() => {
+                    triggerHaptic(settings.hapticsEnabled, 'light');
+                    setKnowledgeSource(id);
+                  }}
+                  style={
+                    active
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[30px] px-2.5 rounded-full border text-[11px] font-medium inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Icon className="w-3 h-3 shrink-0" />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {uploadError && (
+            <div className="max-w-2xl mx-auto text-xs text-rose-600 dark:text-rose-400 px-2">
+              {uploadError}
+            </div>
+          )}
+
+          {/* Attached Files & Images Preview Strip */}
+          {attachments.length > 0 && (
+            <div className="max-w-2xl mx-auto flex flex-wrap gap-2 px-1">
+              {attachments.map((att) => (
+                <div
+                  key={att.id}
+                  style={{
+                    backgroundColor: 'var(--m3-surface-container-high)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="relative flex items-center gap-2 rounded-2xl border pl-2 pr-1.5 py-1.5 text-xs text-slate-800 dark:text-slate-200"
+                >
+                  {att.kind === 'image' && att.previewUrl ? (
+                    <img
+                      src={att.previewUrl}
+                      alt={att.name}
+                      className="w-8 h-8 rounded-lg object-cover shrink-0"
+                    />
+                  ) : (
+                    <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                  )}
+                  <div className="min-w-0 max-w-[140px]">
+                    <div className="truncate font-medium">{att.name}</div>
+                    <div className="text-[10px] text-slate-500">{formatFileSize(att.size)}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveAttachment(att.id)}
+                    aria-label={`Remove ${att.name}`}
+                    className="min-h-[26px] min-w-[26px] rounded-full flex items-center justify-center text-slate-500 hover:text-rose-600 hover:bg-slate-200/70 dark:hover:bg-slate-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Hidden File Input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.pdf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,.log"
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files?.length) {
+                void handleFilesSelected(e.target.files);
+                e.target.value = '';
+              }
+            }}
+          />
+
           <div
             style={{
               backgroundColor: 'var(--m3-surface-container-high)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="max-w-2xl mx-auto flex items-end gap-1.5 p-1.5 rounded-[28px] border shadow-xs"
+            className="max-w-2xl mx-auto flex items-end gap-1 p-1.5 rounded-[28px] border shadow-xs"
           >
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Upload picture or file"
+              title="Attach pics or files (max 5 MB)"
+              className="min-h-[44px] min-w-[44px] rounded-full flex items-center justify-center shrink-0 text-slate-500 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors"
+            >
+              <Paperclip className="w-5 h-5" />
+            </button>
+
             <button
               type="button"
               onClick={handleToggleVoiceDictation}
@@ -604,18 +1115,33 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             </button>
 
             <textarea
+              ref={composerRef}
               rows={1}
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData?.files ?? []);
+                if (files.length > 0) {
+                  void handleFilesSelected(files);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   void handleSend();
                 }
               }}
-              placeholder={isListening ? 'Listening...' : `Ask ${activeAgent.name}...`}
+              placeholder={
+                isListening
+                  ? 'Listening...'
+                  : activeChatMode === 'study'
+                    ? 'Ask a study question...'
+                    : activeChatMode === 'general'
+                      ? 'Message directly...'
+                      : `Ask ${activeAgent.name}...`
+              }
               aria-label="Chat message input"
-              className="flex-1 min-h-[44px] max-h-32 px-2 py-2.5 bg-transparent text-[15px] text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 resize-none focus:outline-none"
+              className="flex-1 min-h-[44px] max-h-32 px-2 py-2.5 leading-[22px] bg-transparent text-[15px] text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 resize-none focus:outline-none"
             />
 
             {isRunning ? (
@@ -634,10 +1160,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             ) : (
               <button
                 type="submit"
-                disabled={!input.trim()}
+                disabled={!input.trim() && attachments.length === 0}
                 aria-label="Send message"
                 style={
-                  input.trim()
+                  input.trim() || attachments.length > 0
                     ? {
                         backgroundColor: 'var(--m3-primary)',
                         color: 'var(--m3-on-primary)',
@@ -677,6 +1203,23 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         onRename={renameConversation}
         onDelete={deleteConversation}
       />
+
+      <AnimatePresence>
+        {readerMessage && (
+          <StudyReaderModal
+            open={Boolean(readerMessage)}
+            title={activeConv?.title || 'Study Notes'}
+            content={readerMessage.content}
+            modelLabel={getModelById(readerMessage.modelId ?? activeModel.id, dynamicModels).label}
+            citations={readerMessage.citations}
+            onClose={() => setReaderMessage(null)}
+            onAskFollowUp={() => {
+              setInput('Follow-up question on the previous study notes: ');
+              setTimeout(() => composerRef.current?.focus(), 60);
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

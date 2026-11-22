@@ -23,21 +23,76 @@ async function streamText(text: string, onDelta: (d: string) => void, signal?: A
   for (const w of words) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     onDelta(w);
-    await delay(14, signal);
+    await delay(12, signal);
   }
 }
 
 /**
- * Deterministic zero-key interactive sandbox model for testing MCP tool loops,
- * confirm-before-write gates, and effort levels offline or prior to adding API keys.
+ * Deterministic zero-key interactive sandbox model supporting General Chat,
+ * Study Session structured guides, Uploaded attachments, and Professional MCP loops.
  */
 export async function streamDemoCompletion(req: StreamCompletionRequest): Promise<void> {
-  const { effort, messages, tools, signal, onEvent } = req;
+  const { effort, chatMode = 'professional', knowledgeSource = 'auto', systemPrompt, messages, tools, signal, onEvent } = req;
 
   const lastMessage = messages[messages.length - 1];
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const userText = lastUser?.role === 'user' ? lastUser.text : '';
+  const userAttachments = lastUser?.role === 'user' ? (lastUser.attachments ?? []) : [];
   const lower = userText.toLowerCase();
+
+  // Study Session mode — never invokes MCP tools, formats strictly for learning
+  if (chatMode === 'study') {
+    const attachmentSummary =
+      userAttachments.length > 0
+        ? `\n\n> **Study Source Used:** Referenced your ${userAttachments.length} uploaded file${userAttachments.length > 1 ? 's' : ''} (${userAttachments.map((a) => a.name).join(', ')}).`
+        : knowledgeSource === 'web'
+          ? '\n\n> **Source Mode:** Web Search guidance active (add a free Gemini API key in Settings for live Google Search citations).'
+          : '';
+
+    const snippetNote = userAttachments.find((a) => a.textContent)?.textContent?.slice(0, 260);
+    const instructionPreview = systemPrompt.includes('[STUDY SESSION INSTRUCTIONS')
+      ? 'Following your custom Study Structure Instructions'
+      : 'Structured Study Guide';
+
+    const studyReply =
+      `## Study Notes: ${userText.slice(0, 60)}${userText.length > 60 ? '…' : ''}\n\n` +
+      `> **${instructionPreview}** · Tap anywhere on this card to open the distraction-free **Study Reader**.\n\n` +
+      `### 1. Clear Overview\n` +
+      `In **Study Session** mode, connected MCP servers stay paused so you can focus purely on learning. You asked about **${userText}**.\n\n` +
+      `### 2. Core Concepts\n` +
+      `- **Foundational Principle:** Break the topic into input, mechanism, and real-world output so each part stays memorable.\n` +
+      `- **Why It Matters:** Understanding the core pattern lets you solve unfamiliar problems instead of memorizing isolated facts.\n` +
+      (snippetNote ? `- **From Your Uploaded Source:** \`${snippetNote.replace(/\s+/g, ' ').trim()}…\`\n` : '') +
+      `\n### 3. Worked Example\n` +
+      `1. Identify what is given and what outcome is requested.\n` +
+      `2. Apply the core rule step by step.\n` +
+      `3. Verify units, edge cases, or logic before finalizing.\n\n` +
+      `### 4. Quick Self-Check Questions\n` +
+      `1. How would you explain **${userText.slice(0, 40)}** in one plain sentence?\n` +
+      `2. What happens if one key constraint changes?\n\n` +
+      `> **Tip:** Add your free Gemini, Groq, or OpenRouter API key in **Settings** for full cloud study tutoring, live PDF/image vision analysis, and Google Search citations.` +
+      attachmentSummary;
+
+    await streamText(studyReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
+  // General Chat mode — never invokes MCP tools
+  if (chatMode === 'general') {
+    const fileLine =
+      userAttachments.length > 0
+        ? `\n\nI received your attachment${userAttachments.length > 1 ? 's' : ''}: **${userAttachments.map((a) => a.name).join(', ')}**.`
+        : '';
+    const generalReply =
+      `Here is a direct **General Chat** response (${effort} effort, MCP tools paused):${fileLine}\n\n` +
+      `You asked: *"${userText}"*\n\n` +
+      `Switch to **Professional** mode anytime to run actions across your connected MCP servers, or **Study Session** for structured learning notes and the distraction-free Reader view. Add a free Gemini/Groq/OpenRouter API key in **Settings** for live cloud answers.`;
+
+    await streamText(generalReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
 
   if (lastMessage?.role === 'tool') {
     const recentTools = messages.slice(-2).filter((m) => m.role === 'tool');
@@ -121,7 +176,7 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   const toolCount = tools.length;
   const fallbackReply =
-    `I am running in **Local Sandbox Simulator** mode with **${toolCount}** enabled MCP tool${toolCount === 1 ? '' : 's'} at **${effort}** effort.\n\n` +
+    `I am running in **Local Sandbox Simulator** mode (Professional MCP) with **${toolCount}** enabled MCP tool${toolCount === 1 ? '' : 's'} at **${effort}** effort.\n\n` +
     `Try asking me to:\n` +
     `- **"Search my workspace notes"** (read-only tool call)\n` +
     `- **"Calculate (24 * 7) + 12"** (read-only math tool)\n` +

@@ -496,6 +496,12 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     res.json({ key: toPublicKeyInfo(target) });
   });
 
+  router.get('/control/bridge/status', (_req, res) => {
+    res.json({
+      adminTokenRequired: Boolean(configuredAdminToken),
+    });
+  });
+
   router.get('/control/bridge/stream', requireUiOrigin, (req, res) => {
     const clientId = `ui_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     res.writeHead(200, {

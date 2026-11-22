@@ -2,16 +2,47 @@ import { CONNECTOR_PRESETS } from '../config/connectors';
 import { GITHUB_TOOLS, YOUTUBE_TOOLS } from '../services/mcp/virtualConnectors';
 import type { AgentProfile, AppSettings, McpServerConfig } from '../types';
 
+export const DEFAULT_STUDY_INSTRUCTIONS =
+  '1. Start with a 2-sentence Clear Overview.\n2. Break down Core Concepts with bullet points and simple real-world analogies.\n3. Show a Worked Example or Code/Formula Walkthrough.\n4. End with 3 Quick Self-Check Questions (answers hidden under a short Answers section).';
+
+export const STUDY_INSTRUCTION_PRESETS: Array<{ id: string; label: string; instructions: string }> = [
+  {
+    id: 'step_by_step',
+    label: 'Step-by-Step Guide',
+    instructions: DEFAULT_STUDY_INSTRUCTIONS,
+  },
+  {
+    id: 'exam_prep',
+    label: 'Exam Notes',
+    instructions:
+      '1. High-Yield Definition (1–2 lines)\n2. Key Points to Memorize (concise numbered list)\n3. Common Mistakes & Traps to Avoid\n4. 2 Exam-Style Practice Questions with Brief Solutions.',
+  },
+  {
+    id: 'flashcards',
+    label: 'Flashcard Q&A',
+    instructions:
+      'Organize the explanation as 5–7 crisp Front/Back study flashcards using headings (### Card N: Topic) followed by **Question:** and **Answer:** with a one-line memory hook.',
+  },
+  {
+    id: 'eli5_deep',
+    label: 'Simple + Deep Dive',
+    instructions:
+      '1. Explain Like I’m New (intuitive analogy, zero jargon)\n2. Technical Deep Dive (precise definitions & mechanics)\n3. Quick Summary Table or Key Takeaways.',
+  },
+];
+
 export const BUILT_IN_AGENTS: AgentProfile[] = [
   {
     id: 'agent_general',
     name: 'General Assistant',
     icon: 'compass',
-    description: 'Balanced everyday assistant that uses connected MCP tools when helpful.',
+    description: 'Balanced everyday assistant for day-to-day chat or connected MCP tasks.',
     systemPrompt:
-      'You are General Assistant inside MCP Hub. Answer clearly and concisely. When connected MCP tools can retrieve live facts or perform requested tasks, invoke them accurately and summarize the results.',
+      'You are General Assistant inside MCP Hub. Answer clearly and concisely. Adapt smoothly to the active chat mode.',
     defaultModelId: 'gemini-4-hydrogen',
     defaultEffort: 'medium',
+    defaultChatMode: 'general',
+    studyInstructions: '',
     allowedServerIds: null,
     allowedToolNames: null,
     isBuiltIn: true,
@@ -27,6 +58,25 @@ export const BUILT_IN_AGENTS: AgentProfile[] = [
       'You are MCP Operator, a careful tool-execution specialist. Always inspect available MCP tool schemas before calling a tool, prefer read-only checks before write operations, explain what write action you are about to perform, and verify outcomes after execution.',
     defaultModelId: 'gemini-4-neon',
     defaultEffort: 'high',
+    defaultChatMode: 'professional',
+    studyInstructions: '',
+    allowedServerIds: null,
+    allowedToolNames: null,
+    isBuiltIn: true,
+    createdAt: 1700000000000,
+    updatedAt: 1700000000000,
+  },
+  {
+    id: 'agent_study',
+    name: 'Study Tutor',
+    icon: 'book-open',
+    description: 'Structured learning coach that follows your exact study layout without invoking MCPs.',
+    systemPrompt:
+      'You are Study Tutor, an encouraging, crystal-clear educator. Prioritize understanding, mental models, visual formatting, and strict adherence to the student’s chosen response structure.',
+    defaultModelId: 'gemini-4-hydrogen',
+    defaultEffort: 'medium',
+    defaultChatMode: 'study',
+    studyInstructions: DEFAULT_STUDY_INSTRUCTIONS,
     allowedServerIds: null,
     allowedToolNames: null,
     isBuiltIn: true,
@@ -39,9 +89,11 @@ export const BUILT_IN_AGENTS: AgentProfile[] = [
     icon: 'book-open',
     description: 'Deep synthesis specialist for multi-source reading, structured notes, and citations.',
     systemPrompt:
-      'You are Researcher. Gather evidence systematically from connected MCP resources and tools, cross-check figures, highlight uncertainties explicitly, and structure final findings with clear headings and bullet points.',
+      'You are Researcher. Gather evidence systematically from provided sources, web grounding, or connected MCP tools, cross-check figures, highlight uncertainties explicitly, and structure final findings with clear headings and bullet points.',
     defaultModelId: 'qwen/qwen3-32b',
     defaultEffort: 'high',
+    defaultChatMode: 'professional',
+    studyInstructions: '',
     allowedServerIds: null,
     allowedToolNames: null,
     isBuiltIn: true,

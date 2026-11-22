@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
+import { logoutCurrentAccount, type AuthUser } from '../services/auth/appAuth';
 import {
   buildAgentToolCatalog,
   runAgentLoop,
@@ -18,9 +19,13 @@ import {
 import type {
   AgentProfile,
   AppSettings,
+  ChatAttachment,
   ChatMessage,
+  ChatMode,
   Conversation,
   EffortLevel,
+  GroundingCitation,
+  KnowledgeSourceMode,
   McpServerConfig,
   ModelConfig,
   PendingApproval,
@@ -30,7 +35,12 @@ import type {
   ToolCallRecord,
 } from '../types';
 import { safeErrorMessage } from '../utils/redact';
-import { BUILT_IN_AGENTS, DEFAULT_SERVERS, DEFAULT_SETTINGS } from './defaults';
+import {
+  BUILT_IN_AGENTS,
+  DEFAULT_SERVERS,
+  DEFAULT_SETTINGS,
+  DEFAULT_STUDY_INSTRUCTIONS,
+} from './defaults';
 
 const STATE_KEY = 'mcphub_app_state_v1';
 
@@ -50,6 +60,33 @@ function mergeDefaultServers(saved: McpServerConfig[], dismissedIds: string[]): 
   return [...saved, ...missing];
 }
 
+function mergeBuiltInAgents(saved: AgentProfile[]): AgentProfile[] {
+  const migrated = saved.map((a) => {
+    const builtInMatch = BUILT_IN_AGENTS.find((b) => b.id === a.id);
+    return {
+      ...a,
+      defaultModelId: normalizeModelId(a.defaultModelId),
+      defaultChatMode: a.defaultChatMode ?? builtInMatch?.defaultChatMode ?? 'professional',
+      studyInstructions: a.studyInstructions ?? builtInMatch?.studyInstructions ?? '',
+      allowedToolNames: a.allowedToolNames ?? null,
+    };
+  });
+  const existingIds = new Set(migrated.map((a) => a.id));
+  const missingBuiltIns = BUILT_IN_AGENTS.filter((b) => !existingIds.has(b.id));
+  return [...migrated, ...missingBuiltIns];
+}
+
+function migrateConversation(c: Conversation): Conversation {
+  const nextId = normalizeModelId(c.modelId);
+  return {
+    ...c,
+    modelId: nextId,
+    chatMode: c.chatMode ?? 'professional',
+    knowledgeSource: c.knowledgeSource ?? 'auto',
+    studyInstructions: c.studyInstructions ?? DEFAULT_STUDY_INSTRUCTIONS,
+  };
+}
+
 function readPersistedMeta(): PersistedMeta {
   try {
     const raw = globalThis.localStorage?.getItem(STATE_KEY);
@@ -59,12 +96,10 @@ function readPersistedMeta(): PersistedMeta {
       const savedServers = parsed.servers && parsed.servers.length > 0 ? parsed.servers : [];
       const mergedServers =
         savedServers.length > 0 ? mergeDefaultServers(savedServers, dismissed) : DEFAULT_SERVERS;
-      const migratedAgents = (parsed.agents && parsed.agents.length > 0 ? parsed.agents : BUILT_IN_AGENTS).map(
-        (a) => ({
-          ...a,
-          defaultModelId: normalizeModelId(a.defaultModelId),
-        })
-      );
+      const migratedAgents =
+        parsed.agents && parsed.agents.length > 0
+          ? mergeBuiltInAgents(parsed.agents)
+          : BUILT_IN_AGENTS;
       return {
         servers: mergedServers,
         agents: migratedAgents,
@@ -95,12 +130,16 @@ function writePersistedMeta(meta: PersistedMeta): void {
 
 function createNewConversation(agent: AgentProfile, modelIdOverride?: string): Conversation {
   const now = Date.now();
+  const chatMode: ChatMode = agent.defaultChatMode ?? 'professional';
   return {
     id: `conv_${now}_${Math.random().toString(36).slice(2, 7)}`,
     title: 'New Chat',
     agentId: agent.id,
     modelId: modelIdOverride ?? agent.defaultModelId ?? DEFAULT_MODEL_ID,
     effort: agent.defaultEffort,
+    chatMode,
+    knowledgeSource: 'auto',
+    studyInstructions: agent.studyInstructions?.trim() || DEFAULT_STUDY_INSTRUCTIONS,
     messages: [],
     createdAt: now,
     updatedAt: now,
@@ -112,6 +151,8 @@ export type HubTabId = 'dashboard' | 'chat' | 'servers' | 'agents' | 'settings';
 export interface HubState {
   initialized: boolean;
   isLocked: boolean;
+  authUser: AuthUser | null;
+  authGuestMode: boolean;
   activeTab: HubTabId;
   servers: McpServerConfig[];
   agents: AgentProfile[];
@@ -129,6 +170,11 @@ export interface HubState {
   setActiveTab: (tab: HubTabId) => void;
   unlockApp: () => void;
   lockApp: () => void;
+
+  // Auth
+  setAuthUser: (user: AuthUser | null) => void;
+  continueAsGuest: () => void;
+  signOutAccount: () => Promise<void>;
 
   // Settings & Keys & Models
   updateSettings: (patch: Partial<AppSettings>) => void;
@@ -162,7 +208,13 @@ export interface HubState {
   setActiveAgent: (agentId: string) => void;
   setActiveModel: (modelId: string) => void;
   setActiveEffort: (effort: EffortLevel) => void;
-  sendMessage: (text: string, options?: { autoApproveWrites?: boolean }) => Promise<void>;
+  setChatMode: (mode: ChatMode) => void;
+  setKnowledgeSource: (source: KnowledgeSourceMode) => void;
+  setStudyInstructions: (instructions: string) => void;
+  sendMessage: (
+    text: string,
+    options?: { autoApproveWrites?: boolean; attachments?: ChatAttachment[] }
+  ) => Promise<void>;
   stopRun: () => void;
   resolvePendingApproval: (decision: 'approve' | 'always_allow' | 'deny') => void;
   enableDemoSandbox: () => Promise<void>;
@@ -185,6 +237,8 @@ export const useHubStore = create<HubState>((set, get) => {
   return {
     initialized: false,
     isLocked: initialMeta.settings.biometricLockEnabled,
+    authUser: null,
+    authGuestMode: false,
     activeTab: 'dashboard',
     servers: initialMeta.servers,
     agents: initialMeta.agents,
@@ -200,18 +254,26 @@ export const useHubStore = create<HubState>((set, get) => {
 
     setActiveTab: (tab) => set({ activeTab: tab }),
 
+    setAuthUser: (user) =>
+      set((s) => ({
+        authUser: user,
+        authGuestMode: user ? false : s.authGuestMode,
+      })),
+
+    continueAsGuest: () => set({ authGuestMode: true }),
+
+    signOutAccount: async () => {
+      await logoutCurrentAccount();
+      set({ authUser: null, authGuestMode: false });
+    },
+
     initializeApp: async (autostartSkipOnboarding = false) => {
       const [keys, rawConvs] = await Promise.all([
         loadProviderKeys(),
         historyDb.listConversations(),
       ]);
 
-      // Normalize deprecated model IDs across saved conversations
-      const convs = rawConvs.map((c) => {
-        const nextId = normalizeModelId(c.modelId);
-        return nextId !== c.modelId ? { ...c, modelId: nextId } : c;
-      });
-
+      const convs = rawConvs.map(migrateConversation);
       const state = get();
       const nextSettings = autostartSkipOnboarding
         ? { ...state.settings, onboardingCompleted: true }
@@ -222,7 +284,11 @@ export const useHubStore = create<HubState>((set, get) => {
       const sandboxIdx = updatedServers.findIndex(
         (srv) => srv.url === 'virtual://mcp-hub-sandbox'
       );
-      if (sandboxIdx !== -1 && (updatedServers[sandboxIdx].tools.length === 0 || updatedServers[sandboxIdx].status !== 'connected')) {
+      if (
+        sandboxIdx !== -1 &&
+        (updatedServers[sandboxIdx].tools.length === 0 ||
+          updatedServers[sandboxIdx].status !== 'connected')
+      ) {
         try {
           const inspected = await connectAndInspectServer({
             server: updatedServers[sandboxIdx],
@@ -260,6 +326,7 @@ export const useHubStore = create<HubState>((set, get) => {
         activeConversationId: activeConvId,
         servers: updatedServers,
         settings: nextSettings,
+        authGuestMode: autostartSkipOnboarding ? true : state.authGuestMode,
       });
       persist();
     },
@@ -538,7 +605,15 @@ export const useHubStore = create<HubState>((set, get) => {
       set((s) => ({
         conversations: s.conversations.map((c) => {
           if (c.id !== convId) return c;
-          updated = { ...c, agentId: agent.id, updatedAt: Date.now() };
+          updated = {
+            ...c,
+            agentId: agent.id,
+            chatMode: agent.defaultChatMode ?? c.chatMode,
+            studyInstructions: agent.studyInstructions?.trim()
+              ? agent.studyInstructions
+              : c.studyInstructions,
+            updatedAt: Date.now(),
+          };
           return updated;
         }),
       }));
@@ -573,6 +648,48 @@ export const useHubStore = create<HubState>((set, get) => {
       if (updated) void historyDb.saveConversation(updated);
     },
 
+    setChatMode: (chatMode) => {
+      const convId = get().activeConversationId;
+      if (!convId) return;
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          updated = { ...c, chatMode, updatedAt: Date.now() };
+          return updated;
+        }),
+      }));
+      if (updated) void historyDb.saveConversation(updated);
+    },
+
+    setKnowledgeSource: (knowledgeSource) => {
+      const convId = get().activeConversationId;
+      if (!convId) return;
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          updated = { ...c, knowledgeSource, updatedAt: Date.now() };
+          return updated;
+        }),
+      }));
+      if (updated) void historyDb.saveConversation(updated);
+    },
+
+    setStudyInstructions: (studyInstructions) => {
+      const convId = get().activeConversationId;
+      if (!convId) return;
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          updated = { ...c, studyInstructions, updatedAt: Date.now() };
+          return updated;
+        }),
+      }));
+      if (updated) void historyDb.saveConversation(updated);
+    },
+
     stopRun: () => {
       const state = get();
       state.abortController?.abort();
@@ -600,7 +717,8 @@ export const useHubStore = create<HubState>((set, get) => {
     },
 
     sendMessage: async (rawText, options) => {
-      const text = rawText.trim();
+      const attachments = options?.attachments ?? [];
+      const text = rawText.trim() || (attachments.length > 0 ? 'Analyze the attached file(s).' : '');
       if (!text || get().isRunning) return;
 
       const state = get();
@@ -614,11 +732,17 @@ export const useHubStore = create<HubState>((set, get) => {
       const agent = state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0];
       const model = getModelById(conv.modelId, state.dynamicModels);
       const apiKey = getApiKeyForProvider(model.provider, state.providerKeys);
+      const chatMode = conv.chatMode ?? 'professional';
+      const knowledgeSource = conv.knowledgeSource ?? 'auto';
+      const studyInstructions = conv.studyInstructions ?? '';
 
       const userMsg: ChatMessage = {
         id: `msg_u_${Date.now()}`,
         role: 'user',
         content: text,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        chatMode,
+        knowledgeSource,
         createdAt: Date.now(),
       };
 
@@ -629,6 +753,9 @@ export const useHubStore = create<HubState>((set, get) => {
         content: '',
         reasoning: '',
         toolCalls: [],
+        citations: [],
+        chatMode,
+        knowledgeSource,
         modelId: conv.modelId,
         agentId: agent.id,
         effort: conv.effort,
@@ -655,7 +782,6 @@ export const useHubStore = create<HubState>((set, get) => {
         return latest;
       };
 
-      // Check missing API key cleanly before entering loop
       if (model.provider !== 'demo' && !apiKey) {
         const errorAssistant: ChatMessage = {
           ...assistantMsg,
@@ -682,16 +808,20 @@ export const useHubStore = create<HubState>((set, get) => {
         messages: [...c.messages, userMsg, assistantMsg],
       }));
 
-      // Build LLM history from prior messages
+      // Build LLM history including any file/image attachments on turns
       const llmHistory: LlmConversationItem[] = [];
       for (const m of conv.messages) {
         if (m.role === 'user') {
-          llmHistory.push({ role: 'user', text: m.content });
+          llmHistory.push({ role: 'user', text: m.content, attachments: m.attachments });
         } else if (m.role === 'assistant' && m.content) {
           llmHistory.push({ role: 'assistant', text: m.content });
         }
       }
-      llmHistory.push({ role: 'user', text });
+      llmHistory.push({
+        role: 'user',
+        text,
+        attachments: attachments.length > 0 ? attachments : undefined,
+      });
 
       const updateAssistantMsg = (patch: Partial<ChatMessage>) => {
         patchConv((c) => ({
@@ -702,14 +832,18 @@ export const useHubStore = create<HubState>((set, get) => {
       };
 
       try {
-        // Ensure enabled virtual or disconnected servers attempt tool catalog readiness
-        const { tools } = buildAgentToolCatalog(agent, get().servers);
-        void tools;
+        if (chatMode === 'professional') {
+          const { tools } = buildAgentToolCatalog(agent, get().servers);
+          void tools;
+        }
 
         const result = await runAgentLoop({
           agent,
           modelId: conv.modelId,
           effort: conv.effort,
+          chatMode,
+          studyInstructions,
+          knowledgeSource,
           keys: get().providerKeys,
           dynamicModels: get().dynamicModels,
           servers: get().servers,
@@ -722,6 +856,8 @@ export const useHubStore = create<HubState>((set, get) => {
             onTextDelta: (fullText) => updateAssistantMsg({ content: fullText }),
             onReasoningDelta: (fullReasoning) => updateAssistantMsg({ reasoning: fullReasoning }),
             onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => updateAssistantMsg({ toolCalls }),
+            onCitationsUpdated: (citations: GroundingCitation[]) =>
+              updateAssistantMsg({ citations }),
             onFallbackNotice: (fromModel, toModel, reason) => {
               const shortReason = reason.includes('503')
                 ? 'high demand (503)'
@@ -775,6 +911,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   content: result.finalText || (result.stoppedByUser ? '_Generation stopped._' : ''),
                   reasoning: result.finalReasoning,
                   toolCalls: result.toolCalls,
+                  citations: result.citations,
                   modelId: result.usedModelId,
                   isStreaming: false,
                 }

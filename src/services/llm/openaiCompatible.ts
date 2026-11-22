@@ -40,7 +40,35 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   for (const msg of messages) {
     if (msg.role === 'user') {
-      formattedMessages.push({ role: 'user', content: msg.text });
+      const hasImages = Boolean(msg.attachments?.some((a) => a.kind === 'image' && a.dataBase64));
+      let composedText = msg.text;
+      const imageParts: Array<Record<string, unknown>> = [];
+
+      if (msg.attachments && msg.attachments.length > 0) {
+        for (const att of msg.attachments) {
+          if (att.textContent) {
+            composedText += `\n\n[Attached File: ${att.name}]\n\`\`\`\n${att.textContent}\n\`\`\``;
+          } else if (att.kind === 'image' && att.dataBase64) {
+            imageParts.push({
+              type: 'image_url',
+              image_url: {
+                url: `data:${att.mimeType || 'image/png'};base64,${att.dataBase64}`,
+              },
+            });
+          } else {
+            composedText += `\n\n[Attached File: ${att.name} (${att.mimeType})]`;
+          }
+        }
+      }
+
+      if (hasImages && imageParts.length > 0) {
+        formattedMessages.push({
+          role: 'user',
+          content: [{ type: 'text', text: composedText }, ...imageParts],
+        });
+      } else {
+        formattedMessages.push({ role: 'user', content: composedText });
+      }
     } else if (msg.role === 'assistant') {
       const entry: Record<string, unknown> = {
         role: 'assistant',

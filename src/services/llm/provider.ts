@@ -91,6 +91,8 @@ export async function streamWithRateLimitFallback(params: {
   dynamicModels?: ModelConfig[];
   systemPrompt: string;
   effort: EffortLevel;
+  chatMode?: import('../../types').ChatMode;
+  knowledgeSource?: import('../../types').KnowledgeSourceMode;
   messages: StreamCompletionRequest['messages'];
   tools: StreamCompletionRequest['tools'];
   signal?: AbortSignal;
@@ -116,6 +118,8 @@ export async function streamWithRateLimitFallback(params: {
         apiKey,
         systemPrompt: augmentedPrompt,
         effort: params.effort,
+        chatMode: params.chatMode,
+        knowledgeSource: params.knowledgeSource,
         messages: params.messages,
         tools: params.tools,
         signal: params.signal,

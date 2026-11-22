@@ -8,6 +8,7 @@ import {
   RateLimitError,
   type StreamCompletionRequest,
 } from './types';
+import type { GroundingCitation } from '../../types';
 
 function sanitizeGeminiSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const clone: Record<string, unknown> = {};
@@ -66,7 +67,18 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export async function streamGeminiCompletion(req: StreamCompletionRequest): Promise<void> {
-  const { model, apiKey, systemPrompt, effort, messages, tools, signal, onEvent, fetchFn = fetch } = req;
+  const {
+    model,
+    apiKey,
+    systemPrompt,
+    effort,
+    knowledgeSource,
+    messages,
+    tools,
+    signal,
+    onEvent,
+    fetchFn = fetch,
+  } = req;
   if (!apiKey) {
     throw new ProviderAuthError('Google Gemini API key is not configured.');
   }
@@ -74,7 +86,30 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   const contents: Array<Record<string, unknown>> = [];
   for (const msg of messages) {
     if (msg.role === 'user') {
-      contents.push({ role: 'user', parts: [{ text: msg.text }] });
+      const parts: Array<Record<string, unknown>> = [];
+      let composedText = msg.text;
+      if (msg.attachments && msg.attachments.length > 0) {
+        const textAttachBlocks: string[] = [];
+        for (const att of msg.attachments) {
+          if (att.textContent) {
+            textAttachBlocks.push(`\n\n[Attached File: ${att.name}]\n\`\`\`\n${att.textContent}\n\`\`\``);
+          } else if (att.dataBase64 && (att.kind === 'image' || att.mimeType === 'application/pdf')) {
+            parts.push({
+              inlineData: {
+                mimeType: att.mimeType || 'image/png',
+                data: att.dataBase64,
+              },
+            });
+          } else {
+            textAttachBlocks.push(`\n\n[Attached File: ${att.name} (${att.mimeType})]`);
+          }
+        }
+        if (textAttachBlocks.length > 0) {
+          composedText += textAttachBlocks.join('');
+        }
+      }
+      parts.push({ text: composedText });
+      contents.push({ role: 'user', parts });
     } else if (msg.role === 'assistant') {
       const parts: Array<Record<string, unknown>> = [];
       if (msg.text) parts.push({ text: msg.text });
@@ -117,16 +152,24 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     },
   };
 
+  const geminiTools: Array<Record<string, unknown>> = [];
+  if (knowledgeSource === 'web') {
+    geminiTools.push({ googleSearch: {} });
+  }
   if (tools.length > 0) {
-    body.tools = [
-      {
-        functionDeclarations: tools.map((t) => ({
-          name: t.qualifiedName,
-          description: t.description,
-          parameters: sanitizeGeminiSchema(t.parameters),
-        })),
-      },
-    ];
+    geminiTools.push({
+      functionDeclarations: tools.map((t) => ({
+        name: t.qualifiedName,
+        description: t.description,
+        parameters: sanitizeGeminiSchema(t.parameters),
+      })),
+    });
+  }
+  if (geminiTools.length > 0) {
+    body.tools = geminiTools;
+    if (knowledgeSource === 'web' && tools.length > 0) {
+      body.toolConfig = { includeServerSideToolInvocations: true };
+    }
   }
 
   const endpoint = `${PROVIDER_INFO.gemini.baseUrl}/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse`;
@@ -181,6 +224,7 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   const decoder = new TextDecoder();
   let buffer = '';
   const collectedCalls: LlmToolCall[] = [];
+  const collectedCitations = new Map<string, GroundingCitation>();
 
   while (true) {
     const { value, done } = await reader.read();
@@ -202,6 +246,11 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
               text?: string;
               thought?: boolean;
               functionCall?: { name: string; args?: Record<string, unknown> };
+            }>;
+          };
+          groundingMetadata?: {
+            groundingChunks?: Array<{
+              web?: { uri?: string; title?: string };
             }>;
           };
         }>;
@@ -227,7 +276,8 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
         throw new Error(`Gemini stream error: ${msg}`);
       }
 
-      const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+      const candidate = chunk.candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
       for (const part of parts) {
         if (part.thought && part.text) {
           onEvent({ type: 'reasoning_delta', delta: part.text });
@@ -244,9 +294,22 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
           });
         }
       }
+
+      const groundingChunks = candidate?.groundingMetadata?.groundingChunks ?? [];
+      for (const gc of groundingChunks) {
+        if (gc.web?.uri) {
+          collectedCitations.set(gc.web.uri, {
+            title: gc.web.title || gc.web.uri,
+            url: gc.web.uri,
+          });
+        }
+      }
     }
   }
 
+  if (collectedCitations.size > 0) {
+    onEvent({ type: 'citations', citations: Array.from(collectedCitations.values()) });
+  }
   if (collectedCalls.length > 0) {
     onEvent({ type: 'tool_calls', calls: collectedCalls });
   }
