@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runAgentLoop } from './agentLoop';
+import { buildAgentToolCatalog, runAgentLoop } from './agentLoop';
 import { syncLiveProviderModels } from './provider';
 import { extractReadableApiError } from './types';
 import type { AgentProfile, McpServerConfig, ProviderKeys } from '../../types';
@@ -321,4 +321,130 @@ test('syncLiveProviderModels discovers active free tool-calling models from conf
   assert.equal(synced.models.length, 1);
   assert.equal(synced.models[0].id, 'qwen/qwen3.7-plus:free');
   assert.equal(synced.models[0].supportsReasoningEffort, true);
+});
+
+test('buildAgentToolCatalog deduplicates long qualified tool names exceeding 64 chars', () => {
+  const longServer: McpServerConfig = {
+    ...virtualServer,
+    id: 'srv_very_long_server_identifier_123456',
+    tools: [
+      {
+        name: 'extremely_long_mcp_tool_name_that_truncates_ identically_at_sixty_four_alpha',
+        description: 'Alpha',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'extremely_long_mcp_tool_name_that_truncates_ identically_at_sixty_four_beta',
+        description: 'Beta',
+        inputSchema: { type: 'object', properties: {} },
+      },
+    ],
+  };
+
+  const { tools } = buildAgentToolCatalog(baseAgent, [longServer]);
+  assert.equal(tools.length, 2);
+  assert.notEqual(tools[0].qualifiedName, tools[1].qualifiedName);
+  assert.ok(tools[0].qualifiedName.length <= 64);
+  assert.ok(tools[1].qualifiedName.length <= 64);
+});
+
+test('agentLoop unblocks pending write approval immediately on AbortSignal and treats mid-stream 429 SSE errors as fallback', async () => {
+  const controller = new AbortController();
+  const mockFetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('groq.com')) {
+      return makeOpenAiSseResponse([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'tc_write',
+                    function: {
+                      name: 'srv_virtual__workspace_create_note',
+                      arguments: '{"title":"T","content":"C"}',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ]);
+    }
+    return new Response('Not found', { status: 404 });
+  }) as typeof fetch;
+
+  const hangingApprovalPromise = runAgentLoop({
+    agent: baseAgent,
+    modelId: 'openai/gpt-oss-120b',
+    effort: 'low',
+    keys: { groq: 'gsk_test_123456' },
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Create a note' }],
+    maxSteps: 3,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: controller.signal,
+    fetchFn: mockFetch,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: () =>
+        new Promise<'approve'>(() => {
+          setTimeout(() => controller.abort(), 15);
+        }),
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  const abortedRes = await hangingApprovalPromise;
+  assert.equal(abortedRes.stoppedByUser, true);
+
+  // Mid-stream SSE 429 error chunk should trigger fallback to next model
+  let fallbackTriggered = false;
+  const sseErrorFetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('groq.com')) {
+      return makeOpenAiSseResponse([
+        { error: { code: 429, message: 'Mid-stream rate limit reached' } },
+      ]);
+    }
+    return makeOpenAiSseResponse([{ choices: [{ delta: { content: 'Recovered after SSE error!' } }] }]);
+  }) as typeof fetch;
+
+  const sseRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'openai/gpt-oss-120b',
+    effort: 'low',
+    keys: { groq: 'gsk_test_123456', openrouter: 'sk-or-v1-test123456' },
+    servers: [],
+    history: [{ role: 'user', text: 'Hi' }],
+    maxSteps: 3,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    fetchFn: sseErrorFetch,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {
+        fallbackTriggered = true;
+      },
+      requestApproval: async () => 'approve',
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.equal(fallbackTriggered, true);
+  assert.equal(sseRes.finalText, 'Recovered after SSE error!');
 });

@@ -194,38 +194,55 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
       if (!line.startsWith('data:')) continue;
       const raw = line.slice(5).trim();
       if (!raw || raw === '[DONE]') continue;
+      let chunk: {
+        error?: { message?: string; code?: number; status?: string };
+        candidates?: Array<{
+          content?: {
+            parts?: Array<{
+              text?: string;
+              thought?: boolean;
+              functionCall?: { name: string; args?: Record<string, unknown> };
+            }>;
+          };
+        }>;
+      };
       try {
-        const chunk = JSON.parse(raw) as {
-          candidates?: Array<{
-            content?: {
-              parts?: Array<{
-                text?: string;
-                thought?: boolean;
-                functionCall?: { name: string; args?: Record<string, unknown> };
-              }>;
-            };
-          }>;
-        };
-
-        const parts = chunk.candidates?.[0]?.content?.parts ?? [];
-        for (const part of parts) {
-          if (part.thought && part.text) {
-            onEvent({ type: 'reasoning_delta', delta: part.text });
-          } else if (part.text) {
-            onEvent({ type: 'text_delta', delta: part.text });
-          }
-          if (part.functionCall) {
-            const argsObj = part.functionCall.args ?? {};
-            collectedCalls.push({
-              id: `call_${Date.now()}_${collectedCalls.length}`,
-              name: part.functionCall.name,
-              rawArguments: JSON.stringify(argsObj),
-              parsedArguments: argsObj,
-            });
-          }
-        }
+        chunk = JSON.parse(raw) as typeof chunk;
       } catch {
-        // ignore partial SSE JSON frames
+        continue;
+      }
+
+      if (chunk.error) {
+        const code = Number(chunk.error.code ?? 0);
+        const msg = redactSecrets(chunk.error.message ?? 'Gemini streaming error', [apiKey]);
+        if (code === 429) {
+          throw new RateLimitError(`Gemini rate limit (429): ${msg}`);
+        }
+        if (code === 401 || code === 403) {
+          throw new ProviderAuthError(`Gemini auth failed (${code}): ${msg}`, code);
+        }
+        if (code === 404 || code === 502 || code === 503 || code === 504 || chunk.error.status === 'UNAVAILABLE') {
+          throw new ModelUnavailableError(`${model.label} unavailable (${code || 503}): ${msg}`, code || 503);
+        }
+        throw new Error(`Gemini stream error: ${msg}`);
+      }
+
+      const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+      for (const part of parts) {
+        if (part.thought && part.text) {
+          onEvent({ type: 'reasoning_delta', delta: part.text });
+        } else if (part.text) {
+          onEvent({ type: 'text_delta', delta: part.text });
+        }
+        if (part.functionCall) {
+          const argsObj = part.functionCall.args ?? {};
+          collectedCalls.push({
+            id: `call_${Date.now()}_${collectedCalls.length}`,
+            name: part.functionCall.name,
+            rawArguments: JSON.stringify(argsObj),
+            parsedArguments: argsObj,
+          });
+        }
       }
     }
   }

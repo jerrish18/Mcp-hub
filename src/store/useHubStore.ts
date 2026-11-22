@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { DEFAULT_MODEL_ID, getModelById } from '../config/models';
+import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
 import {
   buildAgentToolCatalog,
   runAgentLoop,
@@ -30,7 +30,7 @@ import type {
   ToolCallRecord,
 } from '../types';
 import { safeErrorMessage } from '../utils/redact';
-import { BUILT_IN_AGENTS, DEFAULT_SANDBOX_SERVER, DEFAULT_SETTINGS } from './defaults';
+import { BUILT_IN_AGENTS, DEFAULT_SERVERS, DEFAULT_SETTINGS } from './defaults';
 
 const STATE_KEY = 'mcphub_app_state_v1';
 
@@ -39,6 +39,15 @@ interface PersistedMeta {
   agents: AgentProfile[];
   settings: AppSettings;
   dynamicModels: ModelConfig[];
+  dismissedDefaultServerIds: string[];
+}
+
+function mergeDefaultServers(saved: McpServerConfig[], dismissedIds: string[]): McpServerConfig[] {
+  const existingIds = new Set(saved.map((s) => s.id));
+  const missing = DEFAULT_SERVERS.filter(
+    (def) => !existingIds.has(def.id) && !dismissedIds.includes(def.id)
+  );
+  return [...saved, ...missing];
 }
 
 function readPersistedMeta(): PersistedMeta {
@@ -46,21 +55,33 @@ function readPersistedMeta(): PersistedMeta {
     const raw = globalThis.localStorage?.getItem(STATE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<PersistedMeta>;
+      const dismissed = parsed.dismissedDefaultServerIds ?? [];
+      const savedServers = parsed.servers && parsed.servers.length > 0 ? parsed.servers : [];
+      const mergedServers =
+        savedServers.length > 0 ? mergeDefaultServers(savedServers, dismissed) : DEFAULT_SERVERS;
+      const migratedAgents = (parsed.agents && parsed.agents.length > 0 ? parsed.agents : BUILT_IN_AGENTS).map(
+        (a) => ({
+          ...a,
+          defaultModelId: normalizeModelId(a.defaultModelId),
+        })
+      );
       return {
-        servers: parsed.servers && parsed.servers.length > 0 ? parsed.servers : [DEFAULT_SANDBOX_SERVER],
-        agents: parsed.agents && parsed.agents.length > 0 ? parsed.agents : BUILT_IN_AGENTS,
+        servers: mergedServers,
+        agents: migratedAgents,
         settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
         dynamicModels: parsed.dynamicModels ?? [],
+        dismissedDefaultServerIds: dismissed,
       };
     }
   } catch {
     // ignore storage errors
   }
   return {
-    servers: [DEFAULT_SANDBOX_SERVER],
+    servers: DEFAULT_SERVERS,
     agents: BUILT_IN_AGENTS,
     settings: DEFAULT_SETTINGS,
     dynamicModels: [],
+    dismissedDefaultServerIds: [],
   };
 }
 
@@ -86,14 +107,18 @@ function createNewConversation(agent: AgentProfile, modelIdOverride?: string): C
   };
 }
 
+export type HubTabId = 'dashboard' | 'chat' | 'servers' | 'agents' | 'settings';
+
 export interface HubState {
   initialized: boolean;
   isLocked: boolean;
+  activeTab: HubTabId;
   servers: McpServerConfig[];
   agents: AgentProfile[];
   settings: AppSettings;
   providerKeys: ProviderKeys;
   dynamicModels: ModelConfig[];
+  dismissedDefaultServerIds: string[];
   conversations: Conversation[];
   activeConversationId: string | null;
   isRunning: boolean;
@@ -101,6 +126,7 @@ export interface HubState {
   pendingApproval: PendingApproval | null;
 
   initializeApp: (autostartSkipOnboarding?: boolean) => Promise<void>;
+  setActiveTab: (tab: HubTabId) => void;
   unlockApp: () => void;
   lockApp: () => void;
 
@@ -113,6 +139,11 @@ export interface HubState {
 
   // Servers
   addOrUpdateServer: (server: McpServerConfig, secrets?: ServerSecretPayload) => Promise<void>;
+  quickConnectServer: (
+    serverId: string,
+    configPatch: Partial<McpServerConfig>,
+    secrets: ServerSecretPayload
+  ) => Promise<{ ok: boolean; error?: string }>;
   deleteServer: (serverId: string) => Promise<void>;
   connectServer: (serverId: string) => Promise<{ ok: boolean; error?: string }>;
   toggleServerTool: (serverId: string, toolName: string) => void;
@@ -131,7 +162,7 @@ export interface HubState {
   setActiveAgent: (agentId: string) => void;
   setActiveModel: (modelId: string) => void;
   setActiveEffort: (effort: EffortLevel) => void;
-  sendMessage: (text: string) => Promise<void>;
+  sendMessage: (text: string, options?: { autoApproveWrites?: boolean }) => Promise<void>;
   stopRun: () => void;
   resolvePendingApproval: (decision: 'approve' | 'always_allow' | 'deny') => void;
   enableDemoSandbox: () => Promise<void>;
@@ -147,38 +178,51 @@ export const useHubStore = create<HubState>((set, get) => {
       agents: s.agents,
       settings: s.settings,
       dynamicModels: s.dynamicModels,
+      dismissedDefaultServerIds: s.dismissedDefaultServerIds,
     });
   };
 
   return {
     initialized: false,
     isLocked: initialMeta.settings.biometricLockEnabled,
+    activeTab: 'dashboard',
     servers: initialMeta.servers,
     agents: initialMeta.agents,
     settings: initialMeta.settings,
     providerKeys: {},
     dynamicModels: initialMeta.dynamicModels,
+    dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
     conversations: [],
     activeConversationId: null,
     isRunning: false,
     abortController: null,
     pendingApproval: null,
 
+    setActiveTab: (tab) => set({ activeTab: tab }),
+
     initializeApp: async (autostartSkipOnboarding = false) => {
-      const [keys, convs] = await Promise.all([
+      const [keys, rawConvs] = await Promise.all([
         loadProviderKeys(),
         historyDb.listConversations(),
       ]);
+
+      // Normalize deprecated model IDs across saved conversations
+      const convs = rawConvs.map((c) => {
+        const nextId = normalizeModelId(c.modelId);
+        return nextId !== c.modelId ? { ...c, modelId: nextId } : c;
+      });
 
       const state = get();
       const nextSettings = autostartSkipOnboarding
         ? { ...state.settings, onboardingCompleted: true }
         : state.settings;
 
-      // Auto-connect virtual sandbox so tools are immediately inspectable
+      // Auto-connect local sandbox virtual server so tools are immediately inspectable
       const updatedServers = [...state.servers];
-      const sandboxIdx = updatedServers.findIndex((srv) => srv.url.startsWith('virtual://'));
-      if (sandboxIdx !== -1 && updatedServers[sandboxIdx].tools.length === 0) {
+      const sandboxIdx = updatedServers.findIndex(
+        (srv) => srv.url === 'virtual://mcp-hub-sandbox'
+      );
+      if (sandboxIdx !== -1 && (updatedServers[sandboxIdx].tools.length === 0 || updatedServers[sandboxIdx].status !== 'connected')) {
         try {
           const inspected = await connectAndInspectServer({
             server: updatedServers[sandboxIdx],
@@ -290,10 +334,25 @@ export const useHubStore = create<HubState>((set, get) => {
       persist();
     },
 
+    quickConnectServer: async (serverId, configPatch, secrets) => {
+      const existingSecrets = await loadServerSecrets(serverId);
+      await saveServerSecrets(serverId, { ...existingSecrets, ...secrets });
+      set((s) => ({
+        servers: s.servers.map((srv) => (srv.id === serverId ? { ...srv, ...configPatch } : srv)),
+      }));
+      persist();
+      return get().connectServer(serverId);
+    },
+
     deleteServer: async (serverId) => {
       await deleteServerSecrets(serverId);
+      const isDefault = DEFAULT_SERVERS.some((d) => d.id === serverId);
       set((s) => ({
         servers: s.servers.filter((srv) => srv.id !== serverId),
+        dismissedDefaultServerIds:
+          isDefault && !s.dismissedDefaultServerIds.includes(serverId)
+            ? [...s.dismissedDefaultServerIds, serverId]
+            : s.dismissedDefaultServerIds,
       }));
       persist();
     },
@@ -532,7 +591,7 @@ export const useHubStore = create<HubState>((set, get) => {
 
     enableDemoSandbox: async () => {
       const state = get();
-      const sandbox = state.servers.find((s) => s.url.startsWith('virtual://'));
+      const sandbox = state.servers.find((s) => s.url === 'virtual://mcp-hub-sandbox');
       if (sandbox) {
         await state.connectServer(sandbox.id);
       }
@@ -540,7 +599,7 @@ export const useHubStore = create<HubState>((set, get) => {
       state.setActiveModel('demo-sandbox');
     },
 
-    sendMessage: async (rawText) => {
+    sendMessage: async (rawText, options) => {
       const text = rawText.trim();
       if (!text || get().isRunning) return;
 
@@ -656,7 +715,7 @@ export const useHubStore = create<HubState>((set, get) => {
           servers: get().servers,
           history: llmHistory,
           maxSteps: get().settings.maxAgentSteps,
-          confirmBeforeWrite: get().settings.confirmBeforeWrite,
+          confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           signal: abortController.signal,
           callbacks: {

@@ -45,14 +45,22 @@ export function HistoryListContent({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search chats..."
             aria-label="Search chat history"
-            className="w-full min-h-[44px] pl-9 pr-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="w-full min-h-[44px] pl-9 pr-3 rounded-2xl border text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none"
           />
         </div>
         <button
           type="button"
           onClick={onNewChat}
           aria-label="Start new chat"
-          className="min-h-[44px] px-3.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 shrink-0 transition-colors"
+          style={{
+            backgroundColor: 'var(--m3-primary)',
+            color: 'var(--m3-on-primary)',
+          }}
+          className="min-h-[44px] px-3.5 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 shrink-0 transition-opacity hover:opacity-90"
         >
           <MessageSquarePlus className="w-4 h-4" />
           <span>New</span>
@@ -72,11 +80,18 @@ export function HistoryListContent({
             return (
               <div
                 key={conv.id}
-                className={`rounded-2xl border transition-colors ${
+                style={
                   isActive
-                    ? 'border-blue-500/70 bg-blue-50/70 dark:bg-blue-950/30'
-                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                }`}
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        borderColor: 'var(--m3-primary)',
+                      }
+                    : {
+                        backgroundColor: 'var(--m3-surface)',
+                        borderColor: 'var(--m3-outline)',
+                      }
+                }
+                className="rounded-2xl border transition-colors"
               >
                 {isEditing ? (
                   <div className="p-2 flex items-center gap-1.5">
@@ -103,7 +118,11 @@ export function HistoryListContent({
                         setEditingId(null);
                       }}
                       aria-label={`Save title for ${conv.title}`}
-                      className="min-h-[40px] min-w-[40px] rounded-xl bg-blue-600 text-white flex items-center justify-center"
+                      style={{
+                        backgroundColor: 'var(--m3-primary)',
+                        color: 'var(--m3-on-primary)',
+                      }}
+                      className="min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center"
                     >
                       <Check className="w-4 h-4" />
                     </button>

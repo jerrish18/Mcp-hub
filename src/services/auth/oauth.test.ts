@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import {
   buildAuthorizationUrl,
   discoverOAuthMetadata,
+  extractAuthCodeFromInput,
   generatePkcePair,
-  isTokenExpiring,
   registerDynamicClient,
   resolveServerAuthHeaders,
+  isTokenExpiring,
 } from './oauth';
+import { normalizeModelId } from '../../config/models';
 import type { McpServerConfig, ServerSecretPayload } from '../../types';
 import { redactSecrets } from '../../utils/redact';
 
@@ -177,6 +179,12 @@ test('resolveServerAuthHeaders supports bearer, basic, custom_headers, client_cr
   });
   assert.equal(bearerRes.headers.Authorization, 'Bearer my-secret-key');
 
+  const lowerBearerRes = await resolveServerAuthHeaders({
+    server: mkServer('bearer'),
+    secrets: { bearerToken: '  bearer already-prefixed-tok  ' },
+  });
+  assert.equal(lowerBearerRes.headers.Authorization, 'bearer already-prefixed-tok');
+
   const basicRes = await resolveServerAuthHeaders({
     server: mkServer('basic'),
     secrets: { basicUsername: 'alice', basicPassword: 'pw' },
@@ -188,6 +196,21 @@ test('resolveServerAuthHeaders supports bearer, basic, custom_headers, client_cr
     secrets: { customHeaders: { 'X-Api-Key': 'val123' } },
   });
   assert.equal(customRes.headers['X-Api-Key'], 'val123');
+});
+
+test('extractAuthCodeFromInput extracts ?code from full redirect URLs or raw codes', () => {
+  assert.equal(
+    extractAuthCodeFromInput('https://localhost:3000/oauth-callback?code=auth_abc123&state=xyz'),
+    'auth_abc123'
+  );
+  assert.equal(extractAuthCodeFromInput('?code=query_code_99&state=s'), 'query_code_99');
+  assert.equal(extractAuthCodeFromInput('  raw_code_only  '), 'raw_code_only');
+});
+
+test('normalizeModelId migrates deprecated model slugs automatically', () => {
+  assert.equal(normalizeModelId('llama-3.3-70b-versatile'), 'openai/gpt-oss-120b');
+  assert.equal(normalizeModelId('qwen/qwen3-235b-a22b:free'), 'qwen/qwen3.7-plus:free');
+  assert.equal(normalizeModelId('gemini-4-hydrogen'), 'gemini-4-hydrogen');
 });
 
 test('redactSecrets scrubs API keys, Bearer tokens, and Basic creds', () => {

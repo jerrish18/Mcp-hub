@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { motion } from 'motion/react';
 import {
   CheckCircle2,
   Eye,
@@ -20,8 +21,10 @@ import { useHubStore } from '../../store/useHubStore';
 import type { PixelAccentTheme, ProviderId, ProviderKeys } from '../../types';
 import { M3Switch } from '../../ui/M3Switch';
 import { triggerHaptic } from '../../utils/haptics';
+import { cardStaggerContainer, cardStaggerItem } from '../../utils/motion';
 import { safeErrorMessage } from '../../utils/redact';
 import { PIXEL_PALETTES } from '../../utils/theme';
+import { AppApiKeySection } from './AppApiKeySection';
 
 export function SettingsScreen() {
   const {
@@ -149,18 +152,24 @@ export function SettingsScreen() {
       style={{ backgroundColor: 'var(--m3-surface)' }}
       className="h-full overflow-y-auto p-4 sm:p-6"
     >
-      <div className="max-w-3xl mx-auto space-y-5 pb-10">
-        <div>
+      <motion.div
+        variants={cardStaggerContainer}
+        initial="initial"
+        animate="animate"
+        className="max-w-3xl mx-auto space-y-5 pb-10"
+      >
+        <motion.div variants={cardStaggerItem}>
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
             Settings
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             Pixel Material You appearance, encrypted API keys, live model sync & safety
           </p>
-        </div>
+        </motion.div>
 
         {/* Pixel Material You & Appearance Studio */}
-        <section
+        <motion.section
+          variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
@@ -269,10 +278,11 @@ export function SettingsScreen() {
               onChange={() => updateSettings({ oledDark: !settings.oledDark })}
             />
           </div>
-        </section>
+        </motion.section>
 
         {/* Provider API Keys */}
-        <form
+        <motion.form
+          variants={cardStaggerItem}
           onSubmit={handleSaveKeys}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
@@ -409,10 +419,16 @@ export function SettingsScreen() {
               </span>
             )}
           </div>
-        </form>
+        </motion.form>
+
+        {/* App API & External Agent Control */}
+        <motion.div variants={cardStaggerItem}>
+          <AppApiKeySection />
+        </motion.div>
 
         {/* Live Model Sync & Connectivity Test */}
-        <section
+        <motion.section
+          variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
@@ -558,10 +574,11 @@ export function SettingsScreen() {
               </button>
             </div>
           </form>
-        </section>
+        </motion.section>
 
         {/* Agent Loop & Safety */}
-        <section
+        <motion.section
+          variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
@@ -681,8 +698,8 @@ export function SettingsScreen() {
               ))}
             </div>
           )}
-        </section>
-      </div>
+        </motion.section>
+      </motion.div>
     </div>
   );
 }

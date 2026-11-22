@@ -2,6 +2,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]'],
   [/Basic\s+[A-Za-z0-9+/=]{8,}/gi, 'Basic [REDACTED]'],
   [/AIza[0-9A-Za-z\-_]{20,}/g, 'AIza[REDACTED]'],
+  [/mcphub_live_[0-9A-Za-z\-_]{16,}/g, 'mcphub_live_[REDACTED]'],
   [/gsk_[0-9A-Za-z]{16,}/g, 'gsk_[REDACTED]'],
   [/sk-or-v1-[0-9A-Za-z]{16,}/g, 'sk-or-v1-[REDACTED]'],
   [/sk-[0-9A-Za-z]{20,}/g, 'sk-[REDACTED]'],
@@ -35,12 +36,21 @@ export function safeErrorMessage(error: unknown, knownSecrets: string[] = []): s
 export function assertSecureServerUrl(url: string): void {
   const trimmed = url.trim();
   if (
-    trimmed.startsWith('https://') ||
-    trimmed.startsWith('virtual://') ||
-    trimmed.startsWith('http://localhost') ||
-    trimmed.startsWith('http://127.0.0.1')
+    !(
+      trimmed.startsWith('https://') ||
+      trimmed.startsWith('virtual://') ||
+      trimmed.startsWith('http://localhost') ||
+      trimmed.startsWith('http://127.0.0.1')
+    )
   ) {
-    return;
+    throw new Error('Insecure URL rejected: remote MCP servers and OAuth endpoints must use HTTPS.');
   }
-  throw new Error('Insecure URL rejected: remote MCP servers and OAuth endpoints must use HTTPS.');
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname) {
+      throw new Error('URL is missing a valid hostname.');
+    }
+  } catch {
+    throw new Error('Invalid server or OAuth URL.');
+  }
 }

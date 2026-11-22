@@ -95,14 +95,28 @@ export const McpServerConfigSchema = z.object({
   name: z.string().min(1, 'Server name is required').max(80),
   url: z
     .string()
+    .trim()
     .min(1, 'Server URL is required')
     .refine(
-      (val) =>
-        val.startsWith('https://') ||
-        val.startsWith('virtual://') ||
-        val.startsWith('http://localhost') ||
-        val.startsWith('http://127.0.0.1'),
-      { message: 'Remote servers must use HTTPS (or virtual:// / localhost for testing)' }
+      (val) => {
+        if (
+          !(
+            val.startsWith('https://') ||
+            val.startsWith('virtual://') ||
+            val.startsWith('http://localhost') ||
+            val.startsWith('http://127.0.0.1')
+          )
+        ) {
+          return false;
+        }
+        try {
+          const parsed = new URL(val);
+          return Boolean(parsed.hostname);
+        } catch {
+          return false;
+        }
+      },
+      { message: 'Enter a valid HTTPS URL (or virtual:// / localhost for testing)' }
     ),
   authType: AuthTypeSchema,
   enabled: z.boolean().default(true),
@@ -114,6 +128,8 @@ export const McpServerConfigSchema = z.object({
   resources: z.array(z.custom<McpResource>()).default([]),
   prompts: z.array(z.custom<McpPrompt>()).default([]),
   disabledTools: z.array(z.string()).default([]),
+  presetId: z.enum(['sandbox', 'youtube', 'github', 'canva', 'custom']).optional(),
+  docsUrl: z.string().optional(),
 });
 
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;

@@ -167,6 +167,24 @@ export function buildAuthorizationUrl(params: {
   return url.toString();
 }
 
+export function extractAuthCodeFromInput(rawInput: string): string {
+  const trimmed = rawInput.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.includes('code=')) {
+    try {
+      const normalized = trimmed.startsWith('http')
+        ? trimmed
+        : `https://callback.local/?${trimmed.replace(/^\?/, '')}`;
+      const u = new URL(normalized);
+      const code = u.searchParams.get('code');
+      if (code) return code.trim();
+    } catch {
+      // fall back to raw text
+    }
+  }
+  return trimmed;
+}
+
 function normalizeTokenResponse(data: Record<string, unknown>, existingRefreshToken?: string): OAuthTokenSet {
   const accessToken = typeof data.access_token === 'string' ? data.access_token : '';
   if (!accessToken) {
@@ -342,14 +360,13 @@ export async function resolveServerAuthHeaders(params: {
       return { headers: {} };
 
     case 'bearer': {
-      if (!secrets.bearerToken) {
+      const trimmed = secrets.bearerToken?.trim() ?? '';
+      if (!trimmed) {
         throw new Error(`Server "${server.name}" requires an API key / Bearer token.`);
       }
       return {
         headers: {
-          Authorization: secrets.bearerToken.startsWith('Bearer ')
-            ? secrets.bearerToken
-            : `Bearer ${secrets.bearerToken}`,
+          Authorization: /^Bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`,
         },
       };
     }

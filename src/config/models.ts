@@ -143,10 +143,20 @@ export const PROVIDER_INFO: Record<
 
 export const DEFAULT_MODEL_ID = 'gemini-4-hydrogen';
 
+export const MODEL_MIGRATION_ALIASES: Record<string, string> = {
+  'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+  'qwen/qwen3-235b-a22b:free': 'qwen/qwen3.7-plus:free',
+};
+
+export function normalizeModelId(modelId: string): string {
+  return MODEL_MIGRATION_ALIASES[modelId] ?? modelId;
+}
+
 export function getModelById(modelId: string, dynamicModels: ModelConfig[] = []): ModelConfig {
+  const normalized = normalizeModelId(modelId);
   return (
-    dynamicModels.find((m) => m.id === modelId) ??
-    FREE_MODELS.find((m) => m.id === modelId) ??
+    dynamicModels.find((m) => m.id === normalized) ??
+    FREE_MODELS.find((m) => m.id === normalized) ??
     FREE_MODELS[0]
   );
 }

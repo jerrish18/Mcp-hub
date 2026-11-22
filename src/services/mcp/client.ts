@@ -7,6 +7,7 @@ import type {
 } from '../../types';
 import { assertSecureServerUrl, redactSecrets } from '../../utils/redact';
 import { type FetchLike, resolveServerAuthHeaders } from '../auth/oauth';
+import { handleGithubVirtualMcp, handleYoutubeVirtualMcp } from './virtualConnectors';
 import { handleVirtualMcpRequest } from './virtualSandbox';
 
 interface JsonRpcResponse<T = unknown> {
@@ -60,6 +61,13 @@ export class McpUnauthorizedError extends Error {
   }
 }
 
+export class McpSessionExpiredError extends Error {
+  constructor() {
+    super('MCP session expired');
+    this.name = 'McpSessionExpiredError';
+  }
+}
+
 export async function sendMcpRpc<T = unknown>(params: {
   server: McpServerConfig;
   secrets: ServerSecretPayload;
@@ -83,6 +91,30 @@ export async function sendMcpRpc<T = unknown>(params: {
 
   assertSecureServerUrl(server.url);
   const reqId = rpcSeq++;
+
+  if (server.url === 'virtual://youtube-data-api') {
+    const res = (await handleYoutubeVirtualMcp({
+      id: reqId,
+      method,
+      rpcParams,
+      secrets,
+      fetchFn,
+    })) as unknown as JsonRpcResponse<T>;
+    if (res.error) throw new Error(res.error.message);
+    return { result: res.result as T };
+  }
+
+  if (server.url === 'virtual://github-api') {
+    const res = (await handleGithubVirtualMcp({
+      id: reqId,
+      method,
+      rpcParams,
+      secrets,
+      fetchFn,
+    })) as unknown as JsonRpcResponse<T>;
+    if (res.error) throw new Error(res.error.message);
+    return { result: res.result as T };
+  }
 
   if (server.url.startsWith('virtual://')) {
     const res = (await handleVirtualMcpRequest({
@@ -145,6 +177,12 @@ export async function sendMcpRpc<T = unknown>(params: {
 
         if (res.status === 401) {
           throw new McpUnauthorizedError();
+        }
+
+        // Stale session recovery: clear cached Mcp-Session-Id on 404/410 and retry cleanly once
+        if ((res.status === 404 || res.status === 410) && session.sessionId) {
+          activeSessions.delete(server.id);
+          throw new McpSessionExpiredError();
         }
 
         // Fallback to legacy SSE if Streamable HTTP POST is rejected with 404/405/406
@@ -270,6 +308,10 @@ export async function sendMcpRpc<T = unknown>(params: {
     const result = await executeAttempt(false);
     return { result, updatedSecrets: latestUpdatedSecrets };
   } catch (err) {
+    if (err instanceof McpSessionExpiredError) {
+      const result = await executeAttempt(false);
+      return { result, updatedSecrets: latestUpdatedSecrets };
+    }
     // Requirement: Refresh expired OAuth token and retry once on 401
     const canRefresh =
       err instanceof McpUnauthorizedError &&
@@ -277,6 +319,11 @@ export async function sendMcpRpc<T = unknown>(params: {
     if (canRefresh) {
       const result = await executeAttempt(true);
       return { result, updatedSecrets: latestUpdatedSecrets };
+    }
+    if (err instanceof TypeError && err.message.toLowerCase().includes('fetch')) {
+      throw new Error(
+        `Network or browser CORS block reaching ${server.url}. Verify HTTPS availability or use Direct API mode / Expo mobile client.`
+      );
     }
     throw err;
   }
@@ -310,6 +357,18 @@ export async function connectAndInspectServer(params: {
   track(init.updatedSecrets);
 
   const secretsToUse = latestSecrets ?? params.secrets;
+
+  // Send MCP initialized notification (best-effort; strict remote servers require it before tools/list)
+  try {
+    const notifyRes = await sendMcpRpc({
+      ...params,
+      secrets: secretsToUse,
+      method: 'notifications/initialized',
+    });
+    track(notifyRes.updatedSecrets);
+  } catch {
+    // Some stateless MCP proxies do not return JSON for notifications/initialized
+  }
 
   const toolsRes = await sendMcpRpc<{ tools?: McpTool[] }>({
     ...params,

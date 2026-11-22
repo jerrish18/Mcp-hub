@@ -5,22 +5,48 @@ const DB_VERSION = 1;
 const STORE_NAME = 'conversations';
 const LS_FALLBACK_KEY = 'mcphub_conversations_v1';
 
+let dbPromise: Promise<IDBDatabase | null> | null = null;
+
 function openDatabase(): Promise<IDBDatabase | null> {
   if (typeof globalThis.indexedDB === 'undefined') {
     return Promise.resolve(null);
   }
-  return new Promise((resolve) => {
-    const req = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-        store.createIndex('updatedAt', 'updatedAt', { unique: false });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null);
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve) => {
+    try {
+      const req = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          store.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        db.onclose = () => {
+          dbPromise = null;
+        };
+        resolve(db);
+      };
+      req.onerror = () => {
+        dbPromise = null;
+        resolve(null);
+      };
+      req.onblocked = () => {
+        resolve(null);
+      };
+    } catch {
+      dbPromise = null;
+      resolve(null);
+    }
   });
+  return dbPromise;
 }
 
 function readLocalStorageFallback(): Conversation[] {

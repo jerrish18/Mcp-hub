@@ -1,8 +1,8 @@
 import { useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   Clock,
   Loader2,
@@ -11,6 +11,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import type { ToolCallRecord } from '../types';
+import { M3_EMPHASIZED_EASE, M3_FAST_EASE } from '../utils/motion';
 
 interface ToolCallCardProps {
   record: ToolCallRecord;
@@ -59,29 +60,39 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
   const StatusIcon = meta.Icon;
 
   return (
-    <div
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={M3_EMPHASIZED_EASE}
       data-testid="tool-call-card"
-      className="my-2 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden"
+      style={{
+        backgroundColor: 'var(--m3-surface-container)',
+        borderColor: 'var(--m3-outline)',
+      }}
+      className="my-2 rounded-2xl border overflow-hidden"
     >
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
         aria-expanded={expanded}
         aria-label={`Tool call ${record.toolName} on ${record.serverName}, status ${meta.label}`}
-        className="w-full min-h-[48px] px-3.5 py-2.5 flex items-center justify-between gap-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors"
+        className="w-full min-h-[48px] px-3.5 py-2.5 flex items-center justify-between gap-3 text-left hover:bg-slate-200/35 dark:hover:bg-slate-800/45 transition-colors"
       >
         <div className="flex items-center gap-2.5 min-w-0">
-          <span className="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center shrink-0 text-slate-600 dark:text-slate-300">
+          <span
+            style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
+            className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-slate-600 dark:text-slate-300"
+          >
             <Wrench className="w-4 h-4" />
           </span>
           <div className="min-w-0">
             <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate font-mono">
               {record.toolName}
             </div>
-            <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 truncate">
-              <span>{record.serverName}</span>
+            <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center flex-wrap gap-x-1.5 gap-y-0.5">
+              <span className="truncate max-w-[140px] sm:max-w-none">{record.serverName}</span>
               <span aria-hidden="true">·</span>
-              <span>{record.isReadOnly ? 'Read-only' : 'Write action'}</span>
+              <span className="whitespace-nowrap">{record.isReadOnly ? 'Read-only' : 'Write action'}</span>
             </div>
           </div>
         </div>
@@ -97,43 +108,59 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
             <StatusIcon className={`w-3.5 h-3.5 ${meta.spin ? 'animate-spin' : ''}`} />
             <span>{meta.label}</span>
           </span>
-          {expanded ? (
-            <ChevronDown className="w-4 h-4 text-slate-400" />
-          ) : (
-            <ChevronRight className="w-4 h-4 text-slate-400" />
-          )}
+          <motion.span
+            initial={false}
+            animate={{ rotate: expanded ? 90 : 0 }}
+            transition={M3_FAST_EASE}
+            className="inline-flex text-slate-400"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </motion.span>
         </div>
       </button>
 
-      {expanded && (
-        <div className="border-t border-slate-200 dark:border-slate-800 px-3.5 py-3 space-y-3 bg-slate-50/70 dark:bg-slate-950/50 text-xs">
-          <div>
-            <div className="font-medium text-slate-600 dark:text-slate-400 mb-1">Arguments</div>
-            <pre className="p-2.5 rounded-xl bg-slate-900 text-slate-100 font-mono overflow-x-auto leading-relaxed">
-              {JSON.stringify(record.arguments, null, 2)}
-            </pre>
-          </div>
-          {record.result !== undefined && (
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            key="tool-details"
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={M3_FAST_EASE}
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="border-t px-3.5 py-3 space-y-3 text-xs"
+          >
             <div>
-              <div className="flex items-center justify-between font-medium text-slate-600 dark:text-slate-400 mb-1">
-                <span>Result</span>
-                {typeof record.durationMs === 'number' && (
-                  <span className="tabular-nums font-mono">{record.durationMs}ms</span>
-                )}
-              </div>
-              <pre
-                className={`p-2.5 rounded-xl font-mono overflow-x-auto leading-relaxed max-h-56 ${
-                  record.isError
-                    ? 'bg-rose-950/80 text-rose-100'
-                    : 'bg-slate-900 text-slate-100'
-                }`}
-              >
-                {record.result}
+              <div className="font-medium text-slate-600 dark:text-slate-400 mb-1">Arguments</div>
+              <pre className="p-2.5 rounded-xl bg-slate-900 text-slate-100 font-mono overflow-x-auto leading-relaxed">
+                {JSON.stringify(record.arguments, null, 2)}
               </pre>
             </div>
-          )}
-        </div>
-      )}
-    </div>
+            {record.result !== undefined && (
+              <div>
+                <div className="flex items-center justify-between font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  <span>Result</span>
+                  {typeof record.durationMs === 'number' && (
+                    <span className="tabular-nums font-mono">{record.durationMs}ms</span>
+                  )}
+                </div>
+                <pre
+                  className={`p-2.5 rounded-xl font-mono overflow-x-auto leading-relaxed max-h-56 ${
+                    record.isError
+                      ? 'bg-rose-950/80 text-rose-100'
+                      : 'bg-slate-900 text-slate-100'
+                  }`}
+                >
+                  {record.result}
+                </pre>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }

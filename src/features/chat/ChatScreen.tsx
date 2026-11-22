@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
   ArrowUp,
@@ -24,6 +25,7 @@ import { MarkdownRenderer } from '../../ui/MarkdownRenderer';
 import { ToolCallCard } from '../../ui/ToolCallCard';
 import { WriteApprovalBanner } from '../../ui/WriteApprovalBanner';
 import { triggerHaptic } from '../../utils/haptics';
+import { M3_EMPHASIZED_EASE } from '../../utils/motion';
 import { AgentModelSwitcherSheet } from './AgentModelSwitcherSheet';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 
@@ -89,6 +91,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const speechTimerRef = useRef<number | null>(null);
 
   const activeConv = conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
   const activeAgent = agents.find((a) => a.id === activeConv?.agentId) ?? agents[0];
@@ -96,16 +99,31 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const activeEffort: EffortLevel = activeConv?.effort ?? activeAgent.defaultEffort;
 
   const { tools } = buildAgentToolCatalog(activeAgent, servers);
+  const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [activeConv?.messages.length, activeConv?.messages[activeConv.messages.length - 1]?.content]);
+  }, [
+    activeConv?.messages.length,
+    lastMsg?.content,
+    lastMsg?.toolCalls?.length,
+    lastMsg?.error,
+  ]);
+
+  useEffect(() => {
+    // Stop active dictation when switching conversations
+    recognitionRef.current?.stop();
+    setIsListening(false);
+  }, [activeConversationId]);
 
   useEffect(() => {
     return () => {
+      if (speechTimerRef.current !== null) {
+        window.clearTimeout(speechTimerRef.current);
+      }
       recognitionRef.current?.stop();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -148,7 +166,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     const SpeechRec = win.SpeechRecognition ?? win.webkitSpeechRecognition;
     if (!SpeechRec) {
       setSpeechNotice('Voice dictation unavailable in this browser. Tap your Gboard mic key on Pixel.');
-      setTimeout(() => setSpeechNotice(''), 3500);
+      if (speechTimerRef.current !== null) window.clearTimeout(speechTimerRef.current);
+      speechTimerRef.current = window.setTimeout(() => setSpeechNotice(''), 3500);
       return;
     }
 
@@ -390,7 +409,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
             if (msg.role === 'user') {
               return (
-                <div key={msg.id} className="max-w-2xl mx-auto flex justify-end">
+                <motion.div
+                  key={msg.id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={M3_EMPHASIZED_EASE}
+                  className="max-w-2xl mx-auto flex justify-end"
+                >
                   <div
                     style={{
                       backgroundColor: 'var(--m3-primary)',
@@ -400,12 +425,18 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   >
                     {msg.content}
                   </div>
-                </div>
+                </motion.div>
               );
             }
 
             return (
-              <div key={msg.id} className="max-w-2xl mx-auto space-y-2">
+              <motion.div
+                key={msg.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={M3_EMPHASIZED_EASE}
+                className="max-w-2xl mx-auto space-y-2"
+              >
                 {msg.reasoning && (
                   <details
                     style={{
@@ -513,21 +544,24 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     )}
                   </div>
                 )}
-              </div>
+              </motion.div>
             );
           })}
         </div>
 
         {/* Interactive Write-Action Confirmation Gate */}
-        {pendingApproval && (
-          <WriteApprovalBanner
-            approval={pendingApproval}
-            onDecision={(decision) => {
-              triggerHaptic(settings.hapticsEnabled, decision === 'deny' ? 'warning' : 'success');
-              resolvePendingApproval(decision);
-            }}
-          />
-        )}
+        <AnimatePresence>
+          {pendingApproval && (
+            <WriteApprovalBanner
+              key={pendingApproval.toolCallId}
+              approval={pendingApproval}
+              onDecision={(decision) => {
+                triggerHaptic(settings.hapticsEnabled, decision === 'deny' ? 'warning' : 'success');
+                resolvePendingApproval(decision);
+              }}
+            />
+          )}
+        </AnimatePresence>
 
         {speechNotice && (
           <div className="px-4 pb-1 text-center text-xs text-slate-500 dark:text-slate-400">

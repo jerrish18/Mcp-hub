@@ -30,7 +30,14 @@ export function buildAgentToolCatalog(
 
       const safeServerPrefix = server.id.replace(/[^a-zA-Z0-9_]/g, '_');
       const safeToolSuffix = tool.name.replace(/[^a-zA-Z0-9_]/g, '_');
-      const qualifiedName = `${safeServerPrefix}__${safeToolSuffix}`.slice(0, 64);
+      let qualifiedName = `${safeServerPrefix}__${safeToolSuffix}`.slice(0, 64);
+      if (lookup.has(qualifiedName)) {
+        let suffixIdx = 2;
+        while (lookup.has(qualifiedName)) {
+          const suffix = `_${suffixIdx++}`;
+          qualifiedName = `${safeServerPrefix}__${safeToolSuffix}`.slice(0, 64 - suffix.length) + suffix;
+        }
+      }
 
       const def: LlmToolDefinition = {
         qualifiedName,
@@ -276,15 +283,44 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         record.status = 'pending_approval';
         callbacks.onToolCallsUpdated([...allToolRecords]);
 
-        const decision = await callbacks.requestApproval({
-          toolCallId: call.id,
-          serverId: server.id,
-          serverName: server.name,
-          toolName: def.originalName,
-          qualifiedKey,
-          arguments: record.arguments,
-          description: def.description,
-          isDestructive: def.isDestructive,
+        const decision = await new Promise<'approve' | 'always_allow' | 'deny'>((resolve) => {
+          if (signal.aborted) {
+            resolve('deny');
+            return;
+          }
+          let settled = false;
+          const onAbort = () => {
+            if (!settled) {
+              settled = true;
+              resolve('deny');
+            }
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+          callbacks
+            .requestApproval({
+              toolCallId: call.id,
+              serverId: server.id,
+              serverName: server.name,
+              toolName: def.originalName,
+              qualifiedKey,
+              arguments: record.arguments,
+              description: def.description,
+              isDestructive: def.isDestructive,
+            })
+            .then((ans) => {
+              signal.removeEventListener('abort', onAbort);
+              if (!settled) {
+                settled = true;
+                resolve(ans);
+              }
+            })
+            .catch(() => {
+              signal.removeEventListener('abort', onAbort);
+              if (!settled) {
+                settled = true;
+                resolve('deny');
+              }
+            });
         });
 
         if (signal.aborted) {

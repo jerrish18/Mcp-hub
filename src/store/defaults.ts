@@ -1,3 +1,5 @@
+import { CONNECTOR_PRESETS } from '../config/connectors';
+import { GITHUB_TOOLS, YOUTUBE_TOOLS } from '../services/mcp/virtualConnectors';
 import type { AgentProfile, AppSettings, McpServerConfig } from '../types';
 
 export const BUILT_IN_AGENTS: AgentProfile[] = [
@@ -60,7 +62,63 @@ export const DEFAULT_SANDBOX_SERVER: McpServerConfig = {
   resources: [],
   prompts: [],
   disabledTools: [],
+  presetId: 'sandbox',
 };
+
+export const YOUTUBE_DEFAULT_SERVER: McpServerConfig = {
+  id: CONNECTOR_PRESETS.youtube.serverId,
+  name: CONNECTOR_PRESETS.youtube.name,
+  url: CONNECTOR_PRESETS.youtube.defaultUrl,
+  authType: CONNECTOR_PRESETS.youtube.defaultAuthType,
+  enabled: true,
+  transportPreference: 'auto',
+  status: 'disconnected',
+  tools: YOUTUBE_TOOLS,
+  resources: [],
+  prompts: [],
+  disabledTools: [],
+  presetId: 'youtube',
+  docsUrl: CONNECTOR_PRESETS.youtube.keyUrl,
+};
+
+export const GITHUB_DEFAULT_SERVER: McpServerConfig = {
+  id: CONNECTOR_PRESETS.github.serverId,
+  name: CONNECTOR_PRESETS.github.name,
+  url: CONNECTOR_PRESETS.github.defaultUrl,
+  authType: CONNECTOR_PRESETS.github.defaultAuthType,
+  enabled: true,
+  transportPreference: 'auto',
+  status: 'disconnected',
+  tools: GITHUB_TOOLS,
+  resources: [],
+  prompts: [],
+  disabledTools: [],
+  presetId: 'github',
+  docsUrl: CONNECTOR_PRESETS.github.keyUrl,
+};
+
+export const CANVA_DEFAULT_SERVER: McpServerConfig = {
+  id: CONNECTOR_PRESETS.canva.serverId,
+  name: CONNECTOR_PRESETS.canva.name,
+  url: CONNECTOR_PRESETS.canva.defaultUrl,
+  authType: CONNECTOR_PRESETS.canva.defaultAuthType,
+  enabled: true,
+  transportPreference: 'auto',
+  status: 'disconnected',
+  tools: [],
+  resources: [],
+  prompts: [],
+  disabledTools: [],
+  presetId: 'canva',
+  docsUrl: CONNECTOR_PRESETS.canva.keyUrl,
+};
+
+export const DEFAULT_SERVERS: McpServerConfig[] = [
+  DEFAULT_SANDBOX_SERVER,
+  YOUTUBE_DEFAULT_SERVER,
+  GITHUB_DEFAULT_SERVER,
+  CANVA_DEFAULT_SERVER,
+];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',

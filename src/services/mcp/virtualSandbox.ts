@@ -1,4 +1,4 @@
-import type { McpPrompt, McpResource, McpTool } from '../../types';
+import type { McpPrompt, McpResource, McpTool } from '../../types/index.ts';
 
 interface SandboxNote {
   id: string;
@@ -21,6 +21,8 @@ const sandboxNotes: SandboxNote[] = [
     updatedAt: '2026-11-20T09:15:00Z',
   },
 ];
+
+let nextNoteSeq = 3;
 
 const SANDBOX_TOOLS: McpTool[] = [
   {
@@ -211,7 +213,7 @@ export async function handleVirtualMcpRequest(payload: {
           };
         }
         const created: SandboxNote = {
-          id: `note-${sandboxNotes.length + 1}`,
+          id: `note-${nextNoteSeq++}`,
           title,
           content,
           updatedAt: new Date().toISOString(),

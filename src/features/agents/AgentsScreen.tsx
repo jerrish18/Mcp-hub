@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import {
   BookOpen,
   Bot,
@@ -16,6 +17,7 @@ import { type AgentProfile, AgentProfileSchema, type EffortLevel } from '../../t
 import { BottomSheet } from '../../ui/BottomSheet';
 import { M3Switch } from '../../ui/M3Switch';
 import { triggerHaptic } from '../../utils/haptics';
+import { cardStaggerContainer, cardStaggerItem } from '../../utils/motion';
 
 const AGENT_ICONS: Record<string, typeof Bot> = {
   bot: Bot,
@@ -143,13 +145,19 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
           </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+        <motion.div
+          variants={cardStaggerContainer}
+          initial="initial"
+          animate="animate"
+          className="grid grid-cols-1 md:grid-cols-2 gap-3.5"
+        >
           {agents.map((agent) => {
             const Icon = AGENT_ICONS[agent.icon] ?? Bot;
             const modelLabel = allModels.find((m) => m.id === agent.defaultModelId)?.label ?? agent.defaultModelId;
             return (
-              <div
+              <motion.div
                 key={agent.id}
+                variants={cardStaggerItem}
                 data-testid="agent-card"
                 style={{
                   backgroundColor: 'var(--m3-surface-container)',
@@ -244,10 +252,10 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                     )}
                   </div>
                 </div>
-              </div>
+              </motion.div>
             );
           })}
-        </div>
+        </motion.div>
       </div>
 
       <BottomSheet

@@ -156,48 +156,65 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       if (!line.startsWith('data:')) continue;
       const raw = line.slice(5).trim();
       if (!raw || raw === '[DONE]') continue;
+      let chunk: {
+        error?: { message?: string; code?: number | string; status?: number };
+        choices?: Array<{
+          delta?: {
+            content?: string | null;
+            reasoning_content?: string | null;
+            reasoning?: string | null;
+            tool_calls?: Array<{
+              index: number;
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
+      };
       try {
-        const chunk = JSON.parse(raw) as {
-          choices?: Array<{
-            delta?: {
-              content?: string | null;
-              reasoning_content?: string | null;
-              reasoning?: string | null;
-              tool_calls?: Array<{
-                index: number;
-                id?: string;
-                function?: { name?: string; arguments?: string };
-              }>;
-            };
-          }>;
-        };
-
-        const delta = chunk.choices?.[0]?.delta;
-        if (!delta) continue;
-
-        const reasoning = delta.reasoning_content ?? delta.reasoning;
-        if (reasoning) {
-          onEvent({ type: 'reasoning_delta', delta: reasoning });
-        }
-        if (delta.content) {
-          onEvent({ type: 'text_delta', delta: delta.content });
-        }
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index ?? 0;
-            const prev = toolAcc.get(idx) ?? {
-              id: tc.id ?? `call_${Date.now()}_${idx}`,
-              name: '',
-              rawArgs: '',
-            };
-            if (tc.id) prev.id = tc.id;
-            if (tc.function?.name) prev.name += tc.function.name;
-            if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
-            toolAcc.set(idx, prev);
-          }
-        }
+        chunk = JSON.parse(raw) as typeof chunk;
       } catch {
-        // ignore partial SSE chunks
+        continue;
+      }
+
+      if (chunk.error) {
+        const code = Number(chunk.error.code ?? chunk.error.status ?? 0);
+        const msg = redactSecrets(chunk.error.message ?? 'Upstream streaming error', [apiKey]);
+        if (code === 429) {
+          throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
+        }
+        if (code === 401 || code === 403) {
+          throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
+        }
+        if (code === 404 || code === 502 || code === 503 || code === 504) {
+          throw new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
+        }
+        throw new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
+      }
+
+      const delta = chunk.choices?.[0]?.delta;
+      if (!delta) continue;
+
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
+      if (reasoning) {
+        onEvent({ type: 'reasoning_delta', delta: reasoning });
+      }
+      if (delta.content) {
+        onEvent({ type: 'text_delta', delta: delta.content });
+      }
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          const prev = toolAcc.get(idx) ?? {
+            id: tc.id ?? `call_${Date.now()}_${idx}`,
+            name: '',
+            rawArgs: '',
+          };
+          if (tc.id) prev.id = tc.id;
+          if (tc.function?.name) prev.name += tc.function.name;
+          if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
+          toolAcc.set(idx, prev);
+        }
       }
     }
   }

@@ -1,5 +1,7 @@
+import { motion } from 'motion/react';
 import { AlertTriangle, Check, ShieldCheck, X } from 'lucide-react';
 import type { PendingApproval } from '../types';
+import { M3_SPRING } from '../utils/motion';
 
 interface WriteApprovalBannerProps {
   approval: PendingApproval;
@@ -8,11 +10,15 @@ interface WriteApprovalBannerProps {
 
 export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBannerProps) {
   return (
-    <div
+    <motion.div
+      initial={{ opacity: 0, y: 12, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 8, scale: 0.98 }}
+      transition={M3_SPRING}
       role="alertdialog"
       aria-label={`Confirm write action ${approval.toolName}`}
       data-testid="write-approval-banner"
-      className="mx-3 sm:mx-6 mb-3 rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/40 p-4 shadow-sm"
+      className="mx-3 sm:mx-6 mb-3 rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50/95 dark:bg-amber-950/50 p-4 shadow-sm"
     >
       <div className="flex items-start gap-3">
         <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
@@ -35,7 +41,11 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
             <button
               type="button"
               onClick={() => onDecision('approve')}
-              className="min-h-[44px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
             >
               <Check className="w-4 h-4" />
               Approve
@@ -43,7 +53,11 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
             <button
               type="button"
               onClick={() => onDecision('always_allow')}
-              className="min-h-[44px] px-4 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-900 dark:text-slate-100 text-sm font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              style={{
+                backgroundColor: 'var(--m3-surface-container)',
+                borderColor: 'var(--m3-outline)',
+              }}
+              className="min-h-[44px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
             >
               <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               Always allow this tool
@@ -51,7 +65,8 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
             <button
               type="button"
               onClick={() => onDecision('deny')}
-              className="min-h-[44px] px-4 py-2 rounded-xl bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-sm font-medium inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              style={{ backgroundColor: 'var(--m3-surface-container)' }}
+              className="min-h-[44px] px-4 py-2 rounded-full border border-rose-300 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
             >
               <X className="w-4 h-4" />
               Deny
@@ -59,6 +74,6 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }

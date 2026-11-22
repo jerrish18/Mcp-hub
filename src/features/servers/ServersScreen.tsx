@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion } from 'motion/react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -17,6 +18,7 @@ import {
   buildAuthorizationUrl,
   discoverOAuthMetadata,
   exchangeAuthorizationCode,
+  extractAuthCodeFromInput,
   generatePkcePair,
   registerDynamicClient,
 } from '../../services/auth/oauth';
@@ -32,7 +34,9 @@ import { BottomSheet } from '../../ui/BottomSheet';
 import { M3Switch } from '../../ui/M3Switch';
 import { SkeletonCard } from '../../ui/Skeleton';
 import { triggerHaptic } from '../../utils/haptics';
+import { cardStaggerContainer, cardStaggerItem } from '../../utils/motion';
 import { safeErrorMessage } from '../../utils/redact';
+import { QuickConnectSheet } from './QuickConnectSheet';
 
 const AUTH_LABELS: Record<AuthType, string> = {
   oauth_pkce: 'OAuth 2.1 + PKCE',
@@ -85,6 +89,7 @@ export function ServersScreen() {
   const [expandedId, setExpandedId] = useState<string | null>(servers[0]?.id ?? null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  const [quickConnectPreset, setQuickConnectPreset] = useState<'youtube' | 'github' | 'canva' | null>(null);
 
   // Form state
   const [name, setName] = useState('');
@@ -210,7 +215,8 @@ export function ServersScreen() {
   };
 
   const handleExchangePkceCode = async () => {
-    if (!pendingPkce || !authCodeInput.trim()) return;
+    const cleanCode = extractAuthCodeFromInput(authCodeInput);
+    if (!pendingPkce || !cleanCode) return;
     setOauthBusy(true);
     setFormError('');
     try {
@@ -218,7 +224,7 @@ export function ServersScreen() {
         tokenEndpoint: oauthTokenEp,
         clientId: oauthClientId,
         clientSecret: oauthClientSecret || undefined,
-        code: authCodeInput.trim(),
+        code: cleanCode,
         redirectUri: `${window.location.origin}/oauth-callback`,
         codeVerifier: pendingPkce.verifier,
       });
@@ -354,14 +360,24 @@ export function ServersScreen() {
             </button>
           </div>
         ) : (
-          <div className="space-y-3">
+          <motion.div
+            variants={cardStaggerContainer}
+            initial="initial"
+            animate="animate"
+            className="space-y-3"
+          >
             {servers.map((srv) => {
               const isExpanded = expandedId === srv.id;
               const enabledToolCount = srv.tools.length - srv.disabledTools.length;
+              const presetKey =
+                srv.presetId === 'youtube' || srv.presetId === 'github' || srv.presetId === 'canva'
+                  ? srv.presetId
+                  : null;
 
               return (
-                <div
+                <motion.div
                   key={srv.id}
+                  variants={cardStaggerItem}
                   data-testid="server-card"
                   style={{
                     backgroundColor: 'var(--m3-surface-container)',
@@ -404,6 +420,21 @@ export function ServersScreen() {
                     </button>
 
                     <div className="flex items-center justify-end gap-1.5 shrink-0 pt-2 sm:pt-0 border-t border-slate-100 dark:border-slate-800 sm:border-t-0">
+                      {presetKey && (
+                        <button
+                          type="button"
+                          onClick={() => setQuickConnectPreset(presetKey)}
+                          aria-label={`${srv.status === 'connected' ? 'Update credentials for' : 'Connect'} ${srv.name}`}
+                          style={{
+                            backgroundColor: 'var(--m3-primary-container)',
+                            color: 'var(--m3-on-primary-container)',
+                          }}
+                          className="min-h-[44px] px-3.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                          <span>{srv.status === 'connected' ? 'Credentials' : 'Connect'}</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => void connectServer(srv.id)}
@@ -529,10 +560,10 @@ export function ServersScreen() {
                       )}
                     </div>
                   )}
-                </div>
+                </motion.div>
               );
             })}
-          </div>
+          </motion.div>
         )}
       </div>
 
@@ -819,6 +850,16 @@ export function ServersScreen() {
           </button>
         </form>
       </BottomSheet>
+
+      <QuickConnectSheet
+        presetId={quickConnectPreset}
+        server={
+          quickConnectPreset
+            ? servers.find((s) => s.presetId === quickConnectPreset)
+            : undefined
+        }
+        onClose={() => setQuickConnectPreset(null)}
+      />
     </div>
   );
 }
