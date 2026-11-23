@@ -8,6 +8,7 @@ import {
 import { getApiKeyForProvider, syncLiveProviderModels } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import { closeAllMcpConnections, connectAndInspectServer } from '../services/mcp/client';
+import { GITHUB_TOOLS, YOUTUBE_TOOLS } from '../services/mcp/virtualConnectors';
 import { historyDb } from '../services/storage/historyDb';
 import {
   deleteServerSecrets,
@@ -76,11 +77,20 @@ interface PersistedMeta {
 }
 
 function mergeDefaultServers(saved: McpServerConfig[], dismissedIds: string[]): McpServerConfig[] {
-  const existingIds = new Set(saved.map((s) => s.id));
+  const refreshed = saved.map((srv) => {
+    if (srv.url === 'virtual://github-api') {
+      return { ...srv, tools: GITHUB_TOOLS };
+    }
+    if (srv.url === 'virtual://youtube-data-api') {
+      return { ...srv, tools: YOUTUBE_TOOLS };
+    }
+    return srv;
+  });
+  const existingIds = new Set(refreshed.map((s) => s.id));
   const missing = DEFAULT_SERVERS.filter(
     (def) => !existingIds.has(def.id) && !dismissedIds.includes(def.id)
   );
-  return [...saved, ...missing];
+  return [...refreshed, ...missing];
 }
 
 function mergeBuiltInAgents(saved: AgentProfile[]): AgentProfile[] {

@@ -11,7 +11,12 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
-const isProduction = process.env.NODE_ENV === 'production';
+const distDir = path.resolve(__dirname, 'dist');
+const hasBuiltDist = fs.existsSync(path.join(distDir, 'index.html'));
+const isRunningUnderTsx = process.execArgv.some((arg) => arg.includes('tsx'));
+const isProduction =
+  process.env.NODE_ENV === 'production' ||
+  (hasBuiltDist && !isRunningUnderTsx && process.env.npm_lifecycle_event !== 'dev');
 
 async function startServer() {
   const app = express();
@@ -39,14 +44,13 @@ async function startServer() {
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, allowedHosts: true as const },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
-    app.get('/{*path}', (_req, res) => {
+    app.get('*', (_req, res) => {
       const indexFile = path.join(distDir, 'index.html');
       if (fs.existsSync(indexFile)) {
         res.sendFile(indexFile);

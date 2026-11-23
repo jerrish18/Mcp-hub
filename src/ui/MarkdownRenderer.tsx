@@ -18,6 +18,11 @@ import {
   Sparkles,
 } from 'lucide-react';
 import {
+  downloadAppBundle,
+  parseAppArtifactBlock,
+  type AppArtifactSpec,
+} from '../utils/appArtifact';
+import {
   downloadDocumentSpec,
   parseArtifactBlock,
   type DocFormat,
@@ -36,7 +41,8 @@ import { StudyImageCard } from './StudyImageCard';
 
 export type MarkdownCanvasRequest =
   | { kind: 'code'; title: string; language: string; code: string }
-  | { kind: 'document'; title: string; spec: DocumentSpec; rawJson: string };
+  | { kind: 'document'; title: string; spec: DocumentSpec; rawJson: string }
+  | { kind: 'app'; title: string; spec: AppArtifactSpec; rawJson: string };
 
 interface MarkdownRendererProps {
   content: string;
@@ -272,6 +278,101 @@ function DocumentArtifactCard({
   );
 }
 
+function AppArtifactCard({
+  spec,
+  rawJson,
+  onOpenInCanvas,
+}: {
+  spec: AppArtifactSpec;
+  rawJson: string;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
+}) {
+  const [downloaded, setDownloaded] = useState(false);
+  const fileNames = spec.files
+    .slice(0, 3)
+    .map((f) => f.path)
+    .join(', ');
+  const extraCount = Math.max(0, spec.files.length - 3);
+
+  const handleDownload = () => {
+    downloadAppBundle(spec);
+    setDownloaded(true);
+    setTimeout(() => setDownloaded(false), 2200);
+  };
+
+  return (
+    <div
+      data-testid="app-artifact-card"
+      style={{
+        backgroundColor: 'var(--m3-surface-container)',
+        borderColor: 'var(--m3-outline)',
+      }}
+      className="my-3 rounded-2xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+    >
+      <div className="flex items-center gap-3 min-w-0">
+        <span
+          style={{
+            backgroundColor: 'var(--m3-primary-container)',
+            color: 'var(--m3-on-primary-container)',
+          }}
+          className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+        >
+          <Layers className="w-5 h-5" />
+        </span>
+        <div className="min-w-0">
+          <div className="font-display text-sm font-semibold text-slate-950 dark:text-white truncate">
+            {spec.title}
+          </div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5 tabular-nums">
+            {spec.files.length} file{spec.files.length === 1 ? '' : 's'}
+            {spec.framework ? ` · ${spec.framework}` : ''}
+            {fileNames ? ` (${fileNames}${extraCount > 0 ? ` +${extraCount}` : ''})` : ''}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+        {onOpenInCanvas && (
+          <button
+            type="button"
+            data-testid="open-app-canvas"
+            onClick={() =>
+              onOpenInCanvas({
+                kind: 'app',
+                title: spec.title,
+                spec,
+                rawJson,
+              })
+            }
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="min-h-[40px] px-4 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90"
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+            <span>Open IDE Canvas</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          data-testid="download-app-bundle"
+          onClick={handleDownload}
+          style={{
+            backgroundColor: 'var(--m3-surface)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="min-h-[40px] px-3.5 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90"
+        >
+          {downloaded ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Download className="w-3.5 h-3.5" />}
+          <span>{downloaded ? 'Saved HTML' : 'Bundle .HTML'}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CalloutBlock({
   block,
 }: {
@@ -394,6 +495,33 @@ function CodeBlock({
         >
           <Presentation style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
           <span>Building {fmtLabel} document structure…</span>
+        </div>
+      );
+    }
+  }
+
+  if (normalizedLang === 'artifact-app' || normalizedLang === 'app-project') {
+    const parsedApp = isUnclosed ? null : parseAppArtifactBlock(normalizedLang, code);
+    if (parsedApp) {
+      return (
+        <AppArtifactCard
+          spec={parsedApp}
+          rawJson={code}
+          onOpenInCanvas={onOpenInCanvas}
+        />
+      );
+    }
+    if (isUnclosed) {
+      return (
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="my-3 rounded-2xl border p-4 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300"
+        >
+          <Layers style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
+          <span>Assembling multi-file application…</span>
         </div>
       );
     }
@@ -556,7 +684,10 @@ function CodeBlock({
   );
 }
 
-export function renderInlineNodes(tokens: InlineToken[]): React.ReactNode[] {
+export function renderInlineNodes(tokens: InlineToken[], depth = 0): React.ReactNode[] {
+  const renderNested = (text: string): React.ReactNode =>
+    depth < 3 ? renderInlineNodes(parseInlineTokens(text), depth + 1) : text;
+
   return tokens.map((tok, idx) => {
     switch (tok.type) {
       case 'code':
@@ -571,19 +702,19 @@ export function renderInlineNodes(tokens: InlineToken[]): React.ReactNode[] {
       case 'bold':
         return (
           <strong key={idx} className="font-semibold text-slate-950 dark:text-white">
-            {tok.text}
+            {renderNested(tok.text)}
           </strong>
         );
       case 'italic':
         return (
           <em key={idx} className="italic">
-            {tok.text}
+            {renderNested(tok.text)}
           </em>
         );
       case 'strike':
         return (
           <del key={idx} className="line-through opacity-75">
-            {tok.text}
+            {renderNested(tok.text)}
           </del>
         );
       case 'math':

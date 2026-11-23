@@ -73,7 +73,7 @@ function isTableSeparatorLine(line: string): boolean {
   if (!trimmed.includes('|')) return false;
   const cells = splitTableCells(trimmed);
   if (cells.length === 0) return false;
-  return cells.every((c) => /^:?-{2,}:?$/.test(c));
+  return cells.every((c) => /^:?-{1,}:?$/.test(c));
 }
 
 function parseTableAlignments(line: string, count: number): TableAlignment[] {

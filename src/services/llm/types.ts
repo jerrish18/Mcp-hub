@@ -24,6 +24,7 @@ export interface LlmToolCall {
   rawArguments: string;
   parsedArguments?: Record<string, unknown>;
   parseError?: string;
+  thoughtSignature?: string;
 }
 
 export type LlmConversationItem =

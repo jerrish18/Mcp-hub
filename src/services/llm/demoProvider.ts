@@ -396,36 +396,47 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   if (lower.includes('docx') || lower.includes('word doc') || lower.includes('pdf') || lower.includes('proposal') || lower.includes('report')) {
     const fmt = lower.includes('docx') || lower.includes('word') ? 'docx' : 'pdf';
+    const topicMatch = userText.match(/(?:about|on|for)\s+([a-z0-9\s-]{2,48})/i);
+    const customTopic = topicMatch ? topicMatch[1].trim().replace(/[.?!]+$/, '') : '';
+    const docTitle = customTopic
+      ? `${customTopic.charAt(0).toUpperCase() + customTopic.slice(1)} Briefing`
+      : 'Enterprise MCP Implementation Brief';
     await streamText(
-      `Organizing structured sections, executive callout, and KPI table for native .${fmt} generation.`,
+      `Organizing structured sections, executive callout, and data table for native .${fmt} generation.`,
       (delta) => onEvent({ type: 'reasoning_delta', delta }),
       signal
     );
     const docSpec = {
-      title: 'Enterprise MCP Implementation Brief',
-      subtitle: 'Architecture, Governance & Deployment Roadmap',
+      title: docTitle,
+      subtitle: customTopic
+        ? `Structured Overview, Key Facts & Visual Reference Table on ${customTopic}`
+        : 'Architecture, Governance & Deployment Roadmap',
       sections: [
         {
           heading: 'Executive Summary',
-          callout: 'Key Outcome: Consolidate internal tools under OAuth 2.1 PKCE and explicit write-action approval in under 2 weeks.',
+          callout: customTopic
+            ? `Key Takeaway: Concise, publication-ready ${fmt.toUpperCase()} overview compiled for "${customTopic}".`
+            : 'Key Outcome: Consolidate internal tools under OAuth 2.1 PKCE and explicit write-action approval in under 2 weeks.',
           paragraphs: [
-            'Modern engineering and operations teams rely on fragmented workflows spanning documentation, issue tracking, and analytics. Adopting Model Context Protocol (MCP) standardizes tool discovery behind auditable permissions.',
+            customTopic
+              ? `This formatted ${fmt.toUpperCase()} document summarizes the defining characteristics, background context, and structured breakdown of ${customTopic}.`
+              : 'Modern engineering and operations teams rely on fragmented workflows spanning documentation, issue tracking, and analytics. Adopting Model Context Protocol (MCP) standardizes tool discovery behind auditable permissions.',
           ],
           bullets: [
-            'Enforces least-privilege read/write separation on every tool call',
-            'Supports Streamable HTTP with automatic SSE transport negotiation',
-            'Enables direct export to DOCX, PDF, XLSX, and PPTX formats',
+            'Clean executive layout rendered with automatic page margins & typography',
+            'Structured callout boxes and high-contrast comparison tables',
+            'Ready for immediate Canvas inspection and native offline download',
           ],
         },
         {
-          heading: 'Recommended MCP Stack & Milestones',
+          heading: customTopic ? `${customTopic} Reference Summary` : 'Recommended MCP Stack & Milestones',
           table: {
-            headers: ['Connector', 'Auth Standard', 'Primary Use Case', 'Rollout'],
+            headers: ['Category', 'Highlight', 'Details', 'Priority'],
             rows: [
-              ['Notion MCP', 'OAuth 2.1 + PKCE', 'SOP & knowledge retrieval', 'Week 1'],
-              ['Linear MCP', 'OAuth 2.1 / Bearer', 'Sprint triage & spec sync', 'Week 1'],
-              ['GitHub MCP', 'PAT / OAuth 2.1', 'PR review & issue tracking', 'Week 2'],
-              ['PostgreSQL Gateway', 'Bearer / Headers', 'Read-only BI queries', 'Week 2'],
+              ['Core Overview', 'Primary Definition', 'Key traits & structural context', 'High'],
+              ['Key Metrics', 'Quantitative Facts', 'Benchmarks and measurable traits', 'High'],
+              ['Comparison', 'Contrast Points', 'Distinctive features & trade-offs', 'Medium'],
+              ['Next Steps', 'Action Items', 'Follow-up research & sharing', 'Standard'],
             ],
           },
         },
@@ -433,10 +444,153 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
     };
 
     const reply =
-      `## Client ${fmt.toUpperCase()} Report Ready\n\n` +
+      `## ${docTitle} (.${fmt.toUpperCase()}) Ready\n\n` +
       `Your formatted **${fmt.toUpperCase()}** document is ready with executive callouts, structured bullets, and styled tables.\n\n` +
       `\`\`\`artifact-${fmt}\n${JSON.stringify(docSpec, null, 2)}\n\`\`\`\n\n` +
       `You can preview the page layout in **Canvas** or download the ready-to-share **.${fmt.toUpperCase()}** file.`;
+
+    await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
+  if (
+    lower.includes('multi-file') ||
+    lower.includes('multifile') ||
+    lower.includes('web app') ||
+    lower.includes('build an app') ||
+    lower.includes('develop an app') ||
+    lower.includes('application') ||
+    lower.includes('kanban') ||
+    lower.includes('task tracker')
+  ) {
+    await streamText(
+      'Architecting a modular multi-file web application (index.html, styles.css, app.js, README.md) with live Canvas bundling and GitHub MCP sync readiness.',
+      (delta) => onEvent({ type: 'reasoning_delta', delta }),
+      signal
+    );
+
+    const appSpec = {
+      title: 'Sprint Taskboard Pro',
+      description: 'Multi-file interactive engineering sprint board ready for live Canvas preview and GitHub sync.',
+      framework: 'HTML / CSS / ES6',
+      entryFile: 'index.html',
+      files: [
+        {
+          path: 'index.html',
+          language: 'html',
+          content: `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sprint Taskboard Pro</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>Sprint Taskboard Pro</h1>
+        <p>Multi-file Pro Canvas app · Sync straight to GitHub</p>
+      </div>
+      <div class="pill" id="countPill">3 tasks</div>
+    </header>
+    <form class="composer" id="taskForm">
+      <input id="taskInput" type="text" placeholder="Add engineering task or bug fix..." required />
+      <button type="submit">Add Task</button>
+    </form>
+    <section class="board" id="taskList"></section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>`,
+        },
+        {
+          path: 'styles.css',
+          language: 'css',
+          content: `:root {
+  color-scheme: light;
+  --bg: #f8fafc;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --ink: #0f172a;
+  --muted: #64748b;
+  --accent: #0b57d0;
+}
+* { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+body { margin: 0; padding: 20px; background: var(--bg); color: var(--ink); }
+.shell { max-width: 620px; margin: 0 auto; background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 20px; }
+.topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
+h1 { margin: 0; font-size: 18px; }
+.topbar p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.pill { font-size: 12px; font-weight: 600; background: #eff6ff; color: var(--accent); border: 1px solid #bfdbfe; padding: 5px 10px; border-radius: 999px; font-variant-numeric: tabular-nums; }
+.composer { display: flex; gap: 8px; margin-bottom: 16px; }
+.composer input { flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; }
+.composer button { padding: 10px 16px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; cursor: pointer; }
+.board { display: flex; flex-direction: column; gap: 8px; }
+.item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; }
+.item.done span { text-decoration: line-through; color: var(--muted); }
+.item button { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 5px 10px; font-size: 11px; font-weight: 600; cursor: pointer; }`,
+        },
+        {
+          path: 'app.js',
+          language: 'javascript',
+          content: `const tasks = [
+  { id: 1, title: 'Verify Gemini thoughtSignature multi-turn tool replay', done: true },
+  { id: 2, title: 'Ship multi-file Pro Canvas preview & runtime console', done: false },
+  { id: 3, title: 'Push repository batch commit via GitHub MCP', done: false },
+];
+
+const listEl = document.getElementById('taskList');
+const pillEl = document.getElementById('countPill');
+const formEl = document.getElementById('taskForm');
+const inputEl = document.getElementById('taskInput');
+
+function render() {
+  pillEl.textContent = tasks.length + (tasks.length === 1 ? ' task' : ' tasks');
+  listEl.innerHTML = '';
+  tasks.forEach((task) => {
+    const row = document.createElement('div');
+    row.className = 'item' + (task.done ? ' done' : '');
+    const label = document.createElement('span');
+    label.textContent = task.title;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.textContent = task.done ? 'Reopen' : 'Done';
+    toggle.addEventListener('click', () => {
+      task.done = !task.done;
+      render();
+    });
+    row.append(label, toggle);
+    listEl.appendChild(row);
+  });
+}
+
+formEl.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const val = inputEl.value.trim();
+  if (!val) return;
+  tasks.unshift({ id: Date.now(), title: val, done: false });
+  inputEl.value = '';
+  render();
+});
+
+render();`,
+        },
+        {
+          path: 'README.md',
+          language: 'markdown',
+          content: `# Sprint Taskboard Pro\n\nBuilt inside **MCP Hub Pro Studio** as a modular 4-file web application.\n\n## Files\n- \`index.html\` — Semantic shell & form layout\n- \`styles.css\` — Responsive CSS variables & board styling\n- \`app.js\` — State rendering & interactive task toggles\n\nUse **Sync to GitHub** in Pro Canvas to push all files cleanly in a single commit.`,
+        },
+      ],
+    };
+
+    const reply =
+      `## Multi-File App Engineered: Sprint Taskboard Pro\n\n` +
+      `I created a **4-file application** (\`index.html\`, \`styles.css\`, \`app.js\`, \`README.md\`) with live interactive task state and responsive styling.\n\n` +
+      `\`\`\`artifact-app\n${JSON.stringify(appSpec, null, 2)}\n\`\`\`\n\n` +
+      `Tap **Open IDE Canvas** below to test the live app across Desktop/Tablet/Mobile viewports, inspect or edit every file, and **Sync to GitHub**.`;
 
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });

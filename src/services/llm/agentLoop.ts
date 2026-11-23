@@ -96,12 +96,18 @@ export function composeEffectiveSystemPrompt(params: {
     );
   } else {
     parts.push(
-      '[PRO WORKSPACE MODE — MCP + DOCUMENT STUDIO + CODING CANVAS]\n' +
-        'You can invoke connected MCP tools when needed, build interactive Canvas apps (self-contained ```html, ```svg, ```mermaid, ```tsx, or ```python blocks), and generate real downloadable Office/PDF files using structured JSON artifact blocks:\n' +
-        '- PowerPoint Deck: ```artifact-pptx with {"title","subtitle","themeColor":"0B57D0","slides":[{"layout":"title"|"metrics"|"two_col"|"table"|"bullets","title","subtitle","bullets","metrics":[{"label","value","note"}],"leftTitle","leftBullets","rightTitle","rightBullets","table":{"headers":[],"rows":[[]]},"speakerNotes"}]}\n' +
-        '- Excel Workbook: ```artifact-xlsx with {"title","sheets":[{"name","headers":[],"rows":[[]]}]}\n' +
-        '- Word Document or PDF Report: ```artifact-docx or ```artifact-pdf with {"title","subtitle","sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
-        'When the user asks for a presentation/deck/PPTX, Excel/spreadsheet/XLSX, Word/DOCX, or PDF report, ALWAYS include the matching ```artifact-pptx | ```artifact-xlsx | ```artifact-docx | ```artifact-pdf JSON block cleanly so the user gets an instant Canvas preview and real file download.'
+      '[PRO WORKSPACE MODE — MCP TOOLS + APP BUILDER + DOCUMENT STUDIO + CODING CANVAS]\n' +
+        'CRITICAL ROUTING RULE:\n' +
+        '- NEVER call `workspace_create_note` (or save-note tools) when the user asks to generate a PDF, Word/DOCX, Excel/XLSX, PowerPoint/PPTX, software application, website, or coding artifact. Only invoke `workspace_create_note` when the user explicitly asks to save/create a note.\n' +
+        '- Document Studio Formats (ALWAYS emit the exact fenced JSON block below so the UI renders a Canvas preview & real downloadable file):\n' +
+        '  * PDF Report: ```artifact-pdf with {"title","subtitle","sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
+        '  * Word Document: ```artifact-docx with {"title","subtitle","sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
+        '  * Excel Workbook: ```artifact-xlsx with {"title","sheets":[{"name","headers":[],"rows":[[]]}]}\n' +
+        '  * PowerPoint Deck: ```artifact-pptx with {"title","subtitle","themeColor":"0B57D0","slides":[{"layout":"title"|"metrics"|"two_col"|"table"|"bullets","title","subtitle","bullets","metrics":[{"label","value","note"}],"leftTitle","leftBullets","rightTitle","rightBullets","table":{"headers":[],"rows":[[]]},"speakerNotes"}]}\n' +
+        '- Multi-File Web App & Software Engineering (Claude Artifacts / ChatGPT Canvas IDE):\n' +
+        '  * When building a complete multi-file web app, dashboard, or project, emit a ```artifact-app JSON block: {"title","description","framework","entryFile":"index.html","files":[{"path":"index.html","language":"html","content":"..."},{"path":"styles.css","language":"css","content":"..."},{"path":"app.js","language":"javascript","content":"..."}]}. Use clean relative paths like "./styles.css" and "./app.js" inside index.html so the live sandboxed preview bundles and runs every file seamlessly.\n' +
+        '  * For quick single-file widgets or diagrams, emit ```html, ```tsx, ```svg, ```mermaid, or ```python.\n' +
+        '- GitHub Sync & Repo Engineering: When connected GitHub MCP tools (`github_list_repos`, `github_create_repo`, `github_list_repo_files`, `github_read_file`, `github_create_branch`, `github_push_file`, `github_push_files_batch`) are available and the user asks to inspect, push, or create a GitHub repository, call the appropriate GitHub MCP tools directly with clean commit messages and verified file contents.'
     );
   }
 

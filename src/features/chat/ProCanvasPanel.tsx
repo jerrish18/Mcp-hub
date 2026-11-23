@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -7,13 +8,29 @@ import {
   Copy,
   Download,
   Eye,
+  FileCode2,
   FileSpreadsheet,
   FileText,
+  GitBranch,
+  Layers,
+  Monitor,
   Presentation,
+  Smartphone,
   Sparkles,
+  Tablet,
+  Terminal,
+  Wrench,
   X,
 } from 'lucide-react';
 import { MermaidDiagramCard } from '../../ui/MermaidDiagramCard';
+import {
+  buildAppPreviewSrcDoc,
+  buildGitHubSyncPrompt,
+  downloadAppBundle,
+  suggestRepoSlug,
+  type AppArtifactSpec,
+  type AppFileEntry,
+} from '../../utils/appArtifact';
 import {
   downloadDocumentSpec,
   parseArtifactBlock,
@@ -37,15 +54,30 @@ export type CanvasArtifact =
       title: string;
       spec: DocumentSpec;
       rawJson: string;
+    }
+  | {
+      kind: 'app';
+      id: string;
+      title: string;
+      spec: AppArtifactSpec;
+      rawJson: string;
     };
 
 interface ProCanvasPanelProps {
   open: boolean;
   artifact: CanvasArtifact | null;
   isRunning?: boolean;
+  githubConnected?: boolean;
+  onRequestConnectGithub?: () => void;
   onChangeArtifact: (next: CanvasArtifact) => void;
   onAskCanvasAction: (prompt: string, displayLabel: string) => void;
   onClose: () => void;
+}
+
+interface RuntimeLogEntry {
+  level: 'error' | 'warn';
+  message: string;
+  timestamp: number;
 }
 
 const EXT_BY_LANG: Record<string, string> = {
@@ -64,6 +96,7 @@ const EXT_BY_LANG: Record<string, string> = {
   css: 'css',
   sql: 'sql',
   json: 'json',
+  markdown: 'md',
 };
 
 function SlidePreviewCard({
@@ -231,6 +264,8 @@ export function ProCanvasPanel({
   open,
   artifact,
   isRunning,
+  githubConnected = false,
+  onRequestConnectGithub,
   onChangeArtifact,
   onAskCanvasAction,
   onClose,
@@ -238,14 +273,91 @@ export function ProCanvasPanel({
   const [tab, setTab] = useState<'preview' | 'source'>('preview');
   const [slideIdx, setSlideIdx] = useState(0);
   const [sheetIdx, setSheetIdx] = useState(0);
+  const [activeFileIdx, setActiveFileIdx] = useState(0);
+  const [viewport, setViewport] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
+
+  // GitHub Sync Panel state
+  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const [repoName, setRepoName] = useState('');
+  const [repoBranch, setRepoBranch] = useState('main');
+  const [commitMessage, setCommitMessage] = useState('feat: sync Pro Canvas app from MCP Hub');
+  const [isNewRepo, setIsNewRepo] = useState(true);
+  const [isPrivateRepo, setIsPrivateRepo] = useState(false);
+
   const [jsonError, setJsonError] = useState('');
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
+
+  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  useEffect(() => {
+    setActiveFileIdx(0);
+    setSlideIdx(0);
+    setSheetIdx(0);
+    setRuntimeLogs([]);
+    setConsoleOpen(false);
+    setJsonError('');
+    setSyncPanelOpen(false);
+    if (artifact) {
+      setRepoName(suggestRepoSlug(artifact.title));
+      setCommitMessage(`feat: add ${artifact.title}`);
+    }
+  }, [artifact?.id]);
+
+  // Listen strictly to messages originating from our sandboxed preview iframe
+  useEffect(() => {
+    const handleMessage = (ev: MessageEvent) => {
+      if (!previewIframeRef.current || ev.source !== previewIframeRef.current.contentWindow) {
+        return;
+      }
+      const data = ev.data as {
+        source?: string;
+        level?: string;
+        message?: string;
+        timestamp?: number;
+      } | null;
+      if (!data || data.source !== 'mcphub-canvas-runtime' || !data.message) return;
+      const level = data.level === 'warn' ? 'warn' : 'error';
+      setRuntimeLogs((prev) => [
+        ...prev.slice(-19),
+        { level, message: data.message!, timestamp: data.timestamp ?? Date.now() },
+      ]);
+      if (level === 'error') {
+        setConsoleOpen(true);
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
 
   const codeLanguage = artifact?.kind === 'code' ? artifact.language.toLowerCase() : '';
   const isHtmlPreview = codeLanguage === 'html' || codeLanguage === 'htm';
   const isSvgPreview = codeLanguage === 'svg';
   const isMermaidPreview = codeLanguage === 'mermaid';
+
+  const activeAppFile: AppFileEntry | undefined =
+    artifact?.kind === 'app'
+      ? artifact.spec.files[Math.min(activeFileIdx, Math.max(0, artifact.spec.files.length - 1))]
+      : undefined;
+
+  const appSrcDoc = useMemo(() => {
+    if (!artifact || artifact.kind !== 'app') return '';
+    return buildAppPreviewSrcDoc(artifact.spec, { includeRuntimeBridge: true });
+  }, [artifact]);
+
+  const singleHtmlSrcDoc = useMemo(() => {
+    if (!artifact || artifact.kind !== 'code' || !isHtmlPreview) return '';
+    return buildAppPreviewSrcDoc(
+      {
+        title: artifact.title,
+        entryFile: 'index.html',
+        files: [{ path: 'index.html', language: 'html', content: artifact.code }],
+      },
+      { includeRuntimeBridge: true }
+    );
+  }, [artifact, isHtmlPreview]);
 
   const svgSrcDoc = useMemo(() => {
     if (!artifact || artifact.kind !== 'code' || !isSvgPreview) return '';
@@ -254,8 +366,29 @@ export function ProCanvasPanel({
 
   if (!open || !artifact) return null;
 
+  const supportsResponsivePreview =
+    tab === 'preview' && (artifact.kind === 'app' || (artifact.kind === 'code' && isHtmlPreview));
+
+  const projectFiles: AppFileEntry[] =
+    artifact.kind === 'app'
+      ? artifact.spec.files
+      : artifact.kind === 'code'
+        ? [
+            {
+              path: `${suggestRepoSlug(artifact.title)}.${EXT_BY_LANG[codeLanguage] ?? 'txt'}`,
+              language: codeLanguage || 'text',
+              content: artifact.code,
+            },
+          ]
+        : [];
+
   const handleCopy = async () => {
-    const text = artifact.kind === 'code' ? artifact.code : artifact.rawJson;
+    const text =
+      artifact.kind === 'code'
+        ? artifact.code
+        : artifact.kind === 'app'
+          ? activeAppFile?.content ?? artifact.rawJson
+          : artifact.rawJson;
     try {
       await navigator.clipboard?.writeText(text);
       setCopied(true);
@@ -265,8 +398,20 @@ export function ProCanvasPanel({
     }
   };
 
-  const handleDownloadCode = () => {
-    if (artifact.kind !== 'code') return;
+  const handleDownloadPrimary = async () => {
+    if (artifact.kind === 'document') {
+      setDownloading(true);
+      try {
+        await downloadDocumentSpec(artifact.spec);
+      } finally {
+        setDownloading(false);
+      }
+      return;
+    }
+    if (artifact.kind === 'app') {
+      downloadAppBundle(artifact.spec);
+      return;
+    }
     const ext = EXT_BY_LANG[codeLanguage] ?? 'txt';
     const filename = sanitizeFilename(artifact.title, 'pdf').replace(/\.pdf$/, `.${ext}`);
     const blob = new Blob([artifact.code], { type: 'text/plain;charset=utf-8' });
@@ -278,16 +423,6 @@ export function ProCanvasPanel({
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-  };
-
-  const handleDownloadDocument = async () => {
-    if (artifact.kind !== 'document') return;
-    setDownloading(true);
-    try {
-      await downloadDocumentSpec(artifact.spec);
-    } finally {
-      setDownloading(false);
-    }
   };
 
   const handleUpdateDocumentJson = (nextRaw: string) => {
@@ -308,14 +443,79 @@ export function ProCanvasPanel({
     });
   };
 
+  const handleUpdateAppFileContent = (nextContent: string) => {
+    if (artifact.kind !== 'app' || !activeAppFile) return;
+    const nextFiles = artifact.spec.files.map((f, idx) =>
+      idx === Math.min(activeFileIdx, artifact.spec.files.length - 1)
+        ? { ...f, content: nextContent }
+        : f
+    );
+    const nextSpec: AppArtifactSpec = { ...artifact.spec, files: nextFiles };
+    setRuntimeLogs([]);
+    onChangeArtifact({
+      ...artifact,
+      spec: nextSpec,
+      rawJson: JSON.stringify(nextSpec, null, 2),
+    });
+  };
+
+  const handleTriggerGithubSyncClick = () => {
+    if (!githubConnected) {
+      if (onRequestConnectGithub) {
+        onRequestConnectGithub();
+      } else {
+        setSyncPanelOpen((v) => !v);
+      }
+      return;
+    }
+    setSyncPanelOpen((v) => !v);
+  };
+
+  const handleSubmitGithubSync = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (projectFiles.length === 0) return;
+    const prompt = buildGitHubSyncPrompt({
+      title: artifact.title,
+      description: artifact.kind === 'app' ? artifact.spec.description : undefined,
+      repoName: repoName.trim() || suggestRepoSlug(artifact.title),
+      branch: repoBranch.trim() || 'main',
+      commitMessage: commitMessage.trim() || `feat: sync ${artifact.title}`,
+      isNewRepo,
+      isPrivate: isPrivateRepo,
+      files: projectFiles,
+    });
+    setSyncPanelOpen(false);
+    onAskCanvasAction(prompt, `Sync ${artifact.title} to GitHub (${repoName || 'repo'})`);
+  };
+
+  const buildCodeContextForPrompt = (): string => {
+    if (artifact.kind === 'app') {
+      return artifact.spec.files
+        .map((f) => `File: ${f.path}\n\`\`\`${f.language}\n${f.content}\n\`\`\``)
+        .join('\n\n');
+    }
+    if (artifact.kind === 'code') {
+      return `\`\`\`${artifact.language}\n${artifact.code}\n\`\`\``;
+    }
+    return '';
+  };
+
   const renderHeaderGlyph = () => {
     if (artifact.kind === 'document') {
       if (artifact.spec.format === 'pptx') return <Presentation className="w-4 h-4" />;
       if (artifact.spec.format === 'xlsx') return <FileSpreadsheet className="w-4 h-4" />;
       return <FileText className="w-4 h-4" />;
     }
+    if (artifact.kind === 'app') return <Layers className="w-4 h-4" />;
     return <Code2 className="w-4 h-4" />;
   };
+
+  const viewportWidthClass =
+    viewport === 'mobile'
+      ? 'max-w-[390px] mx-auto shadow-sm'
+      : viewport === 'tablet'
+        ? 'max-w-[768px] mx-auto shadow-sm'
+        : 'w-full';
 
   const panelBody = (
     <div
@@ -348,10 +548,12 @@ export function ProCanvasPanel({
             <h2 className="font-display text-sm font-bold text-slate-950 dark:text-white truncate">
               {artifact.title}
             </h2>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate tabular-nums">
               {artifact.kind === 'document'
                 ? `${artifact.spec.format.toUpperCase()} Document Studio`
-                : `${artifact.language.toUpperCase()} Canvas`}
+                : artifact.kind === 'app'
+                  ? `${artifact.spec.files.length} files · ${artifact.spec.framework || 'App IDE'}`
+                  : `${artifact.language.toUpperCase()} Canvas`}
             </p>
           </div>
         </div>
@@ -397,6 +599,32 @@ export function ProCanvasPanel({
             </button>
           </div>
 
+          {(artifact.kind === 'app' || artifact.kind === 'code') && !isRunning && (
+            <button
+              type="button"
+              data-testid="canvas-github-sync-btn"
+              onClick={handleTriggerGithubSyncClick}
+              style={
+                syncPanelOpen
+                  ? {
+                      backgroundColor: 'var(--m3-primary-container)',
+                      color: 'var(--m3-on-primary-container)',
+                      borderColor: 'var(--m3-primary)',
+                    }
+                  : {
+                      backgroundColor: 'var(--m3-surface)',
+                      borderColor: 'var(--m3-outline)',
+                    }
+              }
+              className="min-h-[34px] px-3 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+            >
+              <GitBranch className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">
+                {githubConnected ? 'Sync GitHub' : 'Connect GitHub'}
+              </span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => void handleCopy()}
@@ -406,38 +634,28 @@ export function ProCanvasPanel({
             {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
           </button>
 
-          {artifact.kind === 'document' ? (
-            <button
-              type="button"
-              disabled={downloading}
-              data-testid="canvas-download-btn"
-              onClick={() => void handleDownloadDocument()}
-              style={{
-                backgroundColor: 'var(--m3-primary)',
-                color: 'var(--m3-on-primary)',
-              }}
-              className="min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>
-                {downloading ? 'Saving…' : `.${artifact.spec.format.toUpperCase()}`}
-              </span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              data-testid="canvas-download-btn"
-              onClick={handleDownloadCode}
-              style={{
-                backgroundColor: 'var(--m3-primary)',
-                color: 'var(--m3-on-primary)',
-              }}
-              className="min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Save</span>
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={downloading}
+            data-testid="canvas-download-btn"
+            onClick={() => void handleDownloadPrimary()}
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>
+              {artifact.kind === 'document'
+                ? downloading
+                  ? 'Saving…'
+                  : `.${artifact.spec.format.toUpperCase()}`
+                : artifact.kind === 'app'
+                  ? 'Export'
+                  : 'Save'}
+            </span>
+          </button>
 
           <button
             type="button"
@@ -449,6 +667,243 @@ export function ProCanvasPanel({
           </button>
         </div>
       </header>
+
+      {/* Multi-File Explorer Tabs Strip (App Projects) */}
+      {artifact.kind === 'app' && (
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="shrink-0 px-3 py-1.5 border-b flex items-center gap-1.5 overflow-x-auto"
+          data-testid="canvas-file-explorer"
+        >
+          {artifact.spec.files.map((file, idx) => {
+            const active = idx === Math.min(activeFileIdx, artifact.spec.files.length - 1);
+            return (
+              <button
+                key={file.path}
+                type="button"
+                data-testid={`canvas-file-tab-${file.path}`}
+                onClick={() => {
+                  setActiveFileIdx(idx);
+                  if (tab === 'preview' && !file.path.endsWith('.html')) {
+                    setTab('source');
+                  }
+                }}
+                style={
+                  active
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                        borderColor: 'var(--m3-primary)',
+                      }
+                    : {
+                        backgroundColor: 'var(--m3-surface)',
+                        borderColor: 'var(--m3-outline)',
+                      }
+                }
+                className="min-h-[30px] px-2.5 rounded-xl border text-[11px] font-mono font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              >
+                <FileCode2 className="w-3.5 h-3.5 shrink-0" />
+                <span>{file.path}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Responsive Preview Device Bar for HTML & Multi-File Apps */}
+      {supportsResponsivePreview && (
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="shrink-0 px-3.5 py-1.5 border-b flex items-center justify-between gap-2"
+        >
+          <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+            Live Sandboxed Runtime
+          </span>
+          <div className="inline-flex items-center gap-1">
+            {(
+              [
+                { id: 'desktop', label: 'Desktop', Icon: Monitor },
+                { id: 'tablet', label: 'Tablet', Icon: Tablet },
+                { id: 'mobile', label: 'Mobile', Icon: Smartphone },
+              ] as const
+            ).map(({ id, label, Icon }) => {
+              const active = viewport === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  data-testid={`canvas-viewport-${id}`}
+                  onClick={() => setViewport(id)}
+                  aria-label={`${label} preview`}
+                  style={
+                    active
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                        }
+                      : undefined
+                  }
+                  className="min-h-[28px] px-2.5 rounded-full text-[11px] font-medium text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 whitespace-nowrap"
+                >
+                  <Icon className="w-3 h-3" />
+                  <span className="hidden sm:inline">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Collapsible GitHub Sync Drawer */}
+      {syncPanelOpen && (artifact.kind === 'app' || artifact.kind === 'code') && (
+        <form
+          onSubmit={handleSubmitGithubSync}
+          data-testid="canvas-github-sync-drawer"
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="shrink-0 border-b px-3.5 py-3 space-y-2.5"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+              <GitBranch className="w-4 h-4" />
+              <span>Sync Project to GitHub via MCP ({projectFiles.length} file{projectFiles.length === 1 ? '' : 's'})</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSyncPanelOpen(false)}
+              aria-label="Dismiss GitHub sync"
+              className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="inline-flex p-0.5 rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+            <button
+              type="button"
+              onClick={() => setIsNewRepo(true)}
+              style={
+                isNewRepo
+                  ? {
+                      backgroundColor: 'var(--m3-primary-container)',
+                      color: 'var(--m3-on-primary-container)',
+                    }
+                  : undefined
+              }
+              className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
+            >
+              Create New Repo
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsNewRepo(false)}
+              style={
+                !isNewRepo
+                  ? {
+                      backgroundColor: 'var(--m3-primary-container)',
+                      color: 'var(--m3-on-primary-container)',
+                    }
+                  : undefined
+              }
+              className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
+            >
+              Existing Repo
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label htmlFor="gh-sync-repo" className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                {isNewRepo ? 'New Repository Name' : 'Repository (owner/repo or name)'}
+              </label>
+              <input
+                id="gh-sync-repo"
+                type="text"
+                required
+                value={repoName}
+                onChange={(e) => setRepoName(e.target.value)}
+                placeholder="sprint-taskboard-pro"
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="w-full min-h-[38px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="gh-sync-branch" className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                Target Branch
+              </label>
+              <input
+                id="gh-sync-branch"
+                type="text"
+                required
+                value={repoBranch}
+                onChange={(e) => setRepoBranch(e.target.value)}
+                placeholder="main"
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="w-full min-h-[38px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+            <div className="flex-1 min-w-0">
+              <label htmlFor="gh-sync-msg" className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                Commit Message
+              </label>
+              <input
+                id="gh-sync-msg"
+                type="text"
+                required
+                value={commitMessage}
+                onChange={(e) => setCommitMessage(e.target.value)}
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="w-full min-h-[38px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+              />
+            </div>
+
+            {isNewRepo && (
+              <label className="min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={isPrivateRepo}
+                  onChange={(e) => setIsPrivateRepo(e.target.checked)}
+                />
+                <span>Private repo</span>
+              </label>
+            )}
+
+            <button
+              type="submit"
+              data-testid="canvas-github-push-submit"
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="min-h-[38px] px-4 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+            >
+              <GitBranch className="w-3.5 h-3.5" />
+              <span>Push to GitHub</span>
+            </button>
+          </div>
+        </form>
+      )}
 
       {/* Main Canvas Body */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3.5 sm:p-4">
@@ -462,10 +917,18 @@ export function ProCanvasPanel({
             <textarea
               aria-label="Canvas source editor"
               data-testid="canvas-source-editor"
-              value={artifact.kind === 'code' ? artifact.code : artifact.rawJson}
+              value={
+                artifact.kind === 'code'
+                  ? artifact.code
+                  : artifact.kind === 'app'
+                    ? activeAppFile?.content ?? ''
+                    : artifact.rawJson
+              }
               onChange={(e) => {
                 if (artifact.kind === 'code') {
                   onChangeArtifact({ ...artifact, code: e.target.value });
+                } else if (artifact.kind === 'app') {
+                  handleUpdateAppFileContent(e.target.value);
                 } else {
                   handleUpdateDocumentJson(e.target.value);
                 }
@@ -473,15 +936,29 @@ export function ProCanvasPanel({
               className="flex-1 w-full min-h-[320px] p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed resize-none focus:outline-none"
             />
           </div>
+        ) : artifact.kind === 'app' ? (
+          <div className="h-full flex flex-col min-h-[380px]">
+            <iframe
+              ref={previewIframeRef}
+              title={artifact.title}
+              data-testid="canvas-app-iframe"
+              sandbox="allow-scripts allow-forms allow-modals"
+              srcDoc={appSrcDoc}
+              className={`${viewportWidthClass} flex-1 min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white transition-all`}
+            />
+          </div>
         ) : artifact.kind === 'code' ? (
           isHtmlPreview ? (
-            <iframe
-              title={artifact.title}
-              data-testid="canvas-html-iframe"
-              sandbox="allow-scripts"
-              srcDoc={artifact.code}
-              className="w-full h-full min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white"
-            />
+            <div className="h-full flex flex-col min-h-[380px]">
+              <iframe
+                ref={previewIframeRef}
+                title={artifact.title}
+                data-testid="canvas-html-iframe"
+                sandbox="allow-scripts allow-forms allow-modals"
+                srcDoc={singleHtmlSrcDoc}
+                className={`${viewportWidthClass} flex-1 min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white transition-all`}
+              />
+            </div>
           ) : isSvgPreview ? (
             <iframe
               title={artifact.title}
@@ -746,8 +1223,69 @@ export function ProCanvasPanel({
         )}
       </div>
 
-      {/* Footer Quick AI Actions for Code Canvas */}
-      {artifact.kind === 'code' && !isRunning && (
+      {/* Collapsible Runtime Console Bar (HTML & Multi-File App Previews) */}
+      {(artifact.kind === 'app' || isHtmlPreview) && runtimeLogs.length > 0 && (
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="shrink-0 border-t"
+          data-testid="canvas-runtime-console"
+        >
+          <button
+            type="button"
+            onClick={() => setConsoleOpen((v) => !v)}
+            className="w-full px-3.5 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300 font-medium"
+          >
+            <span className="inline-flex items-center gap-1.5 tabular-nums">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Runtime Console ({runtimeLogs.length} issue{runtimeLogs.length === 1 ? '' : 's'})
+              </span>
+            </span>
+            <span className="inline-flex items-center gap-2">
+              {!isRunning && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    const errSummary = runtimeLogs.map((l) => `- ${l.level}: ${l.message}`).join('\n');
+                    onAskCanvasAction(
+                      `Fix these runtime errors detected in the Canvas preview and return an updated artifact:\n${errSummary}\n\n${buildCodeContextForPrompt()}`,
+                      `Fix ${runtimeLogs.length} runtime error(s) in ${artifact.title}`
+                    );
+                  }}
+                  className="px-2 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-semibold"
+                >
+                  Fix Bugs
+                </span>
+              )}
+              <Terminal className="w-3.5 h-3.5" />
+            </span>
+          </button>
+          {consoleOpen && (
+            <div className="max-h-28 overflow-y-auto px-3.5 pb-2 space-y-1 font-mono text-[11px]">
+              {runtimeLogs.map((log, li) => (
+                <div
+                  key={li}
+                  className={
+                    log.level === 'error'
+                      ? 'text-rose-700 dark:text-rose-300'
+                      : 'text-amber-700 dark:text-amber-300'
+                  }
+                >
+                  [{log.level}] {log.message}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Footer Quick IDE Actions for Code & Multi-File App Canvas */}
+      {(artifact.kind === 'code' || artifact.kind === 'app') && !isRunning && (
         <footer
           style={{
             backgroundColor: 'var(--m3-surface-container)',
@@ -757,14 +1295,31 @@ export function ProCanvasPanel({
         >
           <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 inline-flex items-center gap-1 shrink-0 mr-1">
             <Sparkles className="w-3 h-3" />
-            Iterate:
+            IDE:
           </span>
           <button
             type="button"
             onClick={() =>
               onAskCanvasAction(
-                `Add comprehensive unit tests for this ${artifact.language} code:\n\n\`\`\`${artifact.language}\n${artifact.code}\n\`\`\``,
-                `Add unit tests for ${artifact.title}`
+                `Inspect the following code for bugs, accessibility issues, and edge cases, fix them cleanly, and return the complete updated artifact:\n\n${buildCodeContextForPrompt()}`,
+                `Fix bugs & harden ${artifact.title}`
+              )
+            }
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
+          >
+            <Wrench className="w-3 h-3" />
+            <span>Fix Bugs</span>
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              onAskCanvasAction(
+                `Add comprehensive unit tests for this project using clean assertions:\n\n${buildCodeContextForPrompt()}`,
+                `Add tests for ${artifact.title}`
               )
             }
             style={{
@@ -779,8 +1334,8 @@ export function ProCanvasPanel({
             type="button"
             onClick={() =>
               onAskCanvasAction(
-                `Refactor and harden this ${artifact.language} code for edge cases, accessibility, and clean modularity:\n\n\`\`\`${artifact.language}\n${artifact.code}\n\`\`\``,
-                `Refactor & harden ${artifact.title}`
+                `Refactor this project for cleaner architecture, responsive layout, and keyboard accessibility, returning an updated artifact:\n\n${buildCodeContextForPrompt()}`,
+                `Refactor ${artifact.title}`
               )
             }
             style={{
@@ -793,19 +1348,15 @@ export function ProCanvasPanel({
           </button>
           <button
             type="button"
-            onClick={() =>
-              onAskCanvasAction(
-                `Explain how this ${artifact.language} code works step by step:\n\n\`\`\`${artifact.language}\n${artifact.code}\n\`\`\``,
-                `Explain ${artifact.title}`
-              )
-            }
+            onClick={handleTriggerGithubSyncClick}
             style={{
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
           >
-            Explain
+            <GitBranch className="w-3 h-3" />
+            <span>{githubConnected ? 'Push to GitHub' : 'Connect GitHub'}</span>
           </button>
         </footer>
       )}
@@ -816,12 +1367,17 @@ export function ProCanvasPanel({
     <>
       <aside
         style={{ borderColor: 'var(--m3-outline)' }}
-        className="hidden lg:flex w-[46%] xl:w-[48%] shrink-0 border-l flex-col min-h-0"
+        className="hidden lg:flex w-[48%] xl:w-[50%] shrink-0 border-l flex-col min-h-0"
       >
         {panelBody}
       </aside>
 
-      <div role="dialog" aria-modal="true" aria-label={artifact.title} className="lg:hidden fixed inset-0 z-50 flex flex-col">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={artifact.title}
+        className="lg:hidden fixed inset-0 z-50 flex flex-col"
+      >
         {panelBody}
       </div>
     </>

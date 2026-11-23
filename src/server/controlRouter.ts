@@ -196,7 +196,15 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
 
   const storageFilePath =
     options.storageFilePath ?? path.resolve(process.cwd(), '.data', 'control-keys.json');
-  const configuredAdminToken = (options.adminToken ?? process.env.MCP_HUB_ADMIN_TOKEN ?? '').trim();
+  const envAdminEnabled = process.env.MCP_HUB_REQUIRE_ADMIN_TOKEN === 'true';
+  const rawAdminToken = (
+    options.adminToken ?? (envAdminEnabled ? process.env.MCP_HUB_ADMIN_TOKEN : '') ?? ''
+  )
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .trim();
+  const configuredAdminToken =
+    rawAdminToken && !rawAdminToken.startsWith('MY_') ? rawAdminToken : '';
 
   const keyRecords: StoredApiKeyRecord[] = [];
   const activityLog: ControlActivityEntry[] = [];

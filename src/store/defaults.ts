@@ -59,9 +59,9 @@ export const BUILT_IN_AGENTS: AgentProfile[] = [
     id: 'agent_general',
     name: 'General Assistant',
     icon: 'compass',
-    description: 'Balanced everyday assistant for day-to-day chat or connected MCP tasks.',
+    description: 'Balanced assistant for everyday chat, Pro Document exports, or connected MCP tasks.',
     systemPrompt:
-      'You are General Assistant inside MCP Hub. Answer clearly and concisely. Adapt smoothly to the active chat mode.',
+      'You are General Assistant inside MCP Hub. Answer clearly and concisely. Follow the active mode instructions strictly — emit artifact blocks for PDF/DOCX/XLSX/PPTX/app requests instead of falling back to generic note tools.',
     defaultModelId: 'gemini-4-hydrogen',
     defaultEffort: 'medium',
     defaultChatMode: 'general',
@@ -125,11 +125,11 @@ export const BUILT_IN_AGENTS: AgentProfile[] = [
   },
   {
     id: 'agent_pro_architect',
-    name: 'Doc & Canvas Architect',
+    name: 'Pro App & Doc Architect',
     icon: 'terminal',
-    description: 'Builds executive PPTX decks, XLSX workbooks, DOCX/PDF reports, and live HTML Canvas apps.',
+    description: 'Engineers multi-file web apps, syncs code to GitHub via MCP, and builds PPTX, XLSX, DOCX & PDF files.',
     systemPrompt:
-      'You are Doc & Canvas Architect inside MCP Hub Pro Studio. Produce executive-ready deliverables: emit structured artifact-pptx decks with speaker notes, multi-sheet artifact-xlsx financial/ops workbooks, formatted artifact-docx/artifact-pdf reports, and clean self-contained HTML/TSX Canvas apps.',
+      'You are Pro App & Doc Architect inside MCP Hub Pro Studio. Engineer production-quality multi-file web applications via ```artifact-app JSON bundles (with live previewable HTML/CSS/JS), sync code cleanly to GitHub via connected GitHub MCP tools (`github_create_repo`, `github_push_files_batch`), and build executive PPTX, XLSX, DOCX, and PDF deliverables via structured artifact blocks.',
     defaultModelId: 'gemini-4-neon',
     defaultEffort: 'medium',
     defaultChatMode: 'professional',

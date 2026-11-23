@@ -72,6 +72,7 @@ import {
   type StudyFlashcard,
   type StudyQuizQuestion,
 } from '../../utils/studyTools';
+import { QuickConnectSheet } from '../servers/QuickConnectSheet';
 import { AgentSwitcherSheet } from './AgentSwitcherSheet';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
@@ -154,16 +155,16 @@ const STARTER_PROMPTS_BY_MODE: Record<ChatMode, Array<{ label: string; prompt: s
   ],
   professional: [
     {
+      label: 'Build Multi-File Web App (IDE + GitHub)',
+      prompt: 'Build a multi-file web app Sprint Taskboard (index.html, styles.css, app.js) ready for Pro Canvas IDE and GitHub sync.',
+    },
+    {
       label: 'Build Executive Deck (.PPTX)',
       prompt: 'Build a 4-slide Q3 executive presentation deck (.pptx) with KPI metrics and rollout milestones.',
     },
     {
       label: 'Create Excel Forecast (.XLSX)',
       prompt: 'Generate a multi-sheet Q3 financial Excel workbook (.xlsx) with P&L and department budgets.',
-    },
-    {
-      label: 'Build Interactive ROI App (Canvas)',
-      prompt: 'Build an interactive HTML ROI calculator widget for live preview in Canvas.',
     },
     {
       label: 'Create Sprint Note (Write Approval)',
@@ -243,6 +244,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Pro Canvas & Document Export state
   const [canvasOpen, setCanvasOpen] = useState(false);
   const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
+  const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
   const [readerState, setReaderState] = useState<{
@@ -533,6 +535,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         title: payload.title,
         language: payload.language,
         code: payload.code,
+      });
+    } else if (payload.kind === 'app') {
+      setCanvasArtifact({
+        kind: 'app',
+        id,
+        title: payload.title,
+        spec: payload.spec,
+        rawJson: payload.rawJson,
       });
     } else {
       setCanvasArtifact({
@@ -1816,11 +1826,22 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         open={canvasOpen}
         artifact={canvasArtifact}
         isRunning={isRunning}
+        githubConnected={Boolean(
+          servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')?.status ===
+            'connected'
+        )}
+        onRequestConnectGithub={() => setGithubConnectOpen(true)}
         onChangeArtifact={setCanvasArtifact}
         onAskCanvasAction={(promptText, label) => {
           void handleQuickPrompt(promptText, label);
         }}
         onClose={() => setCanvasOpen(false)}
+      />
+
+      <QuickConnectSheet
+        presetId={githubConnectOpen ? 'github' : null}
+        server={servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')}
+        onClose={() => setGithubConnectOpen(false)}
       />
 
       {/* Dedicated Model Switcher Sheet (Completely Separate from Agents) */}

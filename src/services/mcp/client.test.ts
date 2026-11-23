@@ -323,3 +323,174 @@ test('sendMcpRpc recovers from stale Mcp-Session-Id 404 by clearing session and 
   assert.deepEqual(seenSessions, [null, 'sess_old', null]);
 });
 
+test('GitHub virtual MCP supports repo creation, UTF-8 read, file push with SHA lookup, and atomic batch commits', async () => {
+  const ghServer: McpServerConfig = {
+    id: 'srv_github',
+    name: 'GitHub',
+    url: 'virtual://github-api',
+    authType: 'bearer',
+    enabled: true,
+    transportPreference: 'auto',
+    status: 'connected',
+    tools: [],
+    resources: [],
+    prompts: [],
+    disabledTools: [],
+  };
+
+  const requests: string[] = [];
+  const mockFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    requests.push(`${method} ${url}`);
+
+    if (method === 'POST' && url === 'https://api.github.com/user/repos') {
+      const body = JSON.parse(String(init?.body)) as { name: string; private: boolean };
+      return new Response(
+        JSON.stringify({
+          full_name: `octocat/${body.name}`,
+          name: body.name,
+          default_branch: 'main',
+          private: body.private,
+          html_url: `https://github.com/octocat/${body.name}`,
+          owner: { login: 'octocat' },
+        }),
+        { status: 201 }
+      );
+    }
+
+    if (method === 'GET' && url === 'https://api.github.com/repos/octocat/demo/contents/README.md') {
+      const encoded = Buffer.from('# Hello ✓', 'utf8').toString('base64');
+      return new Response(
+        JSON.stringify({
+          path: 'README.md',
+          sha: 'sha_existing_1',
+          size: 9,
+          encoding: 'base64',
+          content: encoded,
+          html_url: 'https://github.com/octocat/demo/blob/main/README.md',
+        }),
+        { status: 200 }
+      );
+    }
+
+    if (method === 'PUT' && url === 'https://api.github.com/repos/octocat/demo/contents/README.md') {
+      const body = JSON.parse(String(init?.body)) as { sha?: string; content: string };
+      assert.equal(body.sha, 'sha_existing_1');
+      assert.equal(Buffer.from(body.content, 'base64').toString('utf8'), '# Updated ✓');
+      return new Response(
+        JSON.stringify({
+          content: { path: 'README.md', html_url: 'https://github.com/octocat/demo/blob/main/README.md' },
+          commit: { sha: 'commit_sha_single', html_url: 'https://github.com/octocat/demo/commit/commit_sha_single' },
+        }),
+        { status: 200 }
+      );
+    }
+
+    // Batch push flow: existing initialized repo
+    if (method === 'GET' && url === 'https://api.github.com/repos/octocat/demo') {
+      return new Response(JSON.stringify({ default_branch: 'main', html_url: 'https://github.com/octocat/demo' }), { status: 200 });
+    }
+    if (method === 'GET' && url === 'https://api.github.com/repos/octocat/demo/git/ref/heads/main') {
+      return new Response(JSON.stringify({ object: { sha: 'head_sha_1' } }), { status: 200 });
+    }
+    if (method === 'GET' && url === 'https://api.github.com/repos/octocat/demo/git/commits/head_sha_1') {
+      return new Response(JSON.stringify({ tree: { sha: 'base_tree_1' } }), { status: 200 });
+    }
+    if (method === 'POST' && url === 'https://api.github.com/repos/octocat/demo/git/blobs') {
+      return new Response(JSON.stringify({ sha: 'blob_sha_x' }), { status: 201 });
+    }
+    if (method === 'POST' && url === 'https://api.github.com/repos/octocat/demo/git/trees') {
+      return new Response(JSON.stringify({ sha: 'new_tree_sha' }), { status: 201 });
+    }
+    if (method === 'POST' && url === 'https://api.github.com/repos/octocat/demo/git/commits') {
+      return new Response(JSON.stringify({ sha: 'new_commit_sha', html_url: 'https://github.com/octocat/demo/commit/new_commit_sha' }), { status: 201 });
+    }
+    if (method === 'PATCH' && url === 'https://api.github.com/repos/octocat/demo/git/refs/heads/main') {
+      return new Response(JSON.stringify({ object: { sha: 'new_commit_sha' } }), { status: 200 });
+    }
+
+    // Empty-repo bootstrap flow
+    if (method === 'GET' && url === 'https://api.github.com/repos/octocat/empty-repo') {
+      return new Response(JSON.stringify({ default_branch: 'main', html_url: 'https://github.com/octocat/empty-repo' }), { status: 200 });
+    }
+    if (method === 'GET' && url === 'https://api.github.com/repos/octocat/empty-repo/git/ref/heads/main') {
+      return new Response('Conflict - empty repository', { status: 409 });
+    }
+    if (method === 'PUT' && url === 'https://api.github.com/repos/octocat/empty-repo/contents/index.html') {
+      return new Response(
+        JSON.stringify({ commit: { sha: 'boot_sha_1', html_url: 'https://github.com/octocat/empty-repo/commit/boot_sha_1' } }),
+        { status: 201 }
+      );
+    }
+
+    return new Response(`Unhandled mock URL: ${method} ${url}`, { status: 404 });
+  }) as typeof fetch;
+
+  const created = await callMcpTool({
+    server: ghServer,
+    secrets: { bearerToken: 'ghp_test' },
+    toolName: 'github_create_repo',
+    args: { name: 'demo', private: false },
+    fetchFn: mockFetch,
+  });
+  assert.equal(created.isError, false);
+  assert.ok(created.text.includes('octocat/demo'));
+
+  const readRes = await callMcpTool({
+    server: ghServer,
+    secrets: { bearerToken: 'ghp_test' },
+    toolName: 'github_read_file',
+    args: { owner: 'octocat', repo: 'demo', path: 'README.md' },
+    fetchFn: mockFetch,
+  });
+  assert.equal(readRes.isError, false);
+  assert.ok(readRes.text.includes('# Hello ✓'));
+
+  const pushSingle = await callMcpTool({
+    server: ghServer,
+    secrets: { bearerToken: 'ghp_test' },
+    toolName: 'github_push_file',
+    args: { owner: 'octocat', repo: 'demo', path: 'README.md', content: '# Updated ✓', message: 'docs: update' },
+    fetchFn: mockFetch,
+  });
+  assert.equal(pushSingle.isError, false);
+  assert.ok(pushSingle.text.includes('commit_sha_single'));
+
+  const pushBatch = await callMcpTool({
+    server: ghServer,
+    secrets: { bearerToken: 'ghp_test' },
+    toolName: 'github_push_files_batch',
+    args: {
+      owner: 'octocat',
+      repo: 'demo',
+      branch: 'main',
+      message: 'feat: batch push',
+      files: [
+        { path: 'index.html', content: '<h1>App</h1>' },
+        { path: 'app.js', content: 'console.log(1);' },
+      ],
+    },
+    fetchFn: mockFetch,
+  });
+  assert.equal(pushBatch.isError, false);
+  assert.ok(pushBatch.text.includes('new_commit_sha'));
+
+  const pushEmpty = await callMcpTool({
+    server: ghServer,
+    secrets: { bearerToken: 'ghp_test' },
+    toolName: 'github_push_files_batch',
+    args: {
+      owner: 'octocat',
+      repo: 'empty-repo',
+      branch: 'main',
+      message: 'feat: bootstrap',
+      files: [{ path: 'index.html', content: '<h1>Boot</h1>' }],
+    },
+    fetchFn: mockFetch,
+  });
+  assert.equal(pushEmpty.isError, false);
+  assert.ok(pushEmpty.text.includes('boot_sha_1'));
+});
+
+

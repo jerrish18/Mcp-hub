@@ -31,8 +31,21 @@ function sanitizeGeminiSchema(schema: Record<string, unknown>): Record<string, u
   if (!clone.type) {
     clone.type = 'object';
   }
-  if (clone.type === 'object' && (!clone.properties || Object.keys(clone.properties as object).length === 0)) {
-    clone.properties = { _placeholder: { type: 'string', description: 'Optional unused parameter' } };
+  if (clone.type === 'object') {
+    if (!clone.properties || Object.keys(clone.properties as object).length === 0) {
+      clone.properties = { _placeholder: { type: 'string', description: 'Optional unused parameter' } };
+      delete clone.required;
+    } else if (Array.isArray(clone.required)) {
+      const propKeys = new Set(Object.keys(clone.properties as object));
+      const validRequired = (clone.required as unknown[]).filter(
+        (key): key is string => typeof key === 'string' && propKeys.has(key)
+      );
+      if (validRequired.length > 0) {
+        clone.required = validRequired;
+      } else {
+        delete clone.required;
+      }
+    }
   }
   return clone;
 }
@@ -99,7 +112,7 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     throw new ProviderAuthError('Google Gemini API key is not configured.');
   }
 
-  const contents: Array<Record<string, unknown>> = [];
+  const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
   for (const msg of messages) {
     if (msg.role === 'user') {
       const parts: Array<Record<string, unknown>> = [];
@@ -136,25 +149,28 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
               name: tc.name,
               args: tc.parsedArguments ?? {},
             },
+            ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
           });
         }
       }
       if (parts.length > 0) contents.push({ role: 'model', parts });
     } else if (msg.role === 'tool') {
-      contents.push({
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: msg.toolName,
-              response: {
-                result: msg.content,
-                isError: Boolean(msg.isError),
-              },
-            },
+      const responsePart: Record<string, unknown> = {
+        functionResponse: {
+          name: msg.toolName,
+          response: {
+            result: msg.content,
+            isError: Boolean(msg.isError),
           },
-        ],
-      });
+        },
+      };
+      // Coalesce consecutive tool responses into a single 'user' turn for parallel function calls
+      const prev = contents[contents.length - 1];
+      if (prev && prev.role === 'user' && prev.parts.every((p) => 'functionResponse' in p)) {
+        prev.parts.push(responsePart);
+      } else {
+        contents.push({ role: 'user', parts: [responsePart] });
+      }
     }
   }
 
@@ -250,6 +266,7 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   let buffer = '';
   const collectedCalls: LlmToolCall[] = [];
   const collectedCitations = new Map<string, GroundingCitation>();
+  let pendingThoughtSignature: string | undefined;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -270,6 +287,8 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
             parts?: Array<{
               text?: string;
               thought?: boolean;
+              thoughtSignature?: string;
+              thought_signature?: string;
               functionCall?: { name: string; args?: Record<string, unknown> };
             }>;
           };
@@ -304,18 +323,25 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
       const candidate = chunk.candidates?.[0];
       const parts = candidate?.content?.parts ?? [];
       for (const part of parts) {
+        const partSig = part.thoughtSignature ?? part.thought_signature;
         if (part.thought && part.text) {
           onEvent({ type: 'reasoning_delta', delta: part.text });
         } else if (part.text) {
           onEvent({ type: 'text_delta', delta: part.text });
         }
+        if (partSig && !part.functionCall) {
+          pendingThoughtSignature = partSig;
+        }
         if (part.functionCall) {
           const argsObj = part.functionCall.args ?? {};
+          const sig = partSig ?? pendingThoughtSignature;
+          pendingThoughtSignature = undefined;
           collectedCalls.push({
             id: `call_${Date.now()}_${collectedCalls.length}`,
             name: part.functionCall.name,
             rawArguments: JSON.stringify(argsObj),
             parsedArguments: argsObj,
+            ...(sig ? { thoughtSignature: sig } : {}),
           });
         }
       }

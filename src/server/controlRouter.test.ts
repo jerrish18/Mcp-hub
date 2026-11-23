@@ -196,4 +196,20 @@ describe('createControlRouter (App API Key + External Control)', () => {
     });
     assert.equal(afterRevoke.status, 401);
   });
+
+  it('ignores literal empty-quote or MY_ placeholder adminToken values', async () => {
+    const app = express();
+    app.use('/api', createControlRouter({ storageFilePath: '', adminToken: '""' }));
+    const srv = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    try {
+      const addr = srv.address() as { port: number };
+      const statusRes = await fetch(`http://127.0.0.1:${addr.port}/api/control/bridge/status`);
+      const statusJson = (await statusRes.json()) as { adminTokenRequired: boolean };
+      assert.equal(statusJson.adminTokenRequired, false);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
 });

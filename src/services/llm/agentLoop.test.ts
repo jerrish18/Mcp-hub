@@ -674,5 +674,167 @@ test('agentLoop in Study mode enriches visual prompts with verified web images a
   assert.ok(res.finalText.includes('![Diagram of the human heart](https://upload.wikimedia.org/wikipedia/commons/heart.png'));
 });
 
+function makeGeminiSseResponse(chunks: Array<Record<string, unknown>>): Response {
+  const body = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n';
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+test('Gemini provider preserves thoughtSignature across parallel multi-turn function calls and coalesces tool responses', async () => {
+  let step = 0;
+  const capturedBodies: Array<{
+    contents?: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+  }> = [];
+
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    step++;
+    const body = JSON.parse(String(init?.body ?? '{}')) as {
+      contents?: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+    };
+    capturedBodies.push(body);
+
+    if (step === 1) {
+      // Simulate Gemini 3/4 response: thought part with thoughtSignature + two parallel functionCall parts
+      return makeGeminiSseResponse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: 'Planning calculations...', thought: true, thoughtSignature: 'sig_thought_abc123' },
+                  { functionCall: { name: 'srv_virtual__calculate_expression', args: { expression: '2 + 3' } } },
+                  {
+                    functionCall: { name: 'srv_virtual__calculate_expression', args: { expression: '4 * 5' } },
+                    thought_signature: 'sig_inline_def456',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ]);
+    }
+
+    return makeGeminiSseResponse([
+      {
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Results are 5 and 20.' }],
+            },
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  const res = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'gemini-3.1-flash-lite',
+    effort: 'high',
+    chatMode: 'professional',
+    keys: { gemini: 'AIzaTestSignature123456' },
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Compute 2+3 and 4*5' }],
+    maxSteps: 5,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    fetchFn: mockFetch,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: async () => 'approve',
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.equal(step, 2);
+  assert.equal(res.finalText, 'Results are 5 and 20.');
+  assert.equal(res.toolCalls.length, 2);
+
+  // Inspect Step 2 contents payload sent back to Gemini
+  const step2Contents = capturedBodies[1]?.contents ?? [];
+  assert.equal(step2Contents.length, 3); // [user prompt, model tool calls, coalesced user tool responses]
+  assert.equal(step2Contents[1].role, 'model');
+  assert.equal(step2Contents[1].parts[0].thoughtSignature, 'sig_thought_abc123');
+  assert.equal(step2Contents[1].parts[1].thoughtSignature, 'sig_inline_def456');
+
+  // Consecutive tool responses must be coalesced into ONE user message with two functionResponse parts
+  assert.equal(step2Contents[2].role, 'user');
+  assert.equal(step2Contents[2].parts.length, 2);
+  assert.ok('functionResponse' in step2Contents[2].parts[0]);
+  assert.ok('functionResponse' in step2Contents[2].parts[1]);
+});
+
+test('Pro mode system prompt enforces strict PDF/app routing and demoProvider generates artifact-pdf and artifact-app without workspace notes', async () => {
+  const proPrompt = composeEffectiveSystemPrompt({
+    basePrompt: 'General assistant',
+    chatMode: 'professional',
+  });
+  assert.ok(proPrompt.includes('NEVER call `workspace_create_note`'));
+  assert.ok(proPrompt.includes('artifact-app'));
+  assert.ok(proPrompt.includes('github_push_files_batch'));
+
+  const pdfRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'demo-sandbox',
+    effort: 'medium',
+    chatMode: 'professional',
+    keys: {},
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Generate me a pdf about giraffe' }],
+    maxSteps: 5,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: async () => 'approve',
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.equal(pdfRes.toolCalls.length, 0);
+  assert.ok(pdfRes.finalText.includes('```artifact-pdf'));
+  assert.ok(pdfRes.finalText.includes('Giraffe Briefing'));
+
+  const appRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'demo-sandbox',
+    effort: 'medium',
+    chatMode: 'professional',
+    keys: {},
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Build a multi-file web app taskboard' }],
+    maxSteps: 5,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: async () => 'approve',
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.ok(appRes.finalText.includes('```artifact-app'));
+  assert.ok(appRes.finalText.includes('Sprint Taskboard Pro'));
+});
+
+
 
 

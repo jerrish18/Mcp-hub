@@ -318,10 +318,10 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               },
               {
                 id: 'canvas',
-                title: 'Coding Canvas',
-                subtitle: 'Live HTML/SVG/TSX preview',
+                title: 'App IDE & GitHub Sync',
+                subtitle: 'Multi-file HTML/JS/CSS & push',
                 Icon: Code2,
-                prompt: 'Build an interactive HTML ROI calculator widget for live preview in Canvas.',
+                prompt: 'Build a multi-file web app Sprint Taskboard (index.html, styles.css, app.js) ready for Pro Canvas IDE and GitHub sync.',
               },
             ].map(({ id, title, subtitle, Icon, prompt }) => (
               <button
