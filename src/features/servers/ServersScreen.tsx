@@ -2,11 +2,18 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Database,
+  FileJson,
+  FileText,
+  FolderOpen,
   KeyRound,
+  Layers,
   Loader2,
+  MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
@@ -14,6 +21,11 @@ import {
   ShieldAlert,
   Trash2,
 } from 'lucide-react';
+import {
+  parseMcpServersJsonConfig,
+  PRO_WORK_MCP_TEMPLATES,
+  type ProWorkMcpTemplate,
+} from '../../config/connectors';
 import {
   buildAuthorizationUrl,
   discoverOAuthMetadata,
@@ -89,7 +101,11 @@ export function ServersScreen() {
   const [expandedId, setExpandedId] = useState<string | null>(servers[0]?.id ?? null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  const [editingPresetId, setEditingPresetId] = useState<McpServerConfig['presetId']>(undefined);
   const [quickConnectPreset, setQuickConnectPreset] = useState<'youtube' | 'github' | 'canva' | null>(null);
+  const [jsonImportOpen, setJsonImportOpen] = useState(false);
+  const [jsonImportText, setJsonImportText] = useState('');
+  const [jsonImportError, setJsonImportError] = useState('');
 
   // Form state
   const [name, setName] = useState('');
@@ -117,6 +133,7 @@ export function ServersScreen() {
 
   const openNewEditor = () => {
     setEditingServerId(null);
+    setEditingPresetId(undefined);
     setName('');
     setUrl('https://');
     setAuthType('bearer');
@@ -139,9 +156,64 @@ export function ServersScreen() {
     setEditorOpen(true);
   };
 
+  const openProTemplateEditor = (tpl: ProWorkMcpTemplate) => {
+    const existing = servers.find((s) => s.presetId === tpl.presetId);
+    if (existing) {
+      void openEditEditor(existing);
+      return;
+    }
+    setEditingServerId(null);
+    setEditingPresetId(tpl.presetId);
+    setName(tpl.name);
+    setUrl(tpl.defaultUrl);
+    setAuthType(tpl.defaultAuthType);
+    setTransport('auto');
+    setBearerToken('');
+    setBasicUser('');
+    setBasicPass('');
+    setHeaderRows([{ key: 'X-API-Key', value: '' }]);
+    setOauthClientId('');
+    setOauthClientSecret('');
+    setOauthScopes(tpl.defaultScopes ?? 'mcp:tools');
+    setOauthAuthEp('');
+    setOauthTokenEp('');
+    setOauthRegEp('');
+    setOauthAccessToken('');
+    setOauthRefreshToken('');
+    setPendingPkce(null);
+    setAuthCodeInput('');
+    setFormError('');
+    setEditorOpen(true);
+  };
+
+  const handleImportJsonSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setJsonImportError('');
+    const { configs, secretsById, errors } = parseMcpServersJsonConfig(jsonImportText);
+    if (configs.length === 0) {
+      setJsonImportError(errors[0] ?? 'No valid HTTPS MCP servers found.');
+      return;
+    }
+    for (const cfg of configs) {
+      await addOrUpdateServer(cfg, secretsById[cfg.id]);
+    }
+    triggerHaptic(settings.hapticsEnabled, 'success');
+    if (errors.length > 0) {
+      setJsonImportError(`Imported ${configs.length} server(s). Notes: ${errors.join(' ')}`);
+    } else {
+      setJsonImportOpen(false);
+      setJsonImportText('');
+    }
+    setExpandedId(configs[0].id);
+    for (const cfg of configs) {
+      void connectServer(cfg.id);
+    }
+  };
+
   const openEditEditor = async (srv: McpServerConfig) => {
     const secrets = await loadServerSecrets(srv.id);
     setEditingServerId(srv.id);
+    setEditingPresetId(srv.presetId);
     setName(srv.name);
     setUrl(srv.url);
     setAuthType(srv.authType);
@@ -258,6 +330,7 @@ export function ServersScreen() {
       resources: existing?.resources ?? [],
       prompts: existing?.prompts ?? [],
       disabledTools: existing?.disabledTools ?? [],
+      presetId: existing?.presetId ?? editingPresetId,
     };
 
     const parsed = McpServerConfigSchema.safeParse(candidate);
@@ -309,7 +382,7 @@ export function ServersScreen() {
       className="h-full overflow-y-auto p-4 sm:p-6"
     >
       <div className="max-w-4xl mx-auto space-y-5 pb-6">
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
               MCP Servers
@@ -318,19 +391,108 @@ export function ServersScreen() {
               Remote Streamable HTTP & SSE servers · {servers.filter((s) => s.status === 'connected').length} connected
             </p>
           </div>
-          <button
-            type="button"
-            onClick={openNewEditor}
-            style={{
-              backgroundColor: 'var(--m3-primary)',
-              color: 'var(--m3-on-primary)',
-            }}
-            className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 shrink-0 transition-opacity hover:opacity-90"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Server</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              data-testid="import-mcp-json-btn"
+              onClick={() => {
+                setJsonImportError('');
+                setJsonImportOpen(true);
+              }}
+              style={{
+                backgroundColor: 'var(--m3-surface-container)',
+                borderColor: 'var(--m3-outline)',
+              }}
+              className="min-h-[44px] px-3.5 py-2 rounded-full border text-sm font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90"
+            >
+              <FileJson className="w-4 h-4" />
+              <span>Import JSON</span>
+            </button>
+            <button
+              type="button"
+              onClick={openNewEditor}
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center gap-1.5 whitespace-nowrap transition-opacity hover:opacity-90"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Server</span>
+            </button>
+          </div>
         </div>
+
+        {/* Pro Work MCP Standards Quick-Add Strip */}
+        <section
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="rounded-[24px] border p-4 space-y-3"
+        >
+          <div>
+            <h2 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+              Pro Work MCP Standards
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              1-tap templates prefilled with official endpoints and OAuth 2.1 / Bearer defaults
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+            {PRO_WORK_MCP_TEMPLATES.map((tpl) => {
+              const existing = servers.find((s) => s.presetId === tpl.presetId);
+              const Icon =
+                tpl.presetId === 'notion'
+                  ? FileText
+                  : tpl.presetId === 'linear'
+                    ? Layers
+                    : tpl.presetId === 'slack'
+                      ? MessageSquare
+                      : tpl.presetId === 'gdrive'
+                        ? FolderOpen
+                        : Database;
+
+              return (
+                <button
+                  key={tpl.presetId}
+                  type="button"
+                  data-testid={`pro-mcp-preset-${tpl.presetId}`}
+                  onClick={() => openProTemplateEditor(tpl)}
+                  style={{
+                    backgroundColor: 'var(--m3-surface)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="min-h-[60px] p-3 rounded-2xl border text-left flex items-center justify-between gap-2.5 hover:opacity-90 transition-opacity"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span
+                      style={{
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                      }}
+                      className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+                    >
+                      <Icon className="w-4 h-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                        {tpl.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                        {tpl.tagline}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 shrink-0 inline-flex items-center gap-0.5">
+                    {existing ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Plus className="w-3.5 h-3.5" />}
+                    <span>{existing ? 'Added' : 'Setup'}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
 
         {servers.length === 0 ? (
           <div
@@ -860,6 +1022,47 @@ export function ServersScreen() {
         }
         onClose={() => setQuickConnectPreset(null)}
       />
+
+      <BottomSheet
+        open={jsonImportOpen}
+        onClose={() => setJsonImportOpen(false)}
+        title="Import MCP JSON Config"
+        subtitle='Paste standard Claude Desktop / Cursor { "mcpServers": { ... } } JSON'
+      >
+        <form onSubmit={handleImportJsonSubmit} className="space-y-4">
+          {jsonImportError && (
+            <div className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+              {jsonImportError}
+            </div>
+          )}
+          <div>
+            <label htmlFor="mcp-json-input" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+              MCP Servers JSON
+            </label>
+            <textarea
+              id="mcp-json-input"
+              data-testid="mcp-json-textarea"
+              rows={8}
+              value={jsonImportText}
+              onChange={(e) => setJsonImportText(e.target.value)}
+              placeholder={`{\n  "mcpServers": {\n    "notion": {\n      "url": "https://mcp.notion.com/mcp",\n      "headers": { "Authorization": "Bearer ntn_..." }\n    }\n  }\n}`}
+              required
+              className="w-full p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-xs font-mono text-slate-900 dark:text-white"
+            />
+          </div>
+          <button
+            type="submit"
+            data-testid="mcp-json-submit-btn"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
+          >
+            Import & Connect Servers
+          </button>
+        </form>
+      </BottomSheet>
     </div>
   );
 }

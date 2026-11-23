@@ -1,4 +1,4 @@
-import type { McpServerConfig } from '../types';
+import type { AuthType, McpServerConfig, ServerSecretPayload } from '../types';
 
 export interface ConnectorPresetMeta {
   presetId: 'youtube' | 'github' | 'canva';
@@ -18,6 +18,17 @@ export interface ConnectorPresetMeta {
   defaultScopes?: string;
   accentColor: string;
   samplePrompt: string;
+}
+
+export interface ProWorkMcpTemplate {
+  presetId: 'notion' | 'slack' | 'gdrive' | 'linear' | 'postgres';
+  name: string;
+  tagline: string;
+  defaultUrl: string;
+  defaultAuthType: AuthType;
+  docsUrl: string;
+  defaultScopes?: string;
+  setupHint: string;
 }
 
 export const CONNECTOR_PRESETS: Record<'youtube' | 'github' | 'canva', ConnectorPresetMeta> = {
@@ -80,3 +91,162 @@ export const DEFAULT_CONNECTOR_LIST: ConnectorPresetMeta[] = [
   CONNECTOR_PRESETS.github,
   CONNECTOR_PRESETS.canva,
 ];
+
+export const PRO_WORK_MCP_TEMPLATES: ProWorkMcpTemplate[] = [
+  {
+    presetId: 'notion',
+    name: 'Notion Workspace',
+    tagline: 'Search pages, query databases & create meeting notes',
+    defaultUrl: 'https://mcp.notion.com/mcp',
+    defaultAuthType: 'oauth_pkce',
+    docsUrl: 'https://developers.notion.com/docs/mcp',
+    defaultScopes: 'mcp:tools',
+    setupHint: 'Official Notion Remote MCP — tap Auto-Discover (RFC 8414) to sign in.',
+  },
+  {
+    presetId: 'linear',
+    name: 'Linear Issues',
+    tagline: 'Triage sprint issues, inspect cycles & draft specs',
+    defaultUrl: 'https://mcp.linear.app/mcp',
+    defaultAuthType: 'oauth_pkce',
+    docsUrl: 'https://linear.app/docs/mcp',
+    defaultScopes: 'read write',
+    setupHint: 'Official Linear MCP — supports OAuth 2.1 PKCE dynamic discovery.',
+  },
+  {
+    presetId: 'slack',
+    name: 'Slack Workspace',
+    tagline: 'Search channels, read project threads & post summaries',
+    defaultUrl: 'https://mcp.slack.com/mcp',
+    defaultAuthType: 'bearer',
+    docsUrl: 'https://api.slack.com/',
+    setupHint: 'Enter your Slack MCP endpoint URL and Bot/User Bearer token.',
+  },
+  {
+    presetId: 'gdrive',
+    name: 'Google Drive & Docs',
+    tagline: 'Read shared specs, Sheets & executive briefs via MCP',
+    defaultUrl: 'https://mcp.googleapis.com/drive/mcp',
+    defaultAuthType: 'oauth_pkce',
+    docsUrl: 'https://developers.google.com/drive',
+    defaultScopes: 'https://www.googleapis.com/auth/drive.readonly',
+    setupHint: 'Point to your Google Drive MCP endpoint and authorize via OAuth 2.1.',
+  },
+  {
+    presetId: 'postgres',
+    name: 'PostgreSQL Gateway',
+    tagline: 'Schema inspection & read-only SQL BI reporting',
+    defaultUrl: 'https://postgres-mcp.example.com/mcp',
+    defaultAuthType: 'bearer',
+    docsUrl: 'https://modelcontextprotocol.io/',
+    setupHint: 'Replace with your HTTPS PostgreSQL MCP gateway URL and Bearer key.',
+  },
+];
+
+export function parseMcpServersJsonConfig(rawJson: string): {
+  configs: McpServerConfig[];
+  secretsById: Record<string, ServerSecretPayload>;
+  errors: string[];
+} {
+  const configs: McpServerConfig[] = [];
+  const secretsById: Record<string, ServerSecretPayload> = {};
+  const errors: string[] = [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return { configs, secretsById, errors: ['Invalid JSON syntax.'] };
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {
+      configs,
+      secretsById,
+      errors: ['Expected a JSON object with "mcpServers" or a single server { "url": "..." }.'],
+    };
+  }
+
+  const root = parsed as Record<string, unknown>;
+  const serverMap: Record<string, Record<string, unknown>> = {};
+
+  if (root.mcpServers && typeof root.mcpServers === 'object' && !Array.isArray(root.mcpServers)) {
+    for (const [k, v] of Object.entries(root.mcpServers as Record<string, unknown>)) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        serverMap[k] = v as Record<string, unknown>;
+      }
+    }
+  } else if (typeof root.url === 'string' || typeof root.serverUrl === 'string') {
+    const label = typeof root.name === 'string' && root.name.trim() ? root.name.trim() : 'Imported MCP Server';
+    serverMap[label] = root;
+  } else {
+    return {
+      configs,
+      secretsById,
+      errors: ['Missing "mcpServers" map or "url" property in JSON config.'],
+    };
+  }
+
+  const entries = Object.entries(serverMap);
+  if (entries.length === 0) {
+    return { configs, secretsById, errors: ['No server entries found inside "mcpServers".'] };
+  }
+
+  const baseTs = Date.now();
+  entries.forEach(([entryName, def], idx) => {
+    const rawUrl = String(def.url ?? def.serverUrl ?? '').trim();
+    if (!rawUrl) {
+      errors.push(`"${entryName}" is skipped (no remote "url" — stdio local commands require a remote HTTPS bridge).`);
+      return;
+    }
+    if (!rawUrl.startsWith('https://') && !rawUrl.startsWith('virtual://')) {
+      errors.push(`"${entryName}" skipped: only https:// remote MCP URLs are supported.`);
+      return;
+    }
+
+    const headersObj =
+      def.headers && typeof def.headers === 'object' && !Array.isArray(def.headers)
+        ? (def.headers as Record<string, unknown>)
+        : {};
+
+    let authType: AuthType = 'none';
+    const secrets: ServerSecretPayload = {};
+    const customHeaders: Record<string, string> = {};
+
+    for (const [hk, hv] of Object.entries(headersObj)) {
+      const val = String(hv ?? '').trim();
+      if (!val) continue;
+      if (hk.toLowerCase() === 'authorization' && val.toLowerCase().startsWith('bearer ')) {
+        authType = 'bearer';
+        secrets.bearerToken = val.slice(7).trim();
+      } else {
+        customHeaders[hk] = val;
+      }
+    }
+
+    if (Object.keys(customHeaders).length > 0 && authType === 'none') {
+      authType = 'custom_headers';
+      secrets.customHeaders = customHeaders;
+    } else if (Object.keys(customHeaders).length > 0) {
+      secrets.customHeaders = customHeaders;
+    }
+
+    const id = `srv_imp_${baseTs}_${idx}`;
+    configs.push({
+      id,
+      name: entryName,
+      url: rawUrl,
+      authType,
+      enabled: true,
+      transportPreference: def.type === 'sse' ? 'sse' : 'auto',
+      status: 'disconnected',
+      tools: [],
+      resources: [],
+      prompts: [],
+      disabledTools: [],
+    });
+    secretsById[id] = secrets;
+  });
+
+  return { configs, secretsById, errors };
+}

@@ -19,6 +19,8 @@ import {
 import type {
   AgentProfile,
   AppSettings,
+  ApprovalDecision,
+  ApprovalResolution,
   ChatAttachment,
   ChatMessage,
   ChatMode,
@@ -238,7 +240,7 @@ export interface HubState {
     options?: { autoApproveWrites?: boolean; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
-  resolvePendingApproval: (decision: 'approve' | 'always_allow' | 'deny') => void;
+  resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution) => void;
   enableDemoSandbox: () => Promise<void>;
   saveStudyNote: (note: Omit<SavedStudyNote, 'id' | 'createdAt'>) => void;
   removeSavedStudyNote: (noteId: string) => void;
@@ -875,12 +877,47 @@ export const useHubStore = create<HubState>((set, get) => {
         attachments: attachments.length > 0 ? attachments : undefined,
       });
 
+      let pendingText: string | null = null;
+      let pendingReasoning: string | null = null;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      let thinkingStartMs: number | null = null;
+      let thinkingDurationMs: number | undefined;
+
       const updateAssistantMsg = (patch: Partial<ChatMessage>) => {
         patchConv((c) => ({
           ...c,
           updatedAt: Date.now(),
           messages: c.messages.map((m) => (m.id === assistantMsgId ? { ...m, ...patch } : m)),
         }));
+      };
+
+      const flushPendingDeltas = () => {
+        if (flushTimer !== null) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        if (pendingText === null && pendingReasoning === null) return;
+        const patch: Partial<ChatMessage> = {};
+        if (pendingText !== null) {
+          patch.content = pendingText;
+          pendingText = null;
+        }
+        if (pendingReasoning !== null) {
+          patch.reasoning = pendingReasoning;
+          pendingReasoning = null;
+        }
+        if (thinkingDurationMs !== undefined) {
+          patch.thinkingDurationMs = thinkingDurationMs;
+        }
+        updateAssistantMsg(patch);
+      };
+
+      const scheduleDeltaFlush = () => {
+        if (flushTimer !== null) return;
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          flushPendingDeltas();
+        }, 32);
       };
 
       try {
@@ -905,12 +942,36 @@ export const useHubStore = create<HubState>((set, get) => {
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           signal: abortController.signal,
           callbacks: {
-            onTextDelta: (fullText) => updateAssistantMsg({ content: fullText }),
-            onReasoningDelta: (fullReasoning) => updateAssistantMsg({ reasoning: fullReasoning }),
-            onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => updateAssistantMsg({ toolCalls }),
-            onCitationsUpdated: (citations: GroundingCitation[]) =>
-              updateAssistantMsg({ citations }),
+            onTextDelta: (fullText) => {
+              if (thinkingStartMs !== null && thinkingDurationMs === undefined) {
+                thinkingDurationMs = Math.max(100, Date.now() - thinkingStartMs);
+              }
+              pendingText = fullText;
+              scheduleDeltaFlush();
+            },
+            onReasoningDelta: (fullReasoning) => {
+              if (thinkingStartMs === null) {
+                thinkingStartMs = Date.now();
+              }
+              pendingReasoning = fullReasoning;
+              scheduleDeltaFlush();
+            },
+            onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => {
+              if (thinkingStartMs !== null && thinkingDurationMs === undefined) {
+                thinkingDurationMs = Math.max(100, Date.now() - thinkingStartMs);
+              }
+              flushPendingDeltas();
+              updateAssistantMsg({
+                toolCalls,
+                ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+              });
+            },
+            onCitationsUpdated: (citations: GroundingCitation[]) => {
+              flushPendingDeltas();
+              updateAssistantMsg({ citations });
+            },
             onFallbackNotice: (fromModel, toModel, reason) => {
+              flushPendingDeltas();
               const shortReason = reason.includes('503')
                 ? 'high demand (503)'
                 : reason.includes('404')
@@ -930,15 +991,17 @@ export const useHubStore = create<HubState>((set, get) => {
                 return { ...c, modelId: toModel.id, messages: copy };
               });
             },
-            requestApproval: (approval) =>
-              new Promise((resolve) => {
+            requestApproval: (approval) => {
+              flushPendingDeltas();
+              return new Promise((resolve) => {
                 set({
                   pendingApproval: {
                     ...approval,
                     resolve,
                   },
                 });
-              }),
+              });
+            },
             onAlwaysAllowTool: (qualifiedKey) => {
               const existing = get().settings.alwaysAllowedTools;
               if (!existing.includes(qualifiedKey)) {
@@ -952,6 +1015,11 @@ export const useHubStore = create<HubState>((set, get) => {
           },
         });
 
+        flushPendingDeltas();
+        const finalDuration =
+          thinkingDurationMs ??
+          (thinkingStartMs !== null ? Math.max(100, Date.now() - thinkingStartMs) : undefined);
+
         const finalConv = patchConv((c) => ({
           ...c,
           modelId: result.usedModelId,
@@ -962,6 +1030,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   ...m,
                   content: result.finalText || (result.stoppedByUser ? '_Generation stopped._' : ''),
                   reasoning: result.finalReasoning,
+                  ...(finalDuration !== undefined ? { thinkingDurationMs: finalDuration } : {}),
                   toolCalls: result.toolCalls,
                   citations: result.citations,
                   modelId: result.usedModelId,
@@ -972,6 +1041,7 @@ export const useHubStore = create<HubState>((set, get) => {
         }));
         if (finalConv) await historyDb.saveConversation(finalConv);
       } catch (err) {
+        flushPendingDeltas();
         const keys = get().providerKeys;
         const msg = safeErrorMessage(err, [keys.gemini ?? '', keys.groq ?? '', keys.openrouter ?? '']);
         const finalConv = patchConv((c) => ({
@@ -989,6 +1059,7 @@ export const useHubStore = create<HubState>((set, get) => {
         }));
         if (finalConv) await historyDb.saveConversation(finalConv);
       } finally {
+        if (flushTimer !== null) clearTimeout(flushTimer);
         set({ isRunning: false, abortController: null, pendingApproval: null });
       }
     },

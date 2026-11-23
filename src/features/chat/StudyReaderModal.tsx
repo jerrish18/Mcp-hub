@@ -18,6 +18,9 @@ import {
   X,
 } from 'lucide-react';
 import type { GroundingCitation } from '../../types';
+import { KatexMath } from '../../ui/KatexMath';
+import { MermaidDiagramCard } from '../../ui/MermaidDiagramCard';
+import { StudyImageCard } from '../../ui/StudyImageCard';
 import {
   extractOutlineHeadings,
   parseInlineTokens,
@@ -133,15 +136,9 @@ function renderStudyInline(text: string, theme: (typeof THEME_STYLES)[ReaderThem
           </del>
         );
       case 'math':
-        return (
-          <code
-            key={idx}
-            style={{ backgroundColor: theme.calloutBg, color: theme.calloutBorder }}
-            className="px-1.5 py-0.5 rounded-md font-mono text-[0.9em]"
-          >
-            {tok.text}
-          </code>
-        );
+        return <KatexMath key={idx} latex={tok.text} />;
+      case 'image':
+        return <StudyImageCard key={idx} url={tok.url} alt={tok.alt} />;
       case 'link':
         return (
           <a
@@ -171,6 +168,9 @@ function renderStudyBlock(
   switch (block.type) {
     case 'code': {
       const lang = block.language.toLowerCase();
+      if (lang === 'mermaid') {
+        return <MermaidDiagramCard key={key} code={block.code} isUnclosed={block.isUnclosed} />;
+      }
       if (lang === 'study-flashcards' && onOpenFlashcards) {
         return (
           <div
@@ -245,6 +245,27 @@ function renderStudyBlock(
         </div>
       );
     }
+
+    case 'math_block':
+      return (
+        <div
+          key={key}
+          style={{ backgroundColor: theme.calloutBg, borderColor: theme.border, color: theme.heading }}
+          className="my-4 rounded-2xl border px-4 py-3 overflow-x-auto"
+        >
+          <KatexMath latex={block.latex} displayMode />
+        </div>
+      );
+
+    case 'image':
+      return (
+        <StudyImageCard
+          key={key}
+          url={block.url}
+          alt={block.alt}
+          caption={block.caption}
+        />
+      );
 
     case 'heading':
       if (block.level === 1) {
@@ -334,10 +355,23 @@ function renderStudyBlock(
             borderColor: theme.border,
             color: theme.heading,
           }}
-          className="my-3 rounded-2xl border px-4 py-3 text-[0.95em] flex items-start gap-2.5"
+          className="my-3 rounded-2xl border px-4 py-3 text-[0.95em] space-y-1"
         >
-          <Sparkles style={{ color: theme.calloutBorder }} className="w-4 h-4 shrink-0 mt-1" />
-          <div className="min-w-0 whitespace-pre-wrap">{renderStudyInline(block.lines.join('\n'), theme)}</div>
+          {block.calloutKind && (
+            <div
+              style={{ color: theme.calloutBorder }}
+              className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide"
+            >
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              <span>{block.calloutTitle || block.calloutKind}</span>
+            </div>
+          )}
+          <div className="flex items-start gap-2.5">
+            {!block.calloutKind && (
+              <Sparkles style={{ color: theme.calloutBorder }} className="w-4 h-4 shrink-0 mt-1" />
+            )}
+            <div className="min-w-0 whitespace-pre-wrap">{renderStudyInline(block.lines.join('\n'), theme)}</div>
+          </div>
         </div>
       );
 

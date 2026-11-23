@@ -1,32 +1,404 @@
 import React, { useMemo, useState } from 'react';
-import { Check, Copy, HelpCircle, Layers, Sparkles } from 'lucide-react';
+import {
+  AlertTriangle,
+  BookMarked,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Download,
+  FileSpreadsheet,
+  FileText,
+  HelpCircle,
+  Layers,
+  Lightbulb,
+  PanelRight,
+  Presentation,
+  Sigma,
+  Sparkles,
+} from 'lucide-react';
+import {
+  downloadDocumentSpec,
+  parseArtifactBlock,
+  type DocFormat,
+  type DocumentSpec,
+} from '../utils/docExport';
 import {
   parseInlineTokens,
   parseMarkdownBlocks,
+  type CalloutKind,
   type InlineToken,
   type MarkdownBlock,
 } from '../utils/markdownParser';
+import { KatexMath } from './KatexMath';
+import { MermaidDiagramCard } from './MermaidDiagramCard';
+import { StudyImageCard } from './StudyImageCard';
+
+export type MarkdownCanvasRequest =
+  | { kind: 'code'; title: string; language: string; code: string }
+  | { kind: 'document'; title: string; spec: DocumentSpec; rawJson: string };
 
 interface MarkdownRendererProps {
   content: string;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
+}
+
+const CANVAS_CODE_LANGS = new Set([
+  'html',
+  'htm',
+  'svg',
+  'mermaid',
+  'tsx',
+  'jsx',
+  'js',
+  'javascript',
+  'ts',
+  'typescript',
+  'python',
+  'py',
+  'css',
+  'sql',
+  'json',
+]);
+
+const CALLOUT_META: Record<
+  CalloutKind,
+  {
+    label: string;
+    Icon: typeof Sparkles;
+    bgClass: string;
+    borderClass: string;
+    iconClass: string;
+  }
+> = {
+  definition: {
+    label: 'Definition',
+    Icon: BookMarked,
+    bgClass: 'bg-blue-50/75 dark:bg-blue-950/30',
+    borderClass: 'border-blue-200 dark:border-blue-900/70',
+    iconClass: 'text-blue-600 dark:text-blue-400',
+  },
+  formula: {
+    label: 'Key Formula',
+    Icon: Sigma,
+    bgClass: 'bg-indigo-50/75 dark:bg-indigo-950/30',
+    borderClass: 'border-indigo-200 dark:border-indigo-900/70',
+    iconClass: 'text-indigo-600 dark:text-indigo-400',
+  },
+  tip: {
+    label: 'Study Tip',
+    Icon: Lightbulb,
+    bgClass: 'bg-emerald-50/75 dark:bg-emerald-950/30',
+    borderClass: 'border-emerald-200 dark:border-emerald-900/70',
+    iconClass: 'text-emerald-600 dark:text-emerald-400',
+  },
+  important: {
+    label: 'Important',
+    Icon: Sparkles,
+    bgClass: 'bg-violet-50/75 dark:bg-violet-950/30',
+    borderClass: 'border-violet-200 dark:border-violet-900/70',
+    iconClass: 'text-violet-600 dark:text-violet-400',
+  },
+  warning: {
+    label: 'Common Trap',
+    Icon: AlertTriangle,
+    bgClass: 'bg-amber-50/80 dark:bg-amber-950/30',
+    borderClass: 'border-amber-200 dark:border-amber-900/70',
+    iconClass: 'text-amber-600 dark:text-amber-400',
+  },
+  hint: {
+    label: 'Hint',
+    Icon: HelpCircle,
+    bgClass: 'bg-slate-100/80 dark:bg-slate-900/70',
+    borderClass: 'border-slate-200 dark:border-slate-800',
+    iconClass: 'text-slate-600 dark:text-slate-300',
+  },
+  note: {
+    label: 'Note',
+    Icon: Sparkles,
+    bgClass: 'bg-slate-100/80 dark:bg-slate-900/70',
+    borderClass: 'border-slate-200 dark:border-slate-800',
+    iconClass: 'text-blue-600 dark:text-blue-400',
+  },
+};
+
+function getDocFormatMeta(format: DocFormat): {
+  extLabel: string;
+  Icon: typeof FileText;
+  summary: (spec: DocumentSpec) => string;
+} {
+  switch (format) {
+    case 'pptx':
+      return {
+        extLabel: '.PPTX',
+        Icon: Presentation,
+        summary: (spec) =>
+          spec.format === 'pptx'
+            ? `${spec.slides.length} slide${spec.slides.length === 1 ? '' : 's'} · 16:9 PowerPoint deck`
+            : 'PowerPoint deck',
+      };
+    case 'xlsx':
+      return {
+        extLabel: '.XLSX',
+        Icon: FileSpreadsheet,
+        summary: (spec) =>
+          spec.format === 'xlsx'
+            ? `${spec.sheets.length} worksheet${spec.sheets.length === 1 ? '' : 's'} · Excel workbook`
+            : 'Excel workbook',
+      };
+    case 'docx':
+      return {
+        extLabel: '.DOCX',
+        Icon: FileText,
+        summary: (spec) =>
+          spec.format === 'docx'
+            ? `${spec.sections.length} section${spec.sections.length === 1 ? '' : 's'} · Word document`
+            : 'Word document',
+      };
+    case 'pdf':
+      return {
+        extLabel: '.PDF',
+        Icon: FileText,
+        summary: (spec) =>
+          spec.format === 'pdf'
+            ? `${spec.sections.length} section${spec.sections.length === 1 ? '' : 's'} · Formatted PDF report`
+            : 'PDF report',
+      };
+  }
+}
+
+function DocumentArtifactCard({
+  spec,
+  rawJson,
+  onOpenInCanvas,
+}: {
+  spec: DocumentSpec;
+  rawJson: string;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
+}) {
+  const [downloading, setDownloading] = useState(false);
+  const [downloadedName, setDownloadedName] = useState('');
+  const meta = getDocFormatMeta(spec.format);
+  const Icon = meta.Icon;
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      const filename = await downloadDocumentSpec(spec);
+      setDownloadedName(filename);
+      setTimeout(() => setDownloadedName(''), 2400);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid={`doc-artifact-card-${spec.format}`}
+      style={{
+        backgroundColor: 'var(--m3-surface-container)',
+        borderColor: 'var(--m3-outline)',
+      }}
+      className="my-3 rounded-2xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+    >
+      <div className="flex items-center gap-3 min-w-0">
+        <span
+          style={{
+            backgroundColor: 'var(--m3-primary-container)',
+            color: 'var(--m3-on-primary-container)',
+          }}
+          className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+        >
+          <Icon className="w-5 h-5" />
+        </span>
+        <div className="min-w-0">
+          <div className="font-display text-sm font-semibold text-slate-950 dark:text-white truncate">
+            {spec.title}
+          </div>
+          <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5 tabular-nums">
+            {meta.summary(spec)}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+        {onOpenInCanvas && (
+          <button
+            type="button"
+            data-testid={`preview-doc-${spec.format}`}
+            onClick={() =>
+              onOpenInCanvas({
+                kind: 'document',
+                title: spec.title,
+                spec,
+                rawJson,
+              })
+            }
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="min-h-[40px] px-3.5 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90"
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+            <span>Preview in Canvas</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          disabled={downloading}
+          data-testid={`download-doc-${spec.format}`}
+          onClick={() => void handleDownload()}
+          style={{
+            backgroundColor: 'var(--m3-primary)',
+            color: 'var(--m3-on-primary)',
+          }}
+          className="min-h-[40px] px-4 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap hover:opacity-90 disabled:opacity-60"
+        >
+          {downloadedName ? <Check className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+          <span>
+            {downloading
+              ? 'Building…'
+              : downloadedName
+                ? 'Downloaded'
+                : `Download ${meta.extLabel}`}
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CalloutBlock({
+  block,
+}: {
+  block: Extract<MarkdownBlock, { type: 'blockquote' }>;
+}) {
+  const [open, setOpen] = useState(() => !block.isCollapsible);
+  const kind = block.calloutKind ?? 'note';
+  const meta = CALLOUT_META[kind];
+  const Icon = meta.Icon;
+  const heading = block.calloutTitle?.trim() || meta.label;
+  const bodyText = block.lines.join('\n');
+
+  if (block.calloutKind) {
+    return (
+      <div
+        data-testid={`callout-${kind}`}
+        className={`my-2.5 rounded-2xl border px-4 py-3 text-[14px] leading-relaxed text-slate-800 dark:text-slate-100 ${meta.bgClass} ${meta.borderClass}`}
+      >
+        {block.isCollapsible ? (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="w-full flex items-center justify-between gap-2 text-left font-semibold text-xs text-slate-900 dark:text-white"
+          >
+            <span className="inline-flex items-center gap-2">
+              <Icon className={`w-4 h-4 shrink-0 ${meta.iconClass}`} />
+              <span>{heading}</span>
+            </span>
+            {open ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronRight className="w-4 h-4 shrink-0" />}
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 font-semibold text-xs text-slate-900 dark:text-white mb-1">
+            <Icon className={`w-4 h-4 shrink-0 ${meta.iconClass}`} />
+            <span>{heading}</span>
+          </div>
+        )}
+        {open && bodyText && (
+          <div className={`min-w-0 space-y-1 whitespace-pre-wrap ${block.isCollapsible ? 'mt-2 pt-2 border-t border-slate-200/60 dark:border-slate-700/60' : ''}`}>
+            {renderInline(bodyText)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        backgroundColor: 'var(--m3-surface-container)',
+        borderColor: 'var(--m3-outline)',
+      }}
+      className="my-2.5 rounded-2xl border px-4 py-3 text-[14px] leading-relaxed text-slate-700 dark:text-slate-200 flex items-start gap-2.5"
+    >
+      <Sparkles style={{ color: 'var(--m3-primary)' }} className="w-4 h-4 shrink-0 mt-0.5" />
+      <div className="min-w-0 space-y-1 whitespace-pre-wrap">{renderInline(bodyText)}</div>
+    </div>
+  );
 }
 
 function CodeBlock({
   language,
   code,
+  isUnclosed,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
+  onOpenInCanvas,
 }: {
   language: string;
   code: string;
+  isUnclosed?: boolean;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
 }) {
   const [copied, setCopied] = useState(false);
 
-  const normalizedLang = language.toLowerCase();
+  const normalizedLang = language.toLowerCase().trim();
+
+  if (normalizedLang === 'mermaid') {
+    return (
+      <MermaidDiagramCard
+        code={code}
+        isUnclosed={isUnclosed}
+        onOpenInCanvas={
+          onOpenInCanvas
+            ? (lang, mermaidCode) =>
+                onOpenInCanvas({
+                  kind: 'code',
+                  title: 'Diagram Preview',
+                  language: lang,
+                  code: mermaidCode,
+                })
+            : undefined
+        }
+      />
+    );
+  }
+
+  if (/^(?:artifact|doc)-(?:pptx|docx|xlsx|pdf)$/.test(normalizedLang)) {
+    const parsedDoc = isUnclosed ? null : parseArtifactBlock(normalizedLang, code);
+    if (parsedDoc) {
+      return (
+        <DocumentArtifactCard
+          spec={parsedDoc}
+          rawJson={code}
+          onOpenInCanvas={onOpenInCanvas}
+        />
+      );
+    }
+    const fmtLabel = normalizedLang.replace(/^(?:artifact|doc)-/, '').toUpperCase();
+    if (isUnclosed) {
+      return (
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="my-3 rounded-2xl border p-4 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300"
+        >
+          <Presentation style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
+          <span>Building {fmtLabel} document structure…</span>
+        </div>
+      );
+    }
+  }
+
   if (normalizedLang === 'study-flashcards' && onOpenInteractiveFlashcards) {
     let count = 0;
     try {
@@ -141,19 +513,41 @@ function CodeBlock({
     }
   };
 
+  const canOpenInCanvas = Boolean(onOpenInCanvas && (CANVAS_CODE_LANGS.has(normalizedLang) || code.length > 80));
+
   return (
     <div className="my-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100">
-      <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-800 bg-slate-900/90 text-xs text-slate-400">
+      <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-800 bg-slate-900/90 text-xs text-slate-400 gap-2">
         <span className="font-mono lowercase">{language || 'text'}</span>
-        <button
-          type="button"
-          onClick={handleCopy}
-          aria-label="Copy code block"
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
-        >
-          {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-          <span>{copied ? 'Copied' : 'Copy'}</span>
-        </button>
+        <div className="flex items-center gap-1">
+          {canOpenInCanvas && onOpenInCanvas && (
+            <button
+              type="button"
+              onClick={() =>
+                onOpenInCanvas({
+                  kind: 'code',
+                  title: `${(language || 'code').toUpperCase()} Canvas`,
+                  language: normalizedLang || 'text',
+                  code,
+                })
+              }
+              aria-label="Open code in Canvas"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-blue-300 hover:text-white hover:bg-slate-800 transition-colors whitespace-nowrap"
+            >
+              <PanelRight className="w-3.5 h-3.5" />
+              <span>Open in Canvas</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void handleCopy()}
+            aria-label="Copy code block"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors whitespace-nowrap"
+          >
+            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+        </div>
       </div>
       <pre className="p-3.5 overflow-x-auto text-[13px] leading-relaxed font-mono">
         <code>{code}</code>
@@ -194,13 +588,14 @@ export function renderInlineNodes(tokens: InlineToken[]): React.ReactNode[] {
         );
       case 'math':
         return (
-          <code
+          <KatexMath
             key={idx}
-            className="px-1.5 py-0.5 rounded-md bg-blue-500/10 text-blue-700 dark:text-blue-300 font-mono text-[0.9em]"
-          >
-            {tok.text}
-          </code>
+            latex={tok.text}
+            className="text-slate-900 dark:text-slate-100"
+          />
         );
+      case 'image':
+        return <StudyImageCard key={idx} url={tok.url} alt={tok.alt} />;
       case 'link':
         return (
           <a
@@ -227,7 +622,8 @@ function renderBlock(
   block: MarkdownBlock,
   key: number,
   onOpenInteractiveFlashcards?: () => void,
-  onOpenInteractiveQuiz?: () => void
+  onOpenInteractiveQuiz?: () => void,
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void
 ): React.ReactNode {
   switch (block.type) {
     case 'code':
@@ -236,8 +632,40 @@ function renderBlock(
           key={key}
           language={block.language}
           code={block.code}
+          isUnclosed={block.isUnclosed}
           onOpenInteractiveFlashcards={onOpenInteractiveFlashcards}
           onOpenInteractiveQuiz={onOpenInteractiveQuiz}
+          onOpenInCanvas={onOpenInCanvas}
+        />
+      );
+
+    case 'math_block':
+      return (
+        <div
+          key={key}
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="my-3 rounded-2xl border px-4 py-3 overflow-x-auto"
+        >
+          {block.isUnclosed ? (
+            <code className="font-mono text-xs text-slate-600 dark:text-slate-300">
+              {block.latex}
+            </code>
+          ) : (
+            <KatexMath latex={block.latex} displayMode className="text-slate-950 dark:text-white" />
+          )}
+        </div>
+      );
+
+    case 'image':
+      return (
+        <StudyImageCard
+          key={key}
+          url={block.url}
+          alt={block.alt}
+          caption={block.caption}
         />
       );
 
@@ -319,21 +747,7 @@ function renderBlock(
       );
 
     case 'blockquote':
-      return (
-        <div
-          key={key}
-          style={{
-            backgroundColor: 'var(--m3-surface-container)',
-            borderColor: 'var(--m3-outline)',
-          }}
-          className="my-2.5 rounded-2xl border px-4 py-3 text-[14px] leading-relaxed text-slate-700 dark:text-slate-200 flex items-start gap-2.5"
-        >
-          <Sparkles style={{ color: 'var(--m3-primary)' }} className="w-4 h-4 shrink-0 mt-0.5" />
-          <div className="min-w-0 space-y-1 whitespace-pre-wrap">
-            {renderInline(block.lines.join('\n'))}
-          </div>
-        </div>
-      );
+      return <CalloutBlock key={key} block={block} />;
 
     case 'ul':
       return (
@@ -383,10 +797,11 @@ function renderBlock(
   }
 }
 
-export function MarkdownRenderer({
+export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
+  onOpenInCanvas,
 }: MarkdownRendererProps) {
   const blocks = useMemo(() => parseMarkdownBlocks(content), [content]);
   if (!content) return null;
@@ -394,8 +809,14 @@ export function MarkdownRenderer({
   return (
     <div className="space-y-3 text-[15px] leading-[1.68] text-slate-800 dark:text-slate-200 break-words">
       {blocks.map((block, i) =>
-        renderBlock(block, i, onOpenInteractiveFlashcards, onOpenInteractiveQuiz)
+        renderBlock(
+          block,
+          i,
+          onOpenInteractiveFlashcards,
+          onOpenInteractiveQuiz,
+          onOpenInCanvas
+        )
       )}
     </div>
   );
-}
+});

@@ -150,7 +150,20 @@ export const McpServerConfigSchema = z.object({
   resources: z.array(z.custom<McpResource>()).default([]),
   prompts: z.array(z.custom<McpPrompt>()).default([]),
   disabledTools: z.array(z.string()).default([]),
-  presetId: z.enum(['sandbox', 'youtube', 'github', 'canva', 'custom']).optional(),
+  presetId: z
+    .enum([
+      'sandbox',
+      'youtube',
+      'github',
+      'canva',
+      'notion',
+      'slack',
+      'gdrive',
+      'linear',
+      'postgres',
+      'custom',
+    ])
+    .optional(),
   docsUrl: z.string().optional(),
 });
 
@@ -203,6 +216,7 @@ export interface ChatMessage {
   content: string;
   displayContent?: string;
   reasoning?: string;
+  thinkingDurationMs?: number;
   toolCalls?: ToolCallRecord[];
   attachments?: ChatAttachment[];
   citations?: GroundingCitation[];
@@ -236,6 +250,14 @@ export interface ProviderKeys {
   openrouter?: string;
 }
 
+export type ApprovalDecision = 'approve' | 'always_allow' | 'deny';
+
+export interface ApprovalResolution {
+  decision: ApprovalDecision;
+  editedArguments?: Record<string, unknown>;
+  denyReason?: string;
+}
+
 export interface PendingApproval {
   toolCallId: string;
   serverId: string;
@@ -245,7 +267,7 @@ export interface PendingApproval {
   arguments: Record<string, unknown>;
   description?: string;
   isDestructive?: boolean;
-  resolve: (decision: 'approve' | 'always_allow' | 'deny') => void;
+  resolve: (result: ApprovalDecision | ApprovalResolution) => void;
 }
 
 export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'monochrome';

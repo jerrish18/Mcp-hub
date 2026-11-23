@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import { createAuthRouter } from './src/server/authRouter.ts';
 import { createControlRouter } from './src/server/controlRouter.ts';
+import { createStudyImagesRouter } from './src/server/studyImagesRouter.ts';
 
 dotenv.config();
 
@@ -18,13 +19,15 @@ async function startServer() {
 
   const controlRouter = createControlRouter();
   const authRouter = createAuthRouter();
+  const studyImagesRouter = createStudyImagesRouter();
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'mcp-hub' });
   });
 
-  // Mount app authentication & control REST / key management under /api/*
+  // Mount app authentication, study image search, & control REST / key management under /api/*
   app.use('/api', authRouter);
+  app.use('/api', studyImagesRouter);
   app.use('/api', controlRouter);
 
   // Also mount root /mcp so external MCP agents (Claude Desktop, Cursor, etc.) can connect directly to https://<host>/mcp

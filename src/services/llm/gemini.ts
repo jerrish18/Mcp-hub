@@ -37,7 +37,23 @@ function sanitizeGeminiSchema(schema: Record<string, unknown>): Record<string, u
   return clone;
 }
 
-function mapEffortToGeminiThinkingLevel(effort: 'low' | 'medium' | 'high'): string {
+function mapEffortToGeminiThinkingLevel(
+  effort: 'low' | 'medium' | 'high',
+  modelId: string
+): string {
+  const lower = modelId.toLowerCase();
+  const isFastTier =
+    lower.includes('hydrogen') || lower.includes('flash') || lower.includes('lite');
+  if (isFastTier) {
+    switch (effort) {
+      case 'low':
+        return 'MINIMAL';
+      case 'medium':
+        return 'LOW';
+      case 'high':
+        return 'MEDIUM';
+    }
+  }
   switch (effort) {
     case 'low':
       return 'LOW';
@@ -142,12 +158,21 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     }
   }
 
+  const thinkingLevel = model.supportsThinkingLevel
+    ? mapEffortToGeminiThinkingLevel(effort, model.id)
+    : undefined;
+
   const body: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents,
     generationConfig: {
-      ...(model.supportsThinkingLevel
-        ? { thinkingConfig: { thinkingLevel: mapEffortToGeminiThinkingLevel(effort) } }
+      ...(thinkingLevel
+        ? {
+            thinkingConfig: {
+              thinkingLevel,
+              ...(thinkingLevel !== 'MINIMAL' ? { includeThoughts: true } : {}),
+            },
+          }
         : {}),
     },
   };

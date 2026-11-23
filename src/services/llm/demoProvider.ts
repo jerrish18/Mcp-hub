@@ -19,17 +19,19 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 async function streamText(text: string, onDelta: (d: string) => void, signal?: AbortSignal): Promise<void> {
-  const words = text.split(/(?<=\s)/);
-  for (const w of words) {
+  // Stream in 2-word chunks at 6ms intervals for crisp, lag-free rendering
+  const parts = text.split(/(?<=\s)/);
+  for (let i = 0; i < parts.length; i += 2) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    onDelta(w);
-    await delay(12, signal);
+    onDelta(parts.slice(i, i + 2).join(''));
+    await delay(6, signal);
   }
 }
 
 /**
  * Deterministic zero-key interactive sandbox model supporting General Chat,
- * Study Session structured guides, Uploaded attachments, and Professional MCP loops.
+ * Study Session (Mermaid flowcharts, KaTeX math, callouts, flashcards, quizzes),
+ * and Professional Mode (PPTX/DOCX/XLSX/PDF generation, HTML Canvas, MCP tool loops).
  */
 export async function streamDemoCompletion(req: StreamCompletionRequest): Promise<void> {
   const { effort, chatMode = 'professional', knowledgeSource = 'auto', systemPrompt, messages, tools, signal, onEvent } = req;
@@ -40,7 +42,7 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
   const userAttachments = lastUser?.role === 'user' ? (lastUser.attachments ?? []) : [];
   const lower = userText.toLowerCase();
 
-  // Study Session mode — never invokes MCP tools, formats strictly for learning
+  // Study Session mode — never invokes MCP tools, supports flowcharts, math, callouts, flashcards, quizzes
   if (chatMode === 'study') {
     if (lower.includes('```study-quiz') || lower.includes('4-question multiple-choice practice quiz')) {
       const quizJson = JSON.stringify(
@@ -70,7 +72,7 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
               'As dimension d_k grows, raw dot products grow in variance, which makes softmax spiky and gradients vanish; scaling by √d_k keeps variance near 1.',
           },
           {
-            question: 'Which matrix dimension captures how strongly token i attends to token j?',
+            question: 'Which matrix captures how strongly token i attends to token j?',
             options: [
               'The Value projection bias vector',
               'The token vocabulary embedding table',
@@ -140,7 +142,7 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
       );
       const cardsReply =
         `## Study Flashcards\n\n` +
-        `Tap **Flashcards** below to practice active recall.\n\n` +
+        `Tap **Practice Cards** below to drill active recall.\n\n` +
         `\`\`\`study-flashcards\n${cardsJson}\n\`\`\``;
       await streamText(cardsReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
       onEvent({ type: 'done' });
@@ -149,41 +151,87 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
     const attachmentSummary =
       userAttachments.length > 0
-        ? `\n\n> **Study Source Used:** Referenced your ${userAttachments.length} uploaded file${userAttachments.length > 1 ? 's' : ''} (${userAttachments.map((a) => a.name).join(', ')}).`
+        ? `\n\n> [!NOTE] Uploaded Source Used\n> Referenced ${userAttachments.length} uploaded file${userAttachments.length > 1 ? 's' : ''} (${userAttachments.map((a) => a.name).join(', ')}).`
         : knowledgeSource === 'web'
-          ? '\n\n> **Source Mode:** Web Search guidance active (add a free Gemini API key in Settings for live Google Search citations).'
+          ? '\n\n> [!NOTE] Web Search Mode\n> Add a free Gemini API key in Settings for live Google Search citations.'
           : '';
 
-    const snippetNote = userAttachments.find((a) => a.textContent)?.textContent?.slice(0, 260);
+    const snippetNote = userAttachments.find((a) => a.textContent)?.textContent?.slice(0, 220);
     const instructionPreview = systemPrompt.includes('[STUDY SESSION INSTRUCTIONS')
-      ? 'Following your active Study Response Instructions'
-      : 'Structured Study Guide';
+      ? 'Structured Study Guide'
+      : 'Study Notes';
 
-    const cleanTopic = userText.replace(/[.?!]+$/, '').trim() || userText;
-    const studyReply =
-      `## Study Notes: ${cleanTopic.slice(0, 56)}${cleanTopic.length > 56 ? '…' : ''}\n\n` +
-      `> **${instructionPreview}** · MCP servers stay paused in Study Mode so every tool stays focused on learning.\n\n` +
-      `### 1. Clear Overview\n\n` +
-      `You asked about **${cleanTopic}**. The fastest way to master any technical or conceptual topic is pairing **core mental models** with a **side-by-side breakdown** and immediate **active recall**.\n\n` +
-      `### 2. Core Concepts at a Glance\n\n` +
-      `| Component | Role in Practice | Key Question to Ask |\n` +
-      `| :--- | :--- | :--- |\n` +
-      `| **Query (Input)** | Defines what you are looking for right now | What relationship matters here? |\n` +
-      `| **Mechanism (Key)** | Matches relevant signals across context | Which parts connect strongly? |\n` +
-      `| **Synthesis (Value)** | Combines weighted evidence cleanly | What output does this produce? |\n\n` +
-      `- **Intuitive Analogy:** Picture a research librarian scanning every bookshelf at once, scoring relevance, and handing you one focused summary.\n` +
-      `- **Common Trap to Avoid:** Memorizing terminology without tracing how inputs change outputs step by step.\n` +
-      (snippetNote ? `- **From Your Uploaded Source:** \`${snippetNote.replace(/\s+/g, ' ').trim()}…\`\n` : '') +
-      `\n### 3. Worked Walkthrough\n\n` +
-      `1. **Project** each input token into Query, Key, and Value vectors.\n` +
-      `2. **Score** similarity via scaled dot product \`score = (Q · Kᵀ) / √d_k\`.\n` +
-      `3. **Normalize** weights with softmax so every row sums to \`1.0\`.\n\n` +
-      `\`\`\`python\nimport math\nscores = [q @ k.T / math.sqrt(d_k) for k in keys]\nweights = softmax(scores)\noutput = sum(w * v for w, v in zip(weights, values))\n\`\`\`\n\n` +
-      `### 4. Quick Self-Check\n\n` +
-      `1. Why do we scale dot products by \`√d_k\` before softmax?\n` +
-      `2. What happens when two tokens share nearly identical Key vectors?\n\n` +
-      `> **Tip:** Tap **Flashcards**, **Quiz Me**, or **Study Reader** below — or add a free Gemini/Groq/OpenRouter API key in **Settings** for full cloud tutoring & Google Search citations.` +
-      attachmentSummary;
+    const cleanTopic = userText.replace(/[.?!]+$/, '').trim() || 'Core Concept';
+    const wantsDiagram =
+      lower.includes('flowchart') ||
+      lower.includes('diagram') ||
+      lower.includes('flow') ||
+      lower.includes('visual') ||
+      lower.includes('mindmap') ||
+      lower.includes('attention') ||
+      lower.includes('anatomy') ||
+      lower.includes('heart') ||
+      lower.includes('how') ||
+      lower.includes('step') ||
+      lower.includes('pipeline');
+
+    const isHeartQuery = lower.includes('heart') || lower.includes('cardiac') || lower.includes('anatomy');
+
+    const mermaidSection = wantsDiagram
+      ? isHeartQuery
+        ? `\n### Blood Flow Diagram\n\n\`\`\`mermaid\nflowchart TD\n  A["Deoxygenated Blood (Vena Cava)"] --> B["Right Atrium"]\n  B --> C["Right Ventricle"]\n  C --> D["Lungs (Pulmonary Artery)"]\n  D --> E["Oxygenated Blood -> Left Atrium"]\n  E --> F["Left Ventricle"]\n  F --> G["Aorta -> Systemic Circulation"]\n\`\`\`\n`
+        : `\n### Visual Process Flowchart\n\n\`\`\`mermaid\nflowchart TD\n  A["Input Tokens X"] --> B["Linear Projections Q, K, V"]\n  B --> C["Similarity Score Q · K^T / sqrt(d_k)"]\n  C --> D["Softmax Attention Weights"]\n  D --> E["Weighted Output Σ(Weights · V)"]\n  E --> F{"Residual & LayerNorm"}\n  F --> G["Contextual Representation"]\n\`\`\`\n`
+      : '';
+
+    const webImagesSectionMatch = /\[VERIFIED WEB IMAGES FOUND\][\s\S]*?never invent unverified image URLs:\n([\s\S]+)$/i.exec(
+      systemPrompt
+    );
+    const extractedImageMarkdown = webImagesSectionMatch
+      ? webImagesSectionMatch[1]
+          .split('\n')
+          .map((line) => line.replace(/^-\s*/, '').replace(/\s+\(Source:.*$/, '').trim())
+          .filter((line) => line.startsWith('!['))
+          .slice(0, 2)
+          .join('\n\n')
+      : '';
+
+    const imagesSection = extractedImageMarkdown
+      ? `\n### Web Images & Visual Reference\n\n${extractedImageMarkdown}\n`
+      : '';
+
+    const studyReply = isHeartQuery
+      ? `## ${instructionPreview}: Human Heart Anatomy\n\n` +
+        `> [!DEFINITION] Four-Chamber Pump\n> The human heart is a muscular four-chambered organ that circulates blood through the **pulmonary** (lung) and **systemic** (body) loops in a continuous double circuit.\n` +
+        imagesSection +
+        mermaidSection +
+        `\n### Key Cardiovascular Formula\n\n` +
+        `Cardiac output ($CO$) equals heart rate ($HR$) multiplied by stroke volume ($SV$):\n\n` +
+        `$$\nCO = HR \\times SV\n$$\n\n` +
+        `| Chamber / Vessel | Blood Oxygenation | Destination |\n` +
+        `| :--- | :--- | :--- |\n` +
+        `| **Right Ventricle** | Deoxygenated | Lungs via pulmonary artery |\n` +
+        `| **Left Ventricle** | Oxygenated | Body via aorta |\n\n` +
+        `> [!HINT]- Tap to reveal self-check\n> The **left ventricle** has the thickest myocardium because it pumps blood against high systemic arterial resistance.` +
+        attachmentSummary
+      : `## ${instructionPreview}: ${cleanTopic.slice(0, 56)}${cleanTopic.length > 56 ? '…' : ''}\n\n` +
+        `> [!DEFINITION] Core Principle\n> **${cleanTopic}** links incoming signals to contextual relevance dynamically in parallel, rather than processing inputs strictly one token at a time.\n` +
+        imagesSection +
+        mermaidSection +
+        `\n### Key Mathematical Formulation\n\n` +
+        `The core relation scales dot products by $\\sqrt{d_k}$ so gradients remain well-conditioned:\n\n` +
+        `$$\n\\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}}\\right) V\n$$\n\n` +
+        `### Concepts at a Glance\n\n` +
+        `| Component | Role in Practice | Diagnostic Question |\n` +
+        `| :--- | :--- | :--- |\n` +
+        `| **Query ($Q$)** | Defines what context is needed | What am I searching for? |\n` +
+        `| **Key ($K$)** | Advertises token identity/features | What signal do I expose? |\n` +
+        `| **Value ($V$)** | Supplies content aggregated by weight | What information gets passed? |\n\n` +
+        (snippetNote ? `- **From Your Source:** \`${snippetNote.replace(/\s+/g, ' ').trim()}…\`\n\n` : '') +
+        `> [!WARNING] Common Exam Trap\n> Forgetting the $\\frac{1}{\\sqrt{d_k}}$ scaling factor causes softmax outputs to saturate toward $0$ or $1$ at large dimensions, shrinking backprop gradients.\n\n` +
+        `### Self-Check Question\n\n` +
+        `What happens to gradient flow during backpropagation if $d_k$ becomes very large and scaling is omitted?\n\n` +
+        `> [!HINT]- Tap to reveal answer\n> Raw dot products grow in variance proportional to $d_k$, pushing softmax into flat regions where gradients approach zero.\n` +
+        attachmentSummary;
 
     await streamText(studyReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -199,31 +247,280 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
     const generalReply =
       `Here is a direct **General Chat** response (${effort} effort, MCP tools paused):${fileLine}\n\n` +
       `You asked: *"${userText}"*\n\n` +
-      `Switch to **Professional** mode anytime to run actions across your connected MCP servers, or **Study Session** for structured learning notes and the distraction-free Reader view. Add a free Gemini/Groq/OpenRouter API key in **Settings** for live cloud answers.`;
+      `Switch to **Pro** mode anytime for Document Generation (PPTX, DOCX, XLSX, PDF), Coding Canvas, and MCP servers — or **Study** for flowcharts, KaTeX math, flashcards, and Study Reader.`;
 
     await streamText(generalReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
     return;
   }
 
+  // After MCP tool calls in Pro mode
   if (lastMessage?.role === 'tool') {
     const recentTools = messages.slice(-2).filter((m) => m.role === 'tool');
     const summaryLines = recentTools.map((t) => {
       if (t.role !== 'tool') return '';
       const displayName = t.toolName.includes('__') ? t.toolName.split('__').slice(1).join('__') : t.toolName;
       return t.isError
-        ? `**${displayName}** returned an error: ${t.content}`
+        ? `**${displayName}** notice: ${t.content}`
         : `**${displayName}** completed:\n\n\`\`\`json\n${t.content}\n\`\`\``;
     });
-    const reply =
-      effort === 'high'
-        ? `I verified the MCP tool output and completed a self-check against your request:\n\n${summaryLines.join('\n')}\n\nEverything is up to date. Let me know if you want to inspect another tool or adjust parameters.`
-        : `Completed using connected MCP tools:\n\n${summaryLines.join('\n')}`;
+    const hasDenial = recentTools.some((t) => t.role === 'tool' && t.content.includes('denied'));
+    const reply = hasDenial
+      ? `Understood — I respected your approval decision and paused that write step:\n\n${summaryLines.join('\n')}\n\nTell me how you would like to adjust parameters or proceed safely.`
+      : effort === 'high'
+        ? `Verified connected MCP tool output against your request:\n\n${summaryLines.join('\n')}\n\nEverything is synced. You can also export this summary as PDF, DOCX, XLSX, or PPTX below.`
+        : `Completed via connected MCP tools:\n\n${summaryLines.join('\n')}`;
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
     return;
   }
 
+  // Pro Document Studio triggers: PPTX, XLSX, DOCX, PDF, and HTML Canvas
+  if (lower.includes('pptx') || lower.includes('powerpoint') || lower.includes('presentation') || lower.includes('slide') || lower.includes('deck')) {
+    await streamText(
+      'Designing a 4-slide executive presentation (Title hero, KPI metrics, Two-column comparison, Roadmap table) with speaker notes for native OOXML .pptx export.',
+      (delta) => onEvent({ type: 'reasoning_delta', delta }),
+      signal
+    );
+    const pptxSpec = {
+      title: 'Q3 AI Workspace Rollout',
+      subtitle: 'Executive Strategy & Operational Readiness Deck',
+      themeColor: '0B57D0',
+      slides: [
+        {
+          layout: 'title',
+          title: 'Q3 AI Workspace Rollout',
+          subtitle: 'Unified MCP Orchestration, Document Studio & Live Coding Canvas',
+          speakerNotes: 'Open with the core thesis: consolidating disconnected workflows into one secure mobile-first workspace.',
+        },
+        {
+          layout: 'metrics',
+          title: 'Key Performance Indicators',
+          subtitle: 'Measured across pilot engineering & ops teams',
+          metrics: [
+            { label: 'Time Saved / Week', value: '6.4 hrs', note: '+38% vs baseline' },
+            { label: 'MCP Tool Success', value: '99.2%', note: 'Zero unapproved writes' },
+            { label: 'Export Adoption', value: '84%', note: 'PPTX, XLSX & PDF' },
+            { label: 'Mean Latency', value: '420 ms', note: 'Streamed edge inference' },
+          ],
+          speakerNotes: 'Highlight that write-action confirmation preserves trust while boosting throughput.',
+        },
+        {
+          layout: 'two_col',
+          title: 'Before vs. After Deployment',
+          leftTitle: 'Legacy Fragmented Workflow',
+          leftBullets: [
+            'Manual copy-paste between chat and slides',
+            'Unverified tool calls without parameter review',
+            'Separate tabs for docs, spreadsheets, and code',
+          ],
+          rightTitle: 'MCP Hub Pro Studio',
+          rightBullets: [
+            '1-click native .PPTX, .XLSX, .DOCX & .PDF export',
+            'Inline argument editing before every MCP write',
+            'Live side-by-side HTML & code preview Canvas',
+          ],
+          speakerNotes: 'Emphasize zero friction when shipping executive artifacts directly from conversation.',
+        },
+        {
+          layout: 'table',
+          title: '90-Day Rollout Milestones',
+          table: {
+            headers: ['Phase', 'Owner', 'Deliverable', 'Target'],
+            rows: [
+              ['Phase 1', 'Platform', 'Connect GitHub, Notion & Linear MCPs', 'Week 2'],
+              ['Phase 2', 'Product', 'Standardize weekly PPTX & XLSX reporting', 'Week 5'],
+              ['Phase 3', 'Security', 'Audit OAuth PKCE & write-approval logs', 'Week 8'],
+              ['Phase 4', 'All Teams', 'Full org availability on web & mobile', 'Week 12'],
+            ],
+          },
+          speakerNotes: 'Close on concrete ownership and Week 12 launch readiness.',
+        },
+      ],
+    };
+
+    const reply =
+      `## Executive Presentation Deck Ready\n\n` +
+      `I built a **4-slide PowerPoint presentation** using native slide layouts (hero title, KPI cards, two-column comparison, milestone table, and speaker notes).\n\n` +
+      `\`\`\`artifact-pptx\n${JSON.stringify(pptxSpec, null, 2)}\n\`\`\`\n\n` +
+      `Tap **Preview in Canvas** to step through every slide interactively, or **Download .PPTX** to open it in PowerPoint or Google Slides.`;
+
+    await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
+  if (lower.includes('xlsx') || lower.includes('excel') || lower.includes('spreadsheet') || lower.includes('workbook') || lower.includes('budget')) {
+    await streamText(
+      'Structuring multi-sheet Excel workbook with revenue projections, operating costs, and net margin rows.',
+      (delta) => onEvent({ type: 'reasoning_delta', delta }),
+      signal
+    );
+    const xlsxSpec = {
+      title: 'Q3 Financial Forecast Model',
+      sheets: [
+        {
+          name: 'Quarterly P&L',
+          headers: ['Line Item', 'Q1 Actual', 'Q2 Actual', 'Q3 Forecast', 'YoY Change'],
+          rows: [
+            ['Enterprise ARR ($K)', 420, 515, 640, '+52%'],
+            ['Self-Serve SaaS ($K)', 145, 178, 215, '+48%'],
+            ['Total Revenue ($K)', 565, 693, 855, '+51%'],
+            ['Cloud & Inference COGS ($K)', 92, 108, 126, '+37%'],
+            ['Gross Profit ($K)', 473, 585, 729, '+54%'],
+            ['Gross Margin (%)', '83.7%', '84.4%', '85.3%', '+1.6 pts'],
+          ],
+        },
+        {
+          name: 'Department Budget',
+          headers: ['Team', 'Headcount', 'Quarterly Spend ($K)', 'Priority Focus'],
+          rows: [
+            ['Engineering', 8, 290, 'MCP connectors & Canvas reliability'],
+            ['Product & Design', 3, 95, 'Mobile UX & document fidelity'],
+            ['Go-To-Market', 4, 130, 'Enterprise pilots & case studies'],
+          ],
+        },
+      ],
+    };
+
+    const reply =
+      `## Multi-Sheet Excel Workbook Ready\n\n` +
+      `I compiled a 2-tab Excel workbook (**Quarterly P&L** and **Department Budget**).\n\n` +
+      `\`\`\`artifact-xlsx\n${JSON.stringify(xlsxSpec, null, 2)}\n\`\`\`\n\n` +
+      `Open **Preview in Canvas** to inspect all tabs or click **Download .XLSX** to open directly in Excel / Google Sheets.`;
+
+    await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
+  if (lower.includes('docx') || lower.includes('word doc') || lower.includes('pdf') || lower.includes('proposal') || lower.includes('report')) {
+    const fmt = lower.includes('docx') || lower.includes('word') ? 'docx' : 'pdf';
+    await streamText(
+      `Organizing structured sections, executive callout, and KPI table for native .${fmt} generation.`,
+      (delta) => onEvent({ type: 'reasoning_delta', delta }),
+      signal
+    );
+    const docSpec = {
+      title: 'Enterprise MCP Implementation Brief',
+      subtitle: 'Architecture, Governance & Deployment Roadmap',
+      sections: [
+        {
+          heading: 'Executive Summary',
+          callout: 'Key Outcome: Consolidate internal tools under OAuth 2.1 PKCE and explicit write-action approval in under 2 weeks.',
+          paragraphs: [
+            'Modern engineering and operations teams rely on fragmented workflows spanning documentation, issue tracking, and analytics. Adopting Model Context Protocol (MCP) standardizes tool discovery behind auditable permissions.',
+          ],
+          bullets: [
+            'Enforces least-privilege read/write separation on every tool call',
+            'Supports Streamable HTTP with automatic SSE transport negotiation',
+            'Enables direct export to DOCX, PDF, XLSX, and PPTX formats',
+          ],
+        },
+        {
+          heading: 'Recommended MCP Stack & Milestones',
+          table: {
+            headers: ['Connector', 'Auth Standard', 'Primary Use Case', 'Rollout'],
+            rows: [
+              ['Notion MCP', 'OAuth 2.1 + PKCE', 'SOP & knowledge retrieval', 'Week 1'],
+              ['Linear MCP', 'OAuth 2.1 / Bearer', 'Sprint triage & spec sync', 'Week 1'],
+              ['GitHub MCP', 'PAT / OAuth 2.1', 'PR review & issue tracking', 'Week 2'],
+              ['PostgreSQL Gateway', 'Bearer / Headers', 'Read-only BI queries', 'Week 2'],
+            ],
+          },
+        },
+      ],
+    };
+
+    const reply =
+      `## Client ${fmt.toUpperCase()} Report Ready\n\n` +
+      `Your formatted **${fmt.toUpperCase()}** document is ready with executive callouts, structured bullets, and styled tables.\n\n` +
+      `\`\`\`artifact-${fmt}\n${JSON.stringify(docSpec, null, 2)}\n\`\`\`\n\n` +
+      `You can preview the page layout in **Canvas** or download the ready-to-share **.${fmt.toUpperCase()}** file.`;
+
+    await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
+  if (lower.includes('canvas') || lower.includes('html') || lower.includes('interactive app') || lower.includes('widget') || lower.includes('roi calculator')) {
+    await streamText(
+      'Designing a responsive self-contained HTML/CSS/JS ROI calculator widget for live sandboxed Canvas preview.',
+      (delta) => onEvent({ type: 'reasoning_delta', delta }),
+      signal
+    );
+    const htmlCode = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Team ROI Calculator</title>
+<style>
+  * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+  body { margin: 0; padding: 20px; background: #f8fafc; color: #0f172a; }
+  .card { max-width: 460px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 20px; padding: 20px; box-shadow: 0 2px 10px rgba(15,23,42,0.05); }
+  h1 { margin: 0 0 6px; font-size: 18px; }
+  p { margin: 0 0 18px; font-size: 13px; color: #475569; }
+  .row { margin-bottom: 14px; }
+  label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  input[type=range] { width: 100%; accent-color: #0b57d0; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+  .kpi { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 14px; padding: 12px; }
+  .kpi span { display: block; font-size: 11px; color: #1e40af; font-weight: 600; }
+  .kpi strong { font-size: 22px; color: #0f172a; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Workflow Automation ROI</h1>
+    <p>Adjust team size and hours saved weekly to estimate annual impact.</p>
+    <div class="row">
+      <label>Team Size <span id="teamVal">12 people</span></label>
+      <input id="team" type="range" min="1" max="100" value="12" />
+    </div>
+    <div class="row">
+      <label>Hours Saved / Person / Week <span id="hrsVal">4 hrs</span></label>
+      <input id="hrs" type="range" min="1" max="20" value="4" />
+    </div>
+    <div class="row">
+      <label>Blended Hourly Cost <span id="rateVal">$85/hr</span></label>
+      <input id="rate" type="range" min="25" max="250" step="5" value="85" />
+    </div>
+    <div class="grid">
+      <div class="kpi"><span>Hours Reclaimed / Yr</span><strong id="yrHrs">2,496</strong></div>
+      <div class="kpi"><span>Estimated Value / Yr</span><strong id="yrVal">$212,160</strong></div>
+    </div>
+  </div>
+  <script>
+    const team = document.getElementById('team');
+    const hrs = document.getElementById('hrs');
+    const rate = document.getElementById('rate');
+    function update() {
+      const t = +team.value, h = +hrs.value, r = +rate.value;
+      document.getElementById('teamVal').textContent = t + ' people';
+      document.getElementById('hrsVal').textContent = h + ' hrs';
+      document.getElementById('rateVal').textContent = '$' + r + '/hr';
+      const totalH = t * h * 52;
+      document.getElementById('yrHrs').textContent = totalH.toLocaleString();
+      document.getElementById('yrVal').textContent = '$' + (totalH * r).toLocaleString();
+    }
+    [team, hrs, rate].forEach(el => el.addEventListener('input', update));
+    update();
+  </script>
+</body>
+</html>`;
+
+    const reply =
+      `## Interactive ROI Calculator Built\n\n` +
+      `Click **Open in Canvas** below to run and tweak this interactive widget live.\n\n` +
+      `\`\`\`html\n${htmlCode}\n\`\`\``;
+
+    await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
+  // Standard MCP tool triggers
   const searchTool = tools.find((t) => t.originalName === 'workspace_search_notes');
   const calcTool = tools.find((t) => t.originalName === 'calculate_expression');
   const createTool = tools.find((t) => t.originalName === 'workspace_create_note');
@@ -268,19 +565,11 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
   }
 
   if (proposedCalls.length > 0) {
-    if (effort === 'high') {
-      await streamText(
-        'Planning step: I will invoke the matching MCP tool and verify its output before answering.\n\n',
-        (delta) => onEvent({ type: 'reasoning_delta', delta }),
-        signal
-      );
-    } else if (effort === 'medium') {
-      await streamText(
-        'Checking connected MCP server tools...\n\n',
-        (delta) => onEvent({ type: 'text_delta', delta }),
-        signal
-      );
-    }
+    await streamText(
+      `Inspecting ${tools.length} connected MCP tools and preparing verified call parameters for ${proposedCalls[0].name.split('__').slice(1).join('__')}.`,
+      (delta) => onEvent({ type: 'reasoning_delta', delta }),
+      signal
+    );
     onEvent({ type: 'tool_calls', calls: proposedCalls });
     onEvent({ type: 'done' });
     return;
@@ -288,12 +577,14 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   const toolCount = tools.length;
   const fallbackReply =
-    `I am running in **Local Sandbox Simulator** mode (Professional MCP) with **${toolCount}** enabled MCP tool${toolCount === 1 ? '' : 's'} at **${effort}** effort.\n\n` +
+    `I am running in **Pro Studio Simulator** mode with **${toolCount}** active MCP tool${toolCount === 1 ? '' : 's'} (${effort} effort).\n\n` +
     `Try asking me to:\n` +
-    `- **"Search my workspace notes"** (read-only tool call)\n` +
-    `- **"Calculate (24 * 7) + 12"** (read-only math tool)\n` +
-    `- **"Create a note titled \\"Release Plan\\""** (triggers write-action confirmation)\n\n` +
-    `To connect a live cloud LLM (Gemini, Groq, or OpenRouter), add a free API key in **Settings**.`;
+    `- **"Build a Q3 executive presentation deck (.pptx)"** (native PowerPoint slides + Canvas)\n` +
+    `- **"Generate a financial Excel workbook (.xlsx)"** (multi-sheet spreadsheet)\n` +
+    `- **"Write an enterprise PDF report"** (formatted PDF & DOCX)\n` +
+    `- **"Build an interactive HTML ROI calculator for Canvas"** (live Coding Canvas preview)\n` +
+    `- **"Create a note titled \\"Release Plan\\""** (interactive write-action approval)\n\n` +
+    `For live Gemini, Groq, or OpenRouter inference, add your free API key in **Settings**.`;
 
   await streamText(fallbackReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
   onEvent({ type: 'done' });

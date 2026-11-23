@@ -507,3 +507,172 @@ test('study and general chatModes strip all MCP tools and enforce custom study i
   assert.ok(generalPrompt.includes('KNOWLEDGE SOURCE: WEB SEARCH'));
 });
 
+test('agentLoop applies ApprovalResolution editedArguments and propagates denyReason guidance to the model', async () => {
+  let step = 0;
+  const secondStepToolResults: string[] = [];
+
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    step++;
+    const body = JSON.parse(String(init?.body ?? '{}')) as {
+      messages?: Array<{ role: string; content?: string }>;
+    };
+    if (step === 1) {
+      return makeOpenAiSseResponse([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'tc_edit',
+                    function: {
+                      name: 'srv_virtual__workspace_create_note',
+                      arguments: '{"title":"Draft","content":"Old text"}',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ]);
+    }
+    if (step === 2) {
+      for (const m of body.messages ?? []) {
+        if (m.role === 'tool' && m.content) secondStepToolResults.push(m.content);
+      }
+      return makeOpenAiSseResponse([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'tc_deny',
+                    function: {
+                      name: 'srv_virtual__workspace_create_note',
+                      arguments: '{"title":"Second","content":"Wait"}',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ]);
+    }
+    for (const m of body.messages ?? []) {
+      if (m.role === 'tool' && m.content) secondStepToolResults.push(m.content);
+    }
+    return makeOpenAiSseResponse([{ choices: [{ delta: { content: 'Handled edits and denial.' } }] }]);
+  }) as typeof fetch;
+
+  let approvalCount = 0;
+  const res = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'openai/gpt-oss-120b',
+    effort: 'medium',
+    chatMode: 'professional',
+    keys: { groq: 'gsk_test_123456' },
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Create two notes' }],
+    maxSteps: 5,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    fetchFn: mockFetch,
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: async () => {
+        approvalCount++;
+        if (approvalCount === 1) {
+          return {
+            decision: 'approve',
+            editedArguments: { title: 'Edited Title', content: 'Updated by user' },
+          };
+        }
+        return {
+          decision: 'deny',
+          denyReason: 'Skip the second note and summarize instead.',
+        };
+      },
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.equal(res.toolCalls.length, 2);
+  assert.equal(res.toolCalls[0].status, 'success');
+  assert.deepEqual(res.toolCalls[0].arguments, { title: 'Edited Title', content: 'Updated by user' });
+  assert.equal(res.toolCalls[1].status, 'denied');
+  assert.ok(secondStepToolResults.some((c) => c.includes('Skip the second note and summarize instead.')));
+  assert.equal(res.finalText, 'Handled edits and denial.');
+});
+
+test('agentLoop in Study mode enriches visual prompts with verified web images and appends figure cards when omitted', async () => {
+  let capturedSystem = '';
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as {
+      messages?: Array<{ role: string; content?: string }>;
+    };
+    capturedSystem = body.messages?.find((m) => m.role === 'system')?.content ?? '';
+    return makeOpenAiSseResponse([{ choices: [{ delta: { content: 'The heart pumps blood via four chambers.' } }] }]);
+  }) as typeof fetch;
+
+  let citationsUpdated = 0;
+  const res = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'openai/gpt-oss-120b',
+    effort: 'medium',
+    chatMode: 'study',
+    knowledgeSource: 'auto',
+    keys: { groq: 'gsk_test_123456' },
+    servers: [],
+    history: [{ role: 'user', text: 'Show me real images of human heart anatomy' }],
+    maxSteps: 3,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    fetchFn: mockFetch,
+    fetchStudyImages: async (query) => {
+      assert.equal(query, 'human heart anatomy');
+      return [
+        {
+          title: 'Diagram of the human heart',
+          imageUrl: 'https://upload.wikimedia.org/wikipedia/commons/heart.png',
+          pageUrl: 'https://en.wikipedia.org/wiki/Heart',
+          source: 'Wikipedia',
+          caption: 'Anterior view of human heart chambers.',
+        },
+      ];
+    },
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onCitationsUpdated: (cites) => {
+        citationsUpdated = cites.length;
+      },
+      onFallbackNotice: () => {},
+      requestApproval: async () => 'approve',
+      onAlwaysAllowTool: () => {},
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+
+  assert.ok(capturedSystem.includes('[VERIFIED WEB IMAGES FOUND]'));
+  assert.ok(capturedSystem.includes('https://upload.wikimedia.org/wikipedia/commons/heart.png'));
+  assert.equal(citationsUpdated, 1);
+  assert.equal(res.citations.length, 1);
+  assert.ok(res.finalText.includes('![Diagram of the human heart](https://upload.wikimedia.org/wikipedia/commons/heart.png'));
+});
+
+
+

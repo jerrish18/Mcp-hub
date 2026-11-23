@@ -1,5 +1,7 @@
 import type {
   AgentProfile,
+  ApprovalDecision,
+  ApprovalResolution,
   ChatMode,
   EffortLevel,
   GroundingCitation,
@@ -12,6 +14,11 @@ import type {
   ToolCallRecord,
 } from '../../types';
 import { safeErrorMessage } from '../../utils/redact';
+import {
+  detectStudyVisualQuery,
+  fetchStudyWebImages,
+  type StudyWebImage,
+} from '../../utils/studyImages';
 import { callMcpTool } from '../mcp/client';
 import { streamWithRateLimitFallback } from './provider';
 import type { LlmConversationItem, LlmToolCall, LlmToolDefinition } from './types';
@@ -73,17 +80,28 @@ export function composeEffectiveSystemPrompt(params: {
     parts.push(
       '[STUDY SESSION MODE — MCP TOOLS DISABLED]\n' +
         'You are helping the user learn and understand deeply. Do NOT attempt to invoke MCP servers.\n' +
-        '[EDITORIAL FORMATTING RULES]\n' +
-        '- Always leave a blank line before and after headings (##, ###), bullet lists, numbered lists, code fences, and tables.\n' +
-        '- When rendering Markdown tables, keep every row on a single line with concise cell text (never insert raw line breaks or ASCII separator bars inside cells).\n' +
-        '- Highlight key terms in **bold**, use `inline code` for commands/variables, and use > blockquote callouts sparingly for Key Takeaways or Memory Hooks.\n' +
+        '[RICH STUDY FORMATS SUPPORTED BY UI]\n' +
+        '- Always leave a blank line before and after headings (##, ###), lists, code fences, math blocks, and tables.\n' +
+        '- Visual Flowcharts & Diagrams: When explaining processes, algorithms, architectures, lifecycles, or when asked for a flowchart/diagram/mindmap, emit a ```mermaid code fence (e.g. flowchart TD, sequenceDiagram, mindmap, erDiagram, timeline). Quote node labels that contain spaces or punctuation like A["Parse Input"] --> B["Validate"].\n' +
+        '- Math Equations: Use $$...$$ for display equations and $...$ for inline formulas.\n' +
+        '- Study Callout Boxes: Use Obsidian-style callouts such as > [!DEFINITION], > [!FORMULA], > [!TIP], > [!IMPORTANT], > [!WARNING], and collapsible > [!HINT]- for hints or hidden answers.\n' +
+        '- Tables: Keep every Markdown table row on one single line with concise cells.\n' +
         (customStructure
           ? `[STUDY SESSION INSTRUCTIONS — STRICTLY FOLLOW THIS RESPONSE STRUCTURE]\nYou MUST organize and format your entire response strictly according to these user instructions:\n${customStructure}`
-          : 'Format your explanation cleanly with Markdown headings, key-takeaway callouts (> quote blocks), clear examples, and scannable bullet points so it reads like a polished study guide.')
+          : 'Format your explanation cleanly with Markdown headings, callout boxes, visual Mermaid flowcharts when helpful, clear examples, and scannable bullet points so it reads like a polished study guide.')
     );
   } else if (params.chatMode === 'general') {
     parts.push(
       '[GENERAL CHAT MODE — MCP TOOLS DISABLED]\nProvide a helpful, natural everyday response directly without calling external MCP tools.'
+    );
+  } else {
+    parts.push(
+      '[PRO WORKSPACE MODE — MCP + DOCUMENT STUDIO + CODING CANVAS]\n' +
+        'You can invoke connected MCP tools when needed, build interactive Canvas apps (self-contained ```html, ```svg, ```mermaid, ```tsx, or ```python blocks), and generate real downloadable Office/PDF files using structured JSON artifact blocks:\n' +
+        '- PowerPoint Deck: ```artifact-pptx with {"title","subtitle","themeColor":"0B57D0","slides":[{"layout":"title"|"metrics"|"two_col"|"table"|"bullets","title","subtitle","bullets","metrics":[{"label","value","note"}],"leftTitle","leftBullets","rightTitle","rightBullets","table":{"headers":[],"rows":[[]]},"speakerNotes"}]}\n' +
+        '- Excel Workbook: ```artifact-xlsx with {"title","sheets":[{"name","headers":[],"rows":[[]]}]}\n' +
+        '- Word Document or PDF Report: ```artifact-docx or ```artifact-pdf with {"title","subtitle","sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
+        'When the user asks for a presentation/deck/PPTX, Excel/spreadsheet/XLSX, Word/DOCX, or PDF report, ALWAYS include the matching ```artifact-pptx | ```artifact-xlsx | ```artifact-docx | ```artifact-pdf JSON block cleanly so the user gets an instant Canvas preview and real file download.'
     );
   }
 
@@ -116,7 +134,9 @@ export interface AgentLoopCallbacks {
   onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => void;
   onCitationsUpdated?: (citations: GroundingCitation[]) => void;
   onFallbackNotice: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
-  requestApproval: (approval: Omit<PendingApproval, 'resolve'>) => Promise<'approve' | 'always_allow' | 'deny'>;
+  requestApproval: (
+    approval: Omit<PendingApproval, 'resolve'>
+  ) => Promise<ApprovalDecision | ApprovalResolution>;
   onAlwaysAllowTool: (qualifiedKey: string) => void;
   getServerSecrets: (serverId: string) => Promise<ServerSecretPayload>;
   saveServerSecrets: (serverId: string, updated: ServerSecretPayload) => Promise<void>;
@@ -139,6 +159,7 @@ export interface RunAgentLoopParams {
   signal: AbortSignal;
   callbacks: AgentLoopCallbacks;
   fetchFn?: typeof fetch;
+  fetchStudyImages?: (query: string, signal: AbortSignal) => Promise<StudyWebImage[]>;
 }
 
 export interface AgentLoopResult {
@@ -174,7 +195,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const built = buildAgentToolCatalog(agent, servers);
   const tools = chatMode === 'professional' ? built.tools : [];
   const lookup = chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
-  const effectiveSystemPrompt = composeEffectiveSystemPrompt({
+  let effectiveSystemPrompt = composeEffectiveSystemPrompt({
     basePrompt: agent.systemPrompt,
     chatMode,
     studyInstructions,
@@ -184,6 +205,46 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const workingMessages: LlmConversationItem[] = [...params.history];
   const allToolRecords: ToolCallRecord[] = [];
   const allCitations = new Map<string, GroundingCitation>();
+
+  // In Study mode, fetch verified educational web images when user asks for pictures/images/diagrams
+  let studyImages: StudyWebImage[] = [];
+  if (chatMode === 'study' && knowledgeSource !== 'uploaded') {
+    const lastUserItem = [...workingMessages].reverse().find((m) => m.role === 'user');
+    const visualQuery =
+      lastUserItem?.role === 'user'
+        ? detectStudyVisualQuery(lastUserItem.text, knowledgeSource)
+        : null;
+    if (visualQuery) {
+      const imageFetcher =
+        params.fetchStudyImages ??
+        (typeof window !== 'undefined'
+          ? (q: string, sig: AbortSignal) => fetchStudyWebImages(q, sig, fetchFn)
+          : null);
+      if (imageFetcher) {
+        studyImages = await imageFetcher(visualQuery, signal).catch(() => []);
+        if (studyImages.length > 0) {
+          for (const img of studyImages) {
+            allCitations.set(img.pageUrl, {
+              title: `${img.title} (${img.source})`,
+              url: img.pageUrl,
+            });
+          }
+          callbacks.onCitationsUpdated?.(Array.from(allCitations.values()));
+
+          const imageContext = studyImages
+            .map(
+              (img) =>
+                `- ![${img.title}](${img.imageUrl}${img.caption ? ` "${img.caption.replace(/"/g, "'")}"` : ''}) (Source: ${img.pageUrl})`
+            )
+            .join('\n');
+          effectiveSystemPrompt +=
+            `\n\n[VERIFIED WEB IMAGES FOUND]\n` +
+            `Embed relevant educational images below inline using exact Markdown image syntax ![Alt](url "caption"). Never invent unverified image URLs:\n` +
+            imageContext;
+        }
+      }
+    }
+  }
 
   let activeModelId = modelId;
   let accumulatedText = '';
@@ -267,6 +328,26 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     });
 
     if (proposedCalls.length === 0) {
+      if (
+        chatMode === 'study' &&
+        studyImages.length > 0 &&
+        !/!\[[^\]\n]*\]\(https?:\/\//.test(accumulatedText)
+      ) {
+        const imageMarkdown =
+          `\n\n### Visual References from the Web\n\n` +
+          studyImages
+            .slice(0, 2)
+            .map(
+              (img) =>
+                `![${img.title}](${img.imageUrl}${
+                  img.caption ? ` "${img.caption.replace(/"/g, "'")}"` : ''
+                })`
+            )
+            .join('\n\n');
+        accumulatedText += imageMarkdown;
+        callbacks.onTextDelta(accumulatedText);
+      }
+
       return {
         finalText: accumulatedText,
         finalReasoning: accumulatedReasoning,
@@ -366,7 +447,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         record.status = 'pending_approval';
         callbacks.onToolCallsUpdated([...allToolRecords]);
 
-        const decision = await new Promise<'approve' | 'always_allow' | 'deny'>((resolve) => {
+        const rawDecision = await new Promise<ApprovalDecision | ApprovalResolution>((resolve) => {
           if (signal.aborted) {
             resolve('deny');
             return;
@@ -421,9 +502,14 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           };
         }
 
-        if (decision === 'deny') {
+        const resolution: ApprovalResolution =
+          typeof rawDecision === 'string' ? { decision: rawDecision } : rawDecision;
+
+        if (resolution.decision === 'deny') {
           record.status = 'denied';
-          record.result = 'User denied execution of this write action.';
+          record.result = resolution.denyReason?.trim()
+            ? `User denied this write action. User guidance: ${resolution.denyReason.trim()}`
+            : 'User denied execution of this write action.';
           record.isError = true;
           record.durationMs = Date.now() - record.startedAt;
           callbacks.onToolCallsUpdated([...allToolRecords]);
@@ -437,7 +523,11 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           continue;
         }
 
-        if (decision === 'always_allow') {
+        if (resolution.editedArguments) {
+          record.arguments = resolution.editedArguments;
+        }
+
+        if (resolution.decision === 'always_allow') {
           localAlwaysAllow.add(qualifiedKey);
           callbacks.onAlwaysAllowTool(qualifiedKey);
         }

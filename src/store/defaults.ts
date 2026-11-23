@@ -123,6 +123,23 @@ export const BUILT_IN_AGENTS: AgentProfile[] = [
     createdAt: 1700000000000,
     updatedAt: 1700000000000,
   },
+  {
+    id: 'agent_pro_architect',
+    name: 'Doc & Canvas Architect',
+    icon: 'terminal',
+    description: 'Builds executive PPTX decks, XLSX workbooks, DOCX/PDF reports, and live HTML Canvas apps.',
+    systemPrompt:
+      'You are Doc & Canvas Architect inside MCP Hub Pro Studio. Produce executive-ready deliverables: emit structured artifact-pptx decks with speaker notes, multi-sheet artifact-xlsx financial/ops workbooks, formatted artifact-docx/artifact-pdf reports, and clean self-contained HTML/TSX Canvas apps.',
+    defaultModelId: 'gemini-4-neon',
+    defaultEffort: 'medium',
+    defaultChatMode: 'professional',
+    studyInstructions: '',
+    allowedServerIds: null,
+    allowedToolNames: null,
+    isBuiltIn: true,
+    createdAt: 1700000000000,
+    updatedAt: 1700000000000,
+  },
 ];
 
 export const DEFAULT_SANDBOX_SERVER: McpServerConfig = {

@@ -1,10 +1,27 @@
 export type TableAlignment = 'left' | 'center' | 'right';
 
+export type CalloutKind =
+  | 'note'
+  | 'tip'
+  | 'important'
+  | 'warning'
+  | 'definition'
+  | 'formula'
+  | 'hint';
+
 export type MarkdownBlock =
   | { type: 'heading'; level: 1 | 2 | 3 | 4; text: string; id: string }
   | { type: 'paragraph'; text: string }
-  | { type: 'blockquote'; lines: string[] }
+  | {
+      type: 'blockquote';
+      lines: string[];
+      calloutKind?: CalloutKind;
+      calloutTitle?: string;
+      isCollapsible?: boolean;
+    }
   | { type: 'code'; language: string; code: string; isUnclosed?: boolean }
+  | { type: 'math_block'; latex: string; isUnclosed?: boolean }
+  | { type: 'image'; alt: string; url: string; caption?: string }
   | { type: 'table'; headers: string[]; alignments: TableAlignment[]; rows: string[][] }
   | { type: 'ul'; items: Array<{ text: string; checked?: boolean }> }
   | { type: 'ol'; items: string[] }
@@ -17,6 +34,7 @@ export type InlineToken =
   | { type: 'italic'; text: string }
   | { type: 'strike'; text: string }
   | { type: 'math'; text: string }
+  | { type: 'image'; alt: string; url: string }
   | { type: 'link'; label: string; url: string };
 
 export function slugifyHeading(text: string, index: number): string {
@@ -85,10 +103,44 @@ function normalizeRowToColumnCount(cells: string[], colCount: number): string[] 
   return [...cells, ...Array.from({ length: colCount - cells.length }, () => '')];
 }
 
+const CALLOUT_MAP: Record<string, CalloutKind> = {
+  NOTE: 'note',
+  INFO: 'note',
+  SUMMARY: 'note',
+  TIP: 'tip',
+  EXAMPLE: 'tip',
+  IMPORTANT: 'important',
+  KEY: 'important',
+  WARNING: 'warning',
+  CAUTION: 'warning',
+  TRAP: 'warning',
+  DEFINITION: 'definition',
+  FORMULA: 'formula',
+  EQUATION: 'formula',
+  HINT: 'hint',
+  ANSWER: 'hint',
+  SOLUTION: 'hint',
+};
+
+function parseCalloutHeader(firstLine: string): {
+  kind: CalloutKind;
+  title: string;
+  isCollapsible: boolean;
+} | null {
+  const match = /^\[!([A-Za-z]+)\]([+-])?(?:\s+(.*))?$/.exec(firstLine.trim());
+  if (!match) return null;
+  const rawKind = match[1].toUpperCase();
+  const kind = CALLOUT_MAP[rawKind] ?? 'note';
+  const defaultTitle = rawKind.charAt(0) + rawKind.slice(1).toLowerCase();
+  const title = match[3]?.trim() || defaultTitle;
+  const isCollapsible = match[2] === '-' || kind === 'hint';
+  return { kind, title, isCollapsible };
+}
+
 /**
  * Splits full or streaming Markdown into structured blocks supporting GFM tables,
- * closed & streaming fenced code blocks, headings, callout blockquotes, checklists,
- * ordered/unordered lists, and horizontal dividers.
+ * closed & streaming fenced code blocks, $$...$$ display math blocks, headings,
+ * Obsidian/GitHub study admonition callouts, checklists, ordered/unordered lists, and horizontal dividers.
  */
 export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
   if (!content) return [];
@@ -138,6 +190,38 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
+    // 1b. Block Display Math ($$ ... $$) single-line or multi-line
+    if (trimmed.startsWith('$$')) {
+      const singleLineMatch = /^\$\$(.+?)\$\$$/.exec(trimmed);
+      if (singleLineMatch && trimmed.length > 4) {
+        blocks.push({ type: 'math_block', latex: singleLineMatch[1].trim() });
+        i++;
+        continue;
+      }
+      const afterOpen = trimmed.slice(2).trim();
+      const mathLines: string[] = afterOpen ? [afterOpen] : [];
+      i++;
+      let closed = false;
+      while (i < lines.length) {
+        const curTrimmed = lines[i].trim();
+        if (curTrimmed.endsWith('$$')) {
+          const beforeClose = curTrimmed.slice(0, -2).trim();
+          if (beforeClose) mathLines.push(beforeClose);
+          closed = true;
+          i++;
+          break;
+        }
+        mathLines.push(lines[i]);
+        i++;
+      }
+      blocks.push({
+        type: 'math_block',
+        latex: mathLines.join('\n').trim(),
+        isUnclosed: !closed,
+      });
+      continue;
+    }
+
     // 2. Headings (# to ####)
     const headingMatch = /^(#{1,4})\s+(.+)$/.exec(trimmed);
     if (headingMatch) {
@@ -156,6 +240,19 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
     // 3. Horizontal rule (---, ***, ___)
     if (isHorizontalRule(trimmed)) {
       blocks.push({ type: 'hr' });
+      i++;
+      continue;
+    }
+
+    // 3b. Standalone Markdown Image (![alt](https://... "optional caption"))
+    const standaloneImgMatch = /^!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+?)(?:\s+"([^"\n]*)")?\)$/.exec(trimmed);
+    if (standaloneImgMatch) {
+      blocks.push({
+        type: 'image',
+        alt: standaloneImgMatch[1].trim() || 'Study visual',
+        url: standaloneImgMatch[2],
+        caption: standaloneImgMatch[3]?.trim() || undefined,
+      });
       i++;
       continue;
     }
@@ -188,14 +285,25 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
-    // 5. Blockquote (> ...)
+    // 5. Blockquote (> ...) & Study Admonitions (> [!TIP], > [!DEFINITION], > [!HINT]-)
     if (/^\s*>/.test(line)) {
       const quoteLines: string[] = [];
       while (i < lines.length && /^\s*>/.test(lines[i])) {
         quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
         i++;
       }
-      blocks.push({ type: 'blockquote', lines: quoteLines });
+      const callout = quoteLines.length > 0 ? parseCalloutHeader(quoteLines[0]) : null;
+      if (callout) {
+        blocks.push({
+          type: 'blockquote',
+          lines: quoteLines.slice(1),
+          calloutKind: callout.kind,
+          calloutTitle: callout.title,
+          isCollapsible: callout.isCollapsible,
+        });
+      } else {
+        blocks.push({ type: 'blockquote', lines: quoteLines });
+      }
       continue;
     }
 
@@ -237,8 +345,10 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
       const curT = cur.trim();
       if (!curT) break;
       if (/^(`{3,}|~{3,})/.test(curT)) break;
+      if (curT.startsWith('$$')) break;
       if (/^(#{1,4})\s+/.test(curT)) break;
       if (isHorizontalRule(curT)) break;
+      if (/^!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+?)(?:\s+"([^"\n]*)")?\)$/.test(curT)) break;
       if (cur.includes('|') && i + 1 < lines.length && isTableSeparatorLine(lines[i + 1])) break;
       if (/^\s*>/.test(cur)) break;
       if (/^\s*[-*+]\s+/.test(cur)) break;
@@ -275,7 +385,7 @@ export function extractOutlineHeadings(
 export function parseInlineTokens(text: string): InlineToken[] {
   if (!text) return [];
   const pattern =
-    /(`[^`\n]+`|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\$[^$\n]+\*?\S?\$|\*[^*\n]+\*|_[^_\n]+_)/g;
+    /(`[^`\n]+`|!\[[^\]\n]*\]\(https?:\/\/[^\s)]+(?:\s+"[^"\n]*")?\)|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\$(?!\s)[^$\n]*?[^\s$\\]\$(?!\d)|\*[^*\n]+\*|_[^_\n]+_)/g;
 
   const tokens: InlineToken[] = [];
   let lastIdx = 0;
@@ -288,6 +398,13 @@ export function parseInlineTokens(text: string): InlineToken[] {
     const raw = match[0];
     if (raw.startsWith('`') && raw.endsWith('`') && raw.length >= 3) {
       tokens.push({ type: 'code', text: raw.slice(1, -1) });
+    } else if (raw.startsWith('![')) {
+      const imgMatch = /^!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+?)(?:\s+"[^"\n]*")?\)$/.exec(raw);
+      if (imgMatch) {
+        tokens.push({ type: 'image', alt: imgMatch[1].trim() || 'Study visual', url: imgMatch[2] });
+      } else {
+        tokens.push({ type: 'text', text: raw });
+      }
     } else if (raw.startsWith('[')) {
       const linkMatch = /^\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)$/.exec(raw);
       if (linkMatch) {
@@ -320,13 +437,16 @@ export function parseInlineTokens(text: string): InlineToken[] {
 
 export function stripMarkdownForSpeech(markdown: string): string {
   return markdown
-    .replace(/```[\s\S]*?```/g, ' code snippet omitted. ')
+    .replace(/```[\s\S]*?```/g, ' visual or code block omitted. ')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, ' figure $1. ')
+    .replace(/\$\$([\s\S]*?)\$\$/g, ' $1 ')
+    .replace(/\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION|DEFINITION|FORMULA|HINT|ANSWER|SOLUTION)\][+-]?/gi, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/^\|?[\s:-]+\|[\s|:-]*$/gm, ' ')
     .replace(/\|/g, ', ')
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/^>\s?/gm, '')
-    .replace(/[*_`~]/g, '')
+    .replace(/[*_`~$]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

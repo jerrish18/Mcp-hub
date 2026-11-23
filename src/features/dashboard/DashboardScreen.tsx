@@ -4,13 +4,20 @@ import {
   ArrowRight,
   Bot,
   CheckCircle2,
+  Code2,
   Cpu,
+  Database,
+  FileSpreadsheet,
+  FileText,
+  FolderOpen,
   GitBranch,
   KeyRound,
+  Layers,
   MessageSquare,
   MessageSquarePlus,
   Palette,
   PlaySquare,
+  Presentation,
   Server,
   ShieldAlert,
   Terminal,
@@ -34,6 +41,11 @@ function getServerIcon(srv: McpServerConfig) {
   if (srv.presetId === 'youtube') return PlaySquare;
   if (srv.presetId === 'github') return GitBranch;
   if (srv.presetId === 'canva') return Palette;
+  if (srv.presetId === 'notion') return FileText;
+  if (srv.presetId === 'linear') return Layers;
+  if (srv.presetId === 'slack') return MessageSquare;
+  if (srv.presetId === 'gdrive') return FolderOpen;
+  if (srv.presetId === 'postgres') return Database;
   return Server;
 }
 
@@ -84,6 +96,13 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
     if (preset) {
       void sendMessage(preset.samplePrompt);
     }
+  };
+
+  const handleLaunchProStudio = (prompt: string) => {
+    const architect = agents.find((a) => a.id === 'agent_pro_architect') ?? activeAgent;
+    startNewConversation(architect?.id);
+    onNavigateTab('chat');
+    void sendMessage(prompt);
   };
 
   return (
@@ -260,6 +279,82 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               Local encrypted history
             </div>
           </button>
+        </motion.section>
+
+        {/* Pro Document & Coding Canvas Quick Studio */}
+        <motion.section variants={cardStaggerItem} className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-lg font-bold text-slate-900 dark:text-white">
+                Pro Document & Canvas Studio
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Create real PowerPoint decks, Excel workbooks, Word/PDF briefs & live HTML apps
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {[
+              {
+                id: 'pptx',
+                title: 'Presentation (.PPTX)',
+                subtitle: 'Slides, KPI cards & speaker notes',
+                Icon: Presentation,
+                prompt: 'Build a 4-slide Q3 executive presentation deck (.pptx) with KPI metrics and rollout milestones.',
+              },
+              {
+                id: 'xlsx',
+                title: 'Excel Workbook (.XLSX)',
+                subtitle: 'Multi-sheet models & budgets',
+                Icon: FileSpreadsheet,
+                prompt: 'Generate a multi-sheet Q3 financial Excel workbook (.xlsx) with P&L and department budgets.',
+              },
+              {
+                id: 'pdf_docx',
+                title: 'PDF & Word Report',
+                subtitle: 'Executive briefs & tables',
+                Icon: FileText,
+                prompt: 'Write an Enterprise MCP Implementation Brief report as a downloadable PDF.',
+              },
+              {
+                id: 'canvas',
+                title: 'Coding Canvas',
+                subtitle: 'Live HTML/SVG/TSX preview',
+                Icon: Code2,
+                prompt: 'Build an interactive HTML ROI calculator widget for live preview in Canvas.',
+              },
+            ].map(({ id, title, subtitle, Icon, prompt }) => (
+              <button
+                key={id}
+                type="button"
+                data-testid={`dashboard-studio-${id}`}
+                onClick={() => handleLaunchProStudio(prompt)}
+                style={{
+                  backgroundColor: 'var(--m3-surface-container)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="rounded-[24px] border p-4 text-left space-y-2 transition-transform hover:-translate-y-0.5 active:scale-[0.99]"
+              >
+                <span
+                  style={{
+                    backgroundColor: 'var(--m3-primary-container)',
+                    color: 'var(--m3-on-primary-container)',
+                  }}
+                  className="w-9 h-9 rounded-xl flex items-center justify-center"
+                >
+                  <Icon className="w-4 h-4" />
+                </span>
+                <div>
+                  <div className="font-display text-sm font-semibold text-slate-900 dark:text-white truncate">
+                    {title}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    {subtitle}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
         </motion.section>
 
         {/* Platform Connectors & MCP Integrations */}

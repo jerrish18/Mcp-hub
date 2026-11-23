@@ -12,7 +12,9 @@ import {
   ChevronUp,
   Copy,
   Cpu,
+  Download,
   ExternalLink,
+  FileSpreadsheet,
   FileText,
   Globe,
   HelpCircle,
@@ -24,9 +26,11 @@ import {
   MessageSquarePlus,
   Mic,
   MicOff,
+  PanelRight,
   Pause,
   Play,
   Plus,
+  Presentation,
   RotateCcw,
   Share2,
   SlidersHorizontal,
@@ -50,10 +54,12 @@ import type {
   EffortLevel,
   KnowledgeSourceMode,
 } from '../../types';
-import { MarkdownRenderer } from '../../ui/MarkdownRenderer';
+import { MarkdownRenderer, type MarkdownCanvasRequest } from '../../ui/MarkdownRenderer';
+import { ThinkingBlock } from '../../ui/ThinkingBlock';
 import { ToolCallCard } from '../../ui/ToolCallCard';
 import { WriteApprovalBanner } from '../../ui/WriteApprovalBanner';
 import { formatFileSize, processUploadedFiles } from '../../utils/attachments';
+import { downloadDocumentSpec, markdownToDocSpec, type DocFormat } from '../../utils/docExport';
 import { triggerHaptic } from '../../utils/haptics';
 import { stripMarkdownForSpeech } from '../../utils/markdownParser';
 import { M3_EMPHASIZED_EASE } from '../../utils/motion';
@@ -69,6 +75,7 @@ import {
 import { AgentSwitcherSheet } from './AgentSwitcherSheet';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
+import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
 import { SavedNotesModal } from './SavedNotesModal';
 import { StudyFlashcardsModal } from './StudyFlashcardsModal';
 import { StudyQuizModal } from './StudyQuizModal';
@@ -147,22 +154,30 @@ const STARTER_PROMPTS_BY_MODE: Record<ChatMode, Array<{ label: string; prompt: s
   ],
   professional: [
     {
-      label: 'Search workspace notes',
-      prompt: 'Search my workspace notes and summarize what is currently saved.',
+      label: 'Build Executive Deck (.PPTX)',
+      prompt: 'Build a 4-slide Q3 executive presentation deck (.pptx) with KPI metrics and rollout milestones.',
     },
     {
-      label: 'Calculate with MCP tool',
-      prompt: 'Calculate (24 * 7) + 12 using the calculator tool.',
+      label: 'Create Excel Forecast (.XLSX)',
+      prompt: 'Generate a multi-sheet Q3 financial Excel workbook (.xlsx) with P&L and department budgets.',
     },
     {
-      label: 'Create a note (write action)',
+      label: 'Build Interactive ROI App (Canvas)',
+      prompt: 'Build an interactive HTML ROI calculator widget for live preview in Canvas.',
+    },
+    {
+      label: 'Create Sprint Note (Write Approval)',
       prompt: 'Create a note titled "Sprint Checklist" with my MCP testing priorities.',
     },
   ],
   study: [
     {
-      label: 'Master a topic step-by-step',
-      prompt: 'Teach me how Transformer self-attention works from intuition to math.',
+      label: 'Explain with Flowchart & Math',
+      prompt: 'Teach me how Transformer self-attention works with a visual flowchart diagram and formulas.',
+    },
+    {
+      label: 'Visual Guide with Web Images',
+      prompt: 'Show me real web images and a flowchart explaining human heart anatomy.',
     },
     {
       label: 'Generate a practice quiz',
@@ -224,6 +239,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Study Suite state
   const [studyPlanOpen, setStudyPlanOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
+
+  // Pro Canvas & Document Export state
+  const [canvasOpen, setCanvasOpen] = useState(false);
+  const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
+  const [exportingKey, setExportingKey] = useState<string | null>(null);
+
   const [readerState, setReaderState] = useState<{
     title: string;
     content: string;
@@ -303,6 +324,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     recognitionRef.current?.stop();
     setIsListening(false);
     setSourceMenuOpen(false);
+    setCanvasOpen(false);
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -502,6 +524,56 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
   };
 
+  const handleOpenInCanvas = (payload: MarkdownCanvasRequest) => {
+    const id = `canvas_${Date.now()}`;
+    if (payload.kind === 'code') {
+      setCanvasArtifact({
+        kind: 'code',
+        id,
+        title: payload.title,
+        language: payload.language,
+        code: payload.code,
+      });
+    } else {
+      setCanvasArtifact({
+        kind: 'document',
+        id,
+        title: payload.title,
+        spec: payload.spec,
+        rawJson: payload.rawJson,
+      });
+    }
+    setCanvasOpen(true);
+    triggerHaptic(settings.hapticsEnabled, 'light');
+  };
+
+  const handleToggleHeaderCanvas = () => {
+    if (canvasArtifact) {
+      setCanvasOpen((v) => !v);
+      return;
+    }
+    setCanvasArtifact({
+      kind: 'code',
+      id: `canvas_${Date.now()}`,
+      title: 'Pro Canvas Scratchpad',
+      language: 'html',
+      code: `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <style>\n    body { font-family: system-ui, sans-serif; padding: 24px; background: #f8fafc; color: #0f172a; }\n    .card { max-width: 480px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px; }\n  </style>\n</head>\n<body>\n  <div class="card">\n    <h2>Interactive Pro Canvas</h2>\n    <p>Ask the Pro agent to build HTML widgets, SVG diagrams, PPTX decks, XLSX workbooks, or PDF/DOCX reports.</p>\n  </div>\n</body>\n</html>`,
+    });
+    setCanvasOpen(true);
+  };
+
+  const handleQuickExportPro = async (msgId: string, content: string, format: DocFormat) => {
+    const key = `${msgId}:${format}`;
+    setExportingKey(key);
+    try {
+      const spec = markdownToDocSpec(content, activeConv?.title || 'MCP Hub Report', format);
+      await downloadDocumentSpec(spec);
+      triggerHaptic(settings.hapticsEnabled, 'success');
+    } finally {
+      setExportingKey(null);
+    }
+  };
+
   const starterPrompts = STARTER_PROMPTS_BY_MODE[activeChatMode];
 
   // Find index of latest non-streaming study response for quick follow-up chips
@@ -534,13 +606,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         }
       }}
     >
-      {/* Desktop Conversation History Sidebar */}
+      {/* Desktop Conversation History Sidebar (yields space cleanly when Pro Canvas is open) */}
       <aside
         style={{
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className="hidden lg:flex w-72 shrink-0 flex-col border-r p-4"
+        className={`${canvasOpen ? 'hidden' : 'hidden lg:flex'} w-72 shrink-0 flex-col border-r p-4`}
       >
         <div className="mb-3">
           <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
@@ -784,6 +856,31 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     )}
                   </button>
                 </>
+              )}
+
+              {activeChatMode === 'professional' && (
+                <button
+                  type="button"
+                  data-testid="pro-canvas-toggle-btn"
+                  onClick={handleToggleHeaderCanvas}
+                  aria-pressed={canvasOpen}
+                  style={
+                    canvasOpen
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  <PanelRight className="w-3.5 h-3.5" />
+                  <span>Canvas</span>
+                </button>
               )}
 
               {/* Effort Cycle Chip */}
@@ -1084,20 +1181,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   )}
                 </div>
 
-                {msg.reasoning && (
-                  <details
-                    style={{
-                      backgroundColor: 'var(--m3-surface-container)',
-                      borderColor: 'var(--m3-outline)',
-                    }}
-                    className="rounded-2xl border px-3.5 py-2 text-xs text-slate-600 dark:text-slate-400"
-                  >
-                    <summary className="cursor-pointer font-medium select-none">
-                      Reasoning trace
-                    </summary>
-                    <div className="mt-2 whitespace-pre-wrap leading-relaxed">{msg.reasoning}</div>
-                  </details>
-                )}
+                <ThinkingBlock
+                  reasoning={msg.reasoning ?? ''}
+                  isStreaming={msg.isStreaming}
+                  isStillThinking={Boolean(
+                    msg.isStreaming &&
+                      !msg.content &&
+                      (!msg.toolCalls || msg.toolCalls.length === 0)
+                  )}
+                  durationMs={msg.thinkingDurationMs}
+                />
 
                 {msg.toolCalls && msg.toolCalls.length > 0 && (
                   <div className="space-y-1">
@@ -1114,7 +1207,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       data-testid="assistant-response-card"
                       onClick={(e) => {
                         const target = e.target as HTMLElement;
-                        if (target.closest('button, a, pre, code, table, summary, details')) return;
+                        if (target.closest('button, a, pre, code, table, summary, details, svg')) return;
                         if (isStudyResponse && !msg.isStreaming && msg.content.trim()) {
                           setReaderState({
                             title: activeConv?.title || 'Study Notes',
@@ -1134,6 +1227,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         onOpenInteractiveQuiz={() =>
                           openQuizFromText(activeConv?.title || 'Practice Quiz', msg.content)
                         }
+                        onOpenInCanvas={handleOpenInCanvas}
                       />
 
                       {msg.citations && msg.citations.length > 0 && (
@@ -1292,6 +1386,39 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           <Share2 className="w-3.5 h-3.5" />
                           <span>Share</span>
                         </button>
+
+                        {(msg.chatMode ?? activeChatMode) === 'professional' && (
+                          <div className="flex items-center gap-1 flex-wrap pl-1 border-l border-slate-200 dark:border-slate-800 ml-1">
+                            {(
+                              [
+                                { fmt: 'pdf', label: 'PDF', Icon: FileText },
+                                { fmt: 'docx', label: 'DOCX', Icon: FileText },
+                                { fmt: 'xlsx', label: 'XLSX', Icon: FileSpreadsheet },
+                                { fmt: 'pptx', label: 'PPTX', Icon: Presentation },
+                              ] as const
+                            ).map(({ fmt, label, Icon }) => {
+                              const busy = exportingKey === `${msg.id}:${fmt}`;
+                              return (
+                                <button
+                                  key={fmt}
+                                  type="button"
+                                  disabled={busy}
+                                  data-testid={`export-msg-${fmt}`}
+                                  onClick={() => void handleQuickExportPro(msg.id, msg.content, fmt)}
+                                  aria-label={`Export response as ${label}`}
+                                  style={{
+                                    backgroundColor: 'var(--m3-surface-container)',
+                                    borderColor: 'var(--m3-outline)',
+                                  }}
+                                  className="min-h-[30px] px-2 rounded-full border text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap hover:opacity-85 disabled:opacity-50"
+                                >
+                                  <Icon className="w-3 h-3" />
+                                  <span>{busy ? '…' : label}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -1367,13 +1494,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   </div>
                 )}
 
-                {msg.isStreaming && !msg.content && (!msg.toolCalls || msg.toolCalls.length === 0) && (
-                  <div className="py-2 text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
-                    <span>Thinking...</span>
-                  </div>
-                )}
-
                 {msg.error && (
                   <div className="rounded-2xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-4 py-3 text-sm text-rose-800 dark:text-rose-200 flex items-start justify-between gap-3">
                     <div className="flex items-start gap-2.5 min-w-0">
@@ -1402,9 +1522,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             <WriteApprovalBanner
               key={pendingApproval.toolCallId}
               approval={pendingApproval}
-              onDecision={(decision) => {
-                triggerHaptic(settings.hapticsEnabled, decision === 'deny' ? 'warning' : 'success');
-                resolvePendingApproval(decision);
+              onDecision={(resolution) => {
+                triggerHaptic(
+                  settings.hapticsEnabled,
+                  resolution.decision === 'deny' ? 'warning' : 'success'
+                );
+                resolvePendingApproval(resolution);
               }}
             />
           )}
@@ -1687,6 +1810,18 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           </div>
         </form>
       </div>
+
+      {/* Pro Coding & Document Canvas Split Pane / Mobile Sheet */}
+      <ProCanvasPanel
+        open={canvasOpen}
+        artifact={canvasArtifact}
+        isRunning={isRunning}
+        onChangeArtifact={setCanvasArtifact}
+        onAskCanvasAction={(promptText, label) => {
+          void handleQuickPrompt(promptText, label);
+        }}
+        onClose={() => setCanvasOpen(false)}
+      />
 
       {/* Dedicated Model Switcher Sheet (Completely Separate from Agents) */}
       <ModelSwitcherSheet
