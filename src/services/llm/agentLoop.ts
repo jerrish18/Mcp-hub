@@ -1,3 +1,4 @@
+import type { ProTaskStepStatus } from '../../utils/proTaskPlan';
 import { createRunTraceRecorder, tracePreview } from '../../utils/runTrace';
 import { limitA2uiFences, requestsPlainA2uiOutput, shouldOfferA2ui } from '../../utils/a2ui';
 import { CANVAS_SCRIPT_ORIGINS } from '../../utils/canvasPreview';
@@ -418,6 +419,7 @@ export interface AgentLoopCallbacks {
   onReasoningDelta: (fullReasoning: string) => void;
   onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => void;
   onTraceUpdated?: (trace: RunTrace) => void;
+  onPlanStepChanged?: (index: number, status: ProTaskStepStatus) => void;
   onCitationsUpdated?: (citations: GroundingCitation[]) => void;
   onFallbackNotice: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
   requestApproval: (
@@ -455,6 +457,7 @@ export interface RunAgentLoopParams {
   confirmBeforeWrite: boolean;
   requireWriteApproval?: boolean;
   retryToolCall?: TraceToolRetry;
+  approvedPlan?: readonly string[];
   alwaysAllowedTools: string[];
   alwaysAllowedRules?: AlwaysAllowRule[];
   toolPolicies?: ToolPolicyRule[];
@@ -503,6 +506,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const trace = createRunTraceRecorder(runStartedAt, () => publishTrace());
   const retryRequest = params.retryToolCall;
   const forceWriteApproval = params.requireWriteApproval || Boolean(retryRequest);
+  const approvedPlan = chatMode === 'professional' && !retryRequest ? (params.approvedPlan ?? []) : [];
   const localAlwaysAllow = new Set(params.alwaysAllowedTools);
   const localAlwaysAllowRules: AlwaysAllowRule[] = [...(params.alwaysAllowedRules ?? [])];
   // Only expose MCP tools in Professional mode; General and Study Session never invoke MCPs
@@ -545,6 +549,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   }
 
   const workingMessages: LlmConversationItem[] = [...ragProcessed.messages];
+  if (approvedPlan.length) {
+    effectiveSystemPrompt += '\n\nThe user approved a sequence of steps. Execute only the current [APPROVED PLAN STEP] within the overall request. Do not act on later steps yet. Use the exact user-approved goal and report its outcome. Save widgets for the final step.';
+  }
   const initialPromptTokens = estimateMessagesTokens(workingMessages);
   const allToolRecords: ToolCallRecord[] = [];
   const allCitations = new Map<string, GroundingCitation>();
@@ -625,6 +632,18 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
   publishTrace = () => callbacks.onTraceUpdated?.(buildTrace(false));
   publishTrace();
+
+  let currentPlanIndex = 0;
+  let planToolOffset = 0;
+  const startPlanStep = () => {
+    planToolOffset = allToolRecords.length;
+    workingMessages.push({
+      role: 'user',
+      text: `[APPROVED PLAN STEP] ${currentPlanIndex + 1} of ${approvedPlan.length}\n${approvedPlan[currentPlanIndex]}`,
+    });
+    callbacks.onPlanStepChanged?.(currentPlanIndex, 'running');
+  };
+  if (approvedPlan.length && maxSteps > 0 && !signal.aborted) startPlanStep();
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) {
@@ -736,6 +755,21 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     });
 
     if (proposedCalls.length === 0) {
+      if (approvedPlan.length) {
+        const byTool = new Map(allToolRecords.slice(planToolOffset).map((record) =>
+          [`${record.serverId}:${record.toolName}`, record.status]));
+        const failed = [...byTool.values()].some((status) => status === 'error' || status === 'denied');
+        callbacks.onPlanStepChanged?.(currentPlanIndex, failed ? 'failed' : 'completed');
+        if (!failed && currentPlanIndex + 1 < approvedPlan.length && step + 1 < maxSteps) {
+          currentPlanIndex++;
+          if (accumulatedText) accumulatedText += '\n\n';
+          startPlanStep();
+          continue;
+        }
+        if (!failed && currentPlanIndex + 1 < approvedPlan.length) {
+          accumulatedText += '\n\n_Reached the configured step limit. Remaining plan steps were skipped._';
+        }
+      }
       if (
         chatMode === 'study' &&
         studyImages.length > 0 &&
@@ -1255,6 +1289,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     }
   }
 
+  if (approvedPlan.length) callbacks.onPlanStepChanged?.(currentPlanIndex, 'failed');
   const notice = `\n\n_Reached maximum step limit (${maxSteps}). Tap Continue or increase max steps in Settings._`;
   accumulatedText += notice;
   callbacks.onTextDelta(limitA2uiFences(accumulatedText, a2uiEnabled));

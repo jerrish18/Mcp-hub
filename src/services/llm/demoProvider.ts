@@ -1,3 +1,4 @@
+import { PRO_PLAN_SYSTEM_PROMPT, splitProTask } from '../../utils/proTaskPlan';
 import {
   buildContentFaithfulDocumentSpec,
   buildContentFaithfulPptxSpec,
@@ -53,9 +54,18 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   const lastMessage = messages[messages.length - 1];
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-  const userText = lastUser?.role === 'user' ? lastUser.text : '';
+  const userText = lastUser?.role === 'user' ? lastUser.text.replace(/^\[APPROVED PLAN STEP\] \d+ of \d+\n/, '') : '';
   const userAttachments = lastUser?.role === 'user' ? (lastUser.attachments ?? []) : [];
   const lower = userText.toLowerCase();
+
+  if (systemPrompt.includes(PRO_PLAN_SYSTEM_PROMPT)) {
+    const steps = splitProTask(userText);
+    const reply = JSON.stringify({ steps: steps.length >= 2 ? steps : ['Review the task requirements', userText] });
+    await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
+    onEvent({ type: 'done' });
+    return;
+  }
+
 
   // Study Session mode — never invokes MCP tools, supports flowcharts, math, callouts, flashcards, quizzes
   if (chatMode === 'study') {
@@ -888,7 +898,7 @@ render();`,
 
   const proposedCalls: LlmToolCall[] = [];
 
-  if ((lower.includes('create') || lower.includes('save') || lower.includes('write') || lower.includes('add note')) && createTool) {
+  if ((/\b(?:create|save|write|add note)\b/.test(lower)) && createTool) {
     const titleMatch = userText.match(/(?:titled|called|named)\s+"([^"]+)"/i);
     const title = titleMatch ? titleMatch[1] : 'MCP Hub Session Note';
     proposedCalls.push({

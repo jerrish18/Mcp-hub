@@ -1,3 +1,4 @@
+import type { ProTaskPlan } from '../utils/proTaskPlan';
 import { z } from 'zod';
 
 export const AuthTypeSchema = z.enum([
@@ -327,6 +328,7 @@ export interface ChatMessage {
   effort?: EffortLevel;
   runTrace?: RunTrace;
   a2uiMaxWidgets?: number;
+  proTaskPlan?: ProTaskPlan;
   createdAt: number;
   isStreaming?: boolean;
   error?: string;

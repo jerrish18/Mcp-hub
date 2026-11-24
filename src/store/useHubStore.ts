@@ -4,12 +4,11 @@ import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
 import { logoutCurrentAccount, type AuthUser } from '../services/auth/appAuth';
 import {
-  buildAgentToolCatalog,
   durationToExpiresAt,
   pruneExpiredAlwaysAllowRules,
   runAgentLoop,
 } from '../services/llm/agentLoop';
-import { getApiKeyForProvider, syncLiveProviderModels } from '../services/llm/provider';
+import { getApiKeyForProvider, streamWithRateLimitFallback, syncLiveProviderModels } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
 import {
@@ -70,6 +69,7 @@ import type {
 } from '../types';
 import type { SavedStudyNote } from '../utils/studyTools';
 import { safeErrorMessage } from '../utils/redact';
+import { finishProTaskPlan, makeProTaskPlan, normalizeProPlan, parseProTaskPlan, PRO_PLAN_SYSTEM_PROMPT, shouldPlanProTask, splitProTask, type ProTaskPlan } from '../utils/proTaskPlan';
 import {
   BUILT_IN_AGENTS,
   DEFAULT_SAVED_PROMPTS,
@@ -156,6 +156,11 @@ function migrateConversation(c: Conversation): Conversation {
     chatMode: c.chatMode ?? 'professional',
     knowledgeSource: c.knowledgeSource ?? 'auto',
     studyInstructions: c.studyInstructions ?? DEFAULT_STUDY_INSTRUCTIONS,
+    messages: c.messages.map((message) => {
+      const plan = message.proTaskPlan;
+      if (!plan || (plan.status !== 'review' && plan.status !== 'running')) return message;
+      return { ...message, isStreaming: false, proTaskPlan: finishProTaskPlan(plan, true) };
+    }),
   };
 }
 
@@ -289,6 +294,8 @@ export interface CompareResultItem {
 
 export interface HubState {
   liveTrace?: { messageId: string; trace: RunTrace };
+  pendingProPlan?: { messageId: string; resolve: (steps: string[] | null) => void };
+  resolveProPlan: (steps: string[] | null) => void;
   initialized: boolean;
   isLocked: boolean;
   passphraseVaultEnabled: boolean;
@@ -1355,10 +1362,18 @@ export const useHubStore = create<HubState>((set, get) => {
     stopRun: () => {
       const state = get();
       state.abortController?.abort();
-      if (state.pendingApproval) {
-        state.pendingApproval.resolve('deny');
-      }
-      set({ isRunning: false, abortController: null, pendingApproval: null });
+      state.pendingApproval?.resolve('deny');
+      state.pendingProPlan?.resolve(null);
+      set({ pendingApproval: null, pendingProPlan: undefined });
+    },
+
+    resolveProPlan: (steps) => {
+      const pending = get().pendingProPlan;
+      if (!pending) return;
+      const normalized = steps ? normalizeProPlan(steps) : null;
+      if (normalized && normalized.length < 2) return;
+      set({ pendingProPlan: undefined });
+      pending.resolve(normalized);
     },
 
     resolvePendingApproval: (decision) => {
@@ -1719,6 +1734,9 @@ export const useHubStore = create<HubState>((set, get) => {
       const abortController = new AbortController();
       set({ isRunning: true, abortController, liveTrace: undefined });
       let latestTrace: RunTrace | undefined;
+      let plan: ProTaskPlan | undefined;
+      let approvedSteps: string[] | null = null;
+      const finishPlan = (stopped = false) => plan ? finishProTaskPlan(plan, stopped) : undefined;
 
       patchConv((c) => ({
         ...c,
@@ -1786,9 +1804,58 @@ export const useHubStore = create<HubState>((set, get) => {
       };
 
       try {
-        if (chatMode === 'professional') {
-          const { tools } = buildAgentToolCatalog(agent, get().servers);
-          void tools;
+        if (chatMode === 'professional' && !options?.retryToolCall && !options?.requireWriteApproval &&
+            !options?.autoApproveWrites && shouldPlanProTask(text)) {
+          let planText = '';
+          try {
+            await streamWithRateLimitFallback({
+              primaryModelId: conv.modelId,
+              keys: state.providerKeys,
+              dynamicModels: state.dynamicModels,
+              systemPrompt: PRO_PLAN_SYSTEM_PROMPT,
+              effort: 'low',
+              chatMode,
+              a2uiEnabled: false,
+              messages: llmHistory.slice(-6),
+              tools: [],
+              signal: abortController.signal,
+              onEvent: (event) => {
+                if (event.type === 'text_delta' && planText.length < 5000) planText += event.delta;
+              },
+            });
+          } catch (error) {
+            if (abortController.signal.aborted) throw error;
+          }
+          const draft = parseProTaskPlan(planText);
+          plan = makeProTaskPlan(draft.length >= 2 ? draft : splitProTask(text), 'review');
+          updateAssistantMsg({ proTaskPlan: plan });
+          approvedSteps = await new Promise<string[] | null>((resolve) => {
+            if (abortController.signal.aborted) { resolve(null); return; }
+            const cancel = () => resolvePlan(null);
+            const resolvePlan = (steps: string[] | null) => {
+              abortController.signal.removeEventListener('abort', cancel);
+              resolve(steps);
+            };
+            abortController.signal.addEventListener('abort', cancel, { once: true });
+            set({ pendingProPlan: { messageId: assistantMsgId, resolve: resolvePlan } });
+          });
+          if (!approvedSteps || abortController.signal.aborted) {
+            plan = { ...plan, status: 'cancelled' };
+            const saved = patchConv((conversation) => ({
+              ...conversation,
+              updatedAt: Date.now(),
+              messages: conversation.messages.map((message) => message.id === assistantMsgId
+                ? { ...message, content: 'Plan cancelled.', isStreaming: false, proTaskPlan: finishPlan() }
+                : message),
+            }));
+            if (saved) {
+              await historyDb.saveConversation(saved, scope);
+              scheduleRemoteSync();
+            }
+            return;
+          }
+          plan = makeProTaskPlan(approvedSteps, 'running');
+          updateAssistantMsg({ proTaskPlan: plan });
         }
 
         const result = await runAgentLoop({
@@ -1807,6 +1874,7 @@ export const useHubStore = create<HubState>((set, get) => {
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
           requireWriteApproval: options?.requireWriteApproval,
           retryToolCall: options?.retryToolCall,
+          approvedPlan: approvedSteps ?? undefined,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
           toolPolicies: get().settings.toolPolicies ?? [],
@@ -1826,6 +1894,11 @@ export const useHubStore = create<HubState>((set, get) => {
               }
               pendingReasoning = fullReasoning;
               scheduleDeltaFlush();
+            },
+            onPlanStepChanged: (index, status) => {
+              if (!plan) return;
+              plan = { ...plan, steps: plan.steps.map((step, i) => i === index ? { ...step, status } : step) };
+              updateAssistantMsg({ proTaskPlan: plan });
             },
             onTraceUpdated: (trace) => {
               latestTrace = trace;
@@ -1925,6 +1998,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   modelId: result.usedModelId,
                   runTrace: result.runTrace,
                   a2uiMaxWidgets: 3,
+                  proTaskPlan: finishPlan(result.stoppedByUser),
                   isStreaming: false,
                 }
               : m
@@ -1946,8 +2020,10 @@ export const useHubStore = create<HubState>((set, get) => {
               ? {
                   ...m,
                   isStreaming: false,
-                  error: msg,
+                  content: abortController.signal.aborted ? m.content || '_Generation stopped._' : m.content,
+                  error: abortController.signal.aborted ? undefined : msg,
                   runTrace: latestTrace,
+                  proTaskPlan: finishPlan(true),
                 }
               : m
           ),
@@ -1958,7 +2034,9 @@ export const useHubStore = create<HubState>((set, get) => {
         }
       } finally {
         if (flushTimer !== null) clearTimeout(flushTimer);
-        set({ isRunning: false, abortController: null, pendingApproval: null, liveTrace: undefined });
+        if (get().abortController === abortController) {
+          set({ isRunning: false, abortController: null, pendingApproval: null, pendingProPlan: undefined, liveTrace: undefined });
+        }
       }
     },
   };

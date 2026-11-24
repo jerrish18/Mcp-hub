@@ -90,6 +90,7 @@ import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
 import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
 import { PromptMacrosSheet } from './PromptMacrosSheet';
+import { ProTaskPlanCard } from './ProTaskPlanCard';
 import { RunTraceChip, RunTraceSheet } from './RunTraceSheet';
 import { SavedNotesModal } from './SavedNotesModal';
 import { StudyFlashcardsModal } from './StudyFlashcardsModal';
@@ -225,6 +226,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     savedPrompts,
     isRunning,
     liveTrace,
+    pendingProPlan,
+    resolveProPlan,
     pendingApproval,
     sendMessage,
     stopRun,
@@ -1477,6 +1480,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   )}
                   durationMs={msg.thinkingDurationMs}
                 />
+
+                {msg.proTaskPlan && (
+                  <ProTaskPlanCard plan={msg.proTaskPlan}
+                    onApprove={pendingProPlan?.messageId === msg.id ? resolveProPlan : undefined}
+                    onCancel={() => resolveProPlan(null)} />
+                )}
 
                 {msg.toolCalls && msg.toolCalls.length > 0 && (
                   <div className="space-y-1">

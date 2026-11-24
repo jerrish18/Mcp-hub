@@ -1554,3 +1554,61 @@ test('same-response injection warning precedes a queued always-allowed write', a
   assert.ok(steps.findIndex((step) => step.type === 'injection_warning') < steps.findIndex((step) => step.type === 'approval_wait'));
   assert.equal(steps.find((step) => step.type === 'approval_wait')?.status, 'denied');
 });
+
+test('approved Pro plan passes the edited step to each model turn and shares the run budget', async () => {
+  const collect = async (maxSteps: number) => {
+    const progress: string[] = [];
+    const requests: string[] = [];
+    const result = await runAgentLoop({
+      agent: baseAgent, modelId: 'openai/gpt-oss-120b', effort: 'low', keys: { groq: 'gsk_test_123456' },
+      servers: [virtualServer], history: [{ role: 'user', text: 'Do the work' }], maxSteps,
+      approvedPlan: ['Inspect the source', 'Verify the changes'],
+      confirmBeforeWrite: true, alwaysAllowedTools: [], signal: new AbortController().signal,
+      fetchFn: async (_url, init) => {
+        const { messages } = JSON.parse(String(init?.body));
+        requests.push(messages[messages.length - 1].content);
+        return makeOpenAiSseResponse([{ choices: [{ delta: { content: 'Completed this step.' } }] }]);
+      },
+      callbacks: {
+        onTextDelta: () => {}, onReasoningDelta: () => {}, onToolCallsUpdated: () => {}, onFallbackNotice: () => {},
+        onPlanStepChanged: (index, status) => progress.push(index + ':' + status),
+        requestApproval: async () => 'deny',
+        onAlwaysAllowTool: () => {}, getServerSecrets: async () => ({}), saveServerSecrets: async () => {},
+      },
+    });
+    return { progress, requests, result };
+  };
+  const completed = await collect(2);
+  assert.deepEqual(completed.progress, ['0:running', '0:completed', '1:running', '1:completed']);
+  assert.match(completed.requests[0], /1 of 2\nInspect the source/);
+  assert.match(completed.requests[1], /2 of 2\nVerify the changes/);
+  const limited = await collect(1);
+  assert.deepEqual(limited.progress, ['0:running', '0:completed']);
+  assert.match(limited.result.finalText, /Remaining plan steps were skipped/);
+});
+
+test('Demo runs edited plan instructions and treats saved-notes requests as reads', async () => {
+  const requestedApprovals: string[] = [];
+  const result = await runAgentLoop({
+    agent: baseAgent, modelId: 'demo-sandbox', effort: 'low', keys: {}, servers: [{
+      ...virtualServer,
+      tools: [...virtualServer.tools, { name: 'workspace_search_notes', description: 'List notes',
+        inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }],
+    }],
+    history: [{ role: 'user', text: 'Calculate and list notes' }],
+    approvedPlan: ['Calculate 6 * 8 using the tool', 'List saved notes'],
+    maxSteps: 6, confirmBeforeWrite: true, alwaysAllowedTools: [], signal: new AbortController().signal,
+    callbacks: {
+      onTextDelta: () => {}, onReasoningDelta: () => {}, onToolCallsUpdated: () => {}, onFallbackNotice: () => {},
+      requestApproval: async (approval) => {
+        requestedApprovals.push(approval.toolName);
+        return 'deny';
+      },
+      onAlwaysAllowTool: () => {}, getServerSecrets: async () => ({}), saveServerSecrets: async () => {},
+    },
+  });
+  assert.deepEqual(requestedApprovals, []);
+  assert.deepEqual(result.toolCalls.map((call) => call.toolName), ['calculate_expression', 'workspace_search_notes']);
+  assert.equal(result.toolCalls[0].arguments.expression, '6 * 8');
+  assert.match(result.toolCalls[0].result ?? '', /48/);
+});
