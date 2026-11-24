@@ -5,6 +5,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
+import { buildCanvasPreviewCsp, buildCanvasPreviewPage, standaloneCanvasPreviewCsp } from './src/server/canvasPreview.ts';
+import { CANVAS_PREVIEW_PATH } from './src/utils/canvasPreview.ts';
 import { createAuthService } from './src/server/authRouter.ts';
 import { createControlRouter } from './src/server/controlRouter.ts';
 import { createStudyImagesRouter } from './src/server/studyImagesRouter.ts';
@@ -24,6 +26,17 @@ const isProduction =
 async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
+
+  app.get(CANVAS_PREVIEW_PATH, (req, res) => {
+    const standalone = req.query.standalone === '1';
+    res.set({
+      'Content-Security-Policy': standalone ? standaloneCanvasPreviewCsp() : buildCanvasPreviewCsp(),
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+    });
+    res.type('html').send(buildCanvasPreviewPage(standalone));
+  });
 
   app.use(
     helmet({

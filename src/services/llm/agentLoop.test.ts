@@ -1429,3 +1429,44 @@ test('Phase 3: Always-On A2UI emits valid parseable ```a2ui blocks across xlsx, 
     );
   }
 });
+
+test('a Canvas push requires one-time approval despite an always-allowed write', async () => {
+  let step = 0;
+  let requested = 0;
+  const result = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'openai/gpt-oss-120b',
+    effort: 'medium',
+    keys: { groq: 'gsk_test_123456' },
+    servers: [virtualServer],
+    history: [{ role: 'user', text: 'Push the reviewed revision' }],
+    maxSteps: 3,
+    confirmBeforeWrite: false,
+    requireWriteApproval: true,
+    alwaysAllowedTools: ['srv_virtual:workspace_create_note'],
+    signal: new AbortController().signal,
+    fetchFn: async () => makeOpenAiSseResponse(
+      ++step === 1
+        ? [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'write', function: {
+          name: 'srv_virtual__workspace_create_note',
+          arguments: '{"title":"Canvas test","content":"verified"}',
+        } }] } }] }]
+        : [{ choices: [{ delta: { content: 'Approval handled.' } }] }]
+    ),
+    callbacks: {
+      onTextDelta: () => {},
+      onReasoningDelta: () => {},
+      onToolCallsUpdated: () => {},
+      onFallbackNotice: () => {},
+      requestApproval: async () => {
+        requested++;
+        return 'always_allow';
+      },
+      onAlwaysAllowTool: () => assert.fail('Canvas approval should only apply to this call'),
+      getServerSecrets: async () => ({}),
+      saveServerSecrets: async () => {},
+    },
+  });
+  assert.equal(requested, 1);
+  assert.equal(result.toolCalls[0].status, 'success');
+});

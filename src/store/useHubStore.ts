@@ -368,7 +368,7 @@ export interface HubState {
   setStudyInstructions: (instructions: string) => void;
   sendMessage: (
     text: string,
-    options?: { autoApproveWrites?: boolean; attachments?: ChatAttachment[]; displayText?: string }
+    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
   resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution) => void;
@@ -1799,6 +1799,7 @@ export const useHubStore = create<HubState>((set, get) => {
           history: llmHistory,
           maxSteps: get().settings.maxAgentSteps,
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
+          requireWriteApproval: options?.requireWriteApproval,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
           toolPolicies: get().settings.toolPolicies ?? [],

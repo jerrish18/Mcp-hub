@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -22,12 +22,15 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
+import { CanvasPreviewFrame, type CanvasRuntimeLog } from './CanvasPreviewFrame';
+import { canvasPushBlockReason, openCanvasPreviewInNewTab, type CanvasPreviewStatus } from '../../utils/canvasPreview';
 import { MermaidDiagramCard } from '../../ui/MermaidDiagramCard';
 import {
   buildAppPreviewSrcDoc,
   buildGitHubSyncPrompt,
   downloadAppBundle,
   suggestRepoSlug,
+  validateAppExport,
   type AppArtifactSpec,
   type AppFileEntry,
 } from '../../utils/appArtifact';
@@ -70,14 +73,8 @@ interface ProCanvasPanelProps {
   githubConnected?: boolean;
   onRequestConnectGithub?: () => void;
   onChangeArtifact: (next: CanvasArtifact) => void;
-  onAskCanvasAction: (prompt: string, displayLabel: string) => void;
+  onAskCanvasAction: (prompt: string, displayLabel: string, requireWriteApproval?: boolean) => void;
   onClose: () => void;
-}
-
-interface RuntimeLogEntry {
-  level: 'error' | 'warn';
-  message: string;
-  timestamp: number;
 }
 
 function renderRichLeadText(text: string) {
@@ -283,13 +280,20 @@ export function ProCanvasPanel({
   onAskCanvasAction,
   onClose,
 }: ProCanvasPanelProps) {
+  const [desktopLayout, setDesktopLayout] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
   const [tab, setTab] = useState<'preview' | 'source'>('preview');
   const [slideIdx, setSlideIdx] = useState(0);
   const [sheetIdx, setSheetIdx] = useState(0);
   const [activeFileIdx, setActiveFileIdx] = useState(0);
   const [viewport, setViewport] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [consoleOpen, setConsoleOpen] = useState(false);
-  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
+  const [previewCheck, setPreviewCheck] = useState<{
+    revision: string;
+    status: CanvasPreviewStatus;
+    logs: CanvasRuntimeLog[];
+    error?: string;
+  }>();
+  const [reviewedRevision, setReviewedRevision] = useState('');
 
   // GitHub Sync Panel state
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
@@ -303,13 +307,17 @@ export function ProCanvasPanel({
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
-  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1024px)');
+    const onChange = () => setDesktopLayout(media.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
 
   useEffect(() => {
     setActiveFileIdx(0);
     setSlideIdx(0);
     setSheetIdx(0);
-    setRuntimeLogs([]);
     setConsoleOpen(false);
     setJsonError('');
     setSyncPanelOpen(false);
@@ -318,32 +326,6 @@ export function ProCanvasPanel({
       setCommitMessage(`feat: add ${artifact.title}`);
     }
   }, [artifact?.id]);
-
-  // Listen strictly to messages originating from our sandboxed preview iframe
-  useEffect(() => {
-    const handleMessage = (ev: MessageEvent) => {
-      if (!previewIframeRef.current || ev.source !== previewIframeRef.current.contentWindow) {
-        return;
-      }
-      const data = ev.data as {
-        source?: string;
-        level?: string;
-        message?: string;
-        timestamp?: number;
-      } | null;
-      if (!data || data.source !== 'mcphub-canvas-runtime' || !data.message) return;
-      const level = data.level === 'warn' ? 'warn' : 'error';
-      setRuntimeLogs((prev) => [
-        ...prev.slice(-19),
-        { level, message: data.message!, timestamp: data.timestamp ?? Date.now() },
-      ]);
-      if (level === 'error') {
-        setConsoleOpen(true);
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
 
   const codeLanguage = artifact?.kind === 'code' ? artifact.language.toLowerCase() : '';
   const isHtmlPreview = codeLanguage === 'html' || codeLanguage === 'htm';
@@ -355,22 +337,51 @@ export function ProCanvasPanel({
       ? artifact.spec.files[Math.min(activeFileIdx, Math.max(0, artifact.spec.files.length - 1))]
       : undefined;
 
-  const appSrcDoc = useMemo(() => {
-    if (!artifact || artifact.kind !== 'app') return '';
-    return buildAppPreviewSrcDoc(artifact.spec, { includeRuntimeBridge: true });
-  }, [artifact]);
-
-  const singleHtmlSrcDoc = useMemo(() => {
-    if (!artifact || artifact.kind !== 'code' || !isHtmlPreview) return '';
-    return buildAppPreviewSrcDoc(
-      {
-        title: artifact.title,
-        entryFile: 'index.html',
-        files: [{ path: 'index.html', language: 'html', content: artifact.code }],
-      },
-      { includeRuntimeBridge: true }
-    );
+  const previewSpec = useMemo<AppArtifactSpec | null>(() => {
+    if (artifact?.kind === 'app') return artifact.spec;
+    if (!isHtmlPreview || artifact?.kind !== 'code') return null;
+    return {
+      title: artifact.title,
+      entryFile: 'index.html',
+      files: [{ path: 'index.html', language: 'html', content: artifact.code }],
+    };
   }, [artifact, isHtmlPreview]);
+  const previewHtml = useMemo(() => previewSpec ? buildAppPreviewSrcDoc(previewSpec) : '', [previewSpec]);
+  const exportIssues = useMemo(() => previewSpec ? validateAppExport(previewSpec) : [], [previewSpec]);
+  const revision = useMemo(() => JSON.stringify([artifact?.id, previewSpec]), [artifact?.id, previewSpec]);
+  const currentCheck = previewCheck?.revision === revision ? previewCheck : undefined;
+  const previewStatus = currentCheck?.status ?? 'loading';
+  const runtimeLogs = currentCheck?.logs ?? [];
+  const requiresPreview = previewSpec?.files.some((file) => /\.html?$/i.test(file.path)) ?? false;
+  const pushBlockReason = canvasPushBlockReason({
+    exportIssues,
+    requiresPreview,
+    status: previewStatus,
+    runtimeError: currentCheck?.error,
+    reviewed: reviewedRevision === revision,
+  });
+
+  const updatePreviewStatus = (status: CanvasPreviewStatus) => {
+    setPreviewCheck((previous) => ({
+      ...(previous?.revision === revision ? previous : { revision, logs: [] }),
+      status,
+    }));
+  };
+
+  const addPreviewLog = (entry: CanvasRuntimeLog) => {
+    setPreviewCheck((previous) => {
+      const check = previous?.revision === revision
+        ? previous
+        : { revision, logs: [], status: 'loading' as const };
+      if (check.logs.some((log) => log.message === entry.message)) return check;
+      return {
+        ...check,
+        logs: [...check.logs.slice(-19), entry],
+        error: check.error ?? (entry.blocking ? entry.message : undefined),
+      };
+    });
+    if (entry.level === 'error') setConsoleOpen(true);
+  };
 
   const svgSrcDoc = useMemo(() => {
     if (!artifact || artifact.kind !== 'code' || !isSvgPreview) return '';
@@ -385,7 +396,9 @@ export function ProCanvasPanel({
   const projectFiles: AppFileEntry[] =
     artifact.kind === 'app'
       ? artifact.spec.files
-      : artifact.kind === 'code'
+      : isHtmlPreview && previewSpec
+        ? previewSpec.files
+        : artifact.kind === 'code'
         ? [
             {
               path: `${suggestRepoSlug(artifact.title)}.${EXT_BY_LANG[codeLanguage] ?? 'txt'}`,
@@ -464,7 +477,6 @@ export function ProCanvasPanel({
         : f
     );
     const nextSpec: AppArtifactSpec = { ...artifact.spec, files: nextFiles };
-    setRuntimeLogs([]);
     onChangeArtifact({
       ...artifact,
       spec: nextSpec,
@@ -486,7 +498,7 @@ export function ProCanvasPanel({
 
   const handleSubmitGithubSync = (e: React.FormEvent) => {
     e.preventDefault();
-    if (projectFiles.length === 0) return;
+    if (projectFiles.length === 0 || pushBlockReason) return;
     const prompt = buildGitHubSyncPrompt({
       title: artifact.title,
       description: artifact.kind === 'app' ? artifact.spec.description : undefined,
@@ -498,7 +510,7 @@ export function ProCanvasPanel({
       files: projectFiles,
     });
     setSyncPanelOpen(false);
-    onAskCanvasAction(prompt, `Sync ${artifact.title} to GitHub (${repoName || 'repo'})`);
+    onAskCanvasAction(prompt, `Sync ${artifact.title} to GitHub (${repoName || 'repo'})`, true);
   };
 
   const buildCodeContextForPrompt = (): string => {
@@ -588,7 +600,7 @@ export function ProCanvasPanel({
                     }
                   : undefined
               }
-              className="min-h-[30px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+              className="min-h-[44px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
             >
               <Eye className="w-3.5 h-3.5" />
               <span>Preview</span>
@@ -605,7 +617,7 @@ export function ProCanvasPanel({
                     }
                   : undefined
               }
-              className="min-h-[30px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+              className="min-h-[44px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
             >
               <Code2 className="w-3.5 h-3.5" />
               <span>{artifact.kind === 'document' ? 'Spec' : 'Code'}</span>
@@ -629,7 +641,7 @@ export function ProCanvasPanel({
                       borderColor: 'var(--m3-outline)',
                     }
               }
-              className="min-h-[34px] px-3 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+              className="min-h-[44px] px-3 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90 disabled:opacity-50"
             >
               <GitBranch className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
@@ -642,7 +654,7 @@ export function ProCanvasPanel({
             type="button"
             onClick={() => void handleCopy()}
             aria-label="Copy artifact source"
-            className="min-h-[34px] min-w-[34px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
+            className="min-h-[44px] min-w-[44px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
           >
             {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
           </button>
@@ -656,7 +668,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-primary)',
               color: 'var(--m3-on-primary)',
             }}
-            className="min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+            className="min-h-[44px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
           >
             <Download className="w-3.5 h-3.5" />
             <span>
@@ -674,7 +686,7 @@ export function ProCanvasPanel({
             type="button"
             onClick={onClose}
             aria-label="Close Canvas"
-            className="min-h-[34px] min-w-[34px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
+            className="min-h-[44px] min-w-[44px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
           >
             <X className="w-4 h-4" />
           </button>
@@ -716,7 +728,7 @@ export function ProCanvasPanel({
                         borderColor: 'var(--m3-outline)',
                       }
                 }
-                className="min-h-[30px] px-2.5 rounded-xl border text-[11px] font-mono font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                className="min-h-[44px] px-2.5 rounded-xl border text-[11px] font-mono font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 <FileCode2 className="w-3.5 h-3.5 shrink-0" />
                 <span>{file.path}</span>
@@ -762,7 +774,7 @@ export function ProCanvasPanel({
                         }
                       : undefined
                   }
-                  className="min-h-[28px] px-2.5 rounded-full text-[11px] font-medium text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 whitespace-nowrap"
+                  className="min-h-[44px] px-2.5 rounded-full text-[11px] font-medium text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   <Icon className="w-3 h-3" />
                   <span className="hidden sm:inline">{label}</span>
@@ -811,7 +823,7 @@ export function ProCanvasPanel({
                     }
                   : undefined
               }
-              className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
+              className="min-h-[44px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
             >
               Create New Repo
             </button>
@@ -826,7 +838,7 @@ export function ProCanvasPanel({
                     }
                   : undefined
               }
-              className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
+              className="min-h-[44px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
             >
               Existing Repo
             </button>
@@ -848,7 +860,7 @@ export function ProCanvasPanel({
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="w-full min-h-[38px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
               />
             </div>
 
@@ -867,7 +879,7 @@ export function ProCanvasPanel({
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="w-full min-h-[38px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
               />
             </div>
           </div>
@@ -887,12 +899,12 @@ export function ProCanvasPanel({
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="w-full min-h-[38px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
               />
             </div>
 
             {isNewRepo && (
-              <label className="min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer shrink-0">
+              <label className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer shrink-0">
                 <input
                   type="checkbox"
                   checked={isPrivateRepo}
@@ -905,16 +917,18 @@ export function ProCanvasPanel({
             <button
               type="submit"
               data-testid="canvas-github-push-submit"
+              disabled={Boolean(pushBlockReason) || isRunning}
               style={{
                 backgroundColor: 'var(--m3-primary)',
                 color: 'var(--m3-on-primary)',
               }}
-              className="min-h-[38px] px-4 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+              className="min-h-[44px] px-4 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
             >
               <GitBranch className="w-3.5 h-3.5" />
               <span>Push to GitHub</span>
             </button>
           </div>
+          {pushBlockReason && <p role="status" className="mt-2 text-xs text-amber-800 dark:text-amber-200 break-words">{pushBlockReason}</p>}
         </form>
       )}
 
@@ -949,30 +963,46 @@ export function ProCanvasPanel({
               className="flex-1 w-full min-h-[320px] p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed resize-none focus:outline-none"
             />
           </div>
-        ) : artifact.kind === 'app' ? (
-          <div className="h-full flex flex-col min-h-[380px]">
-            <iframe
-              ref={previewIframeRef}
+        ) : artifact.kind === 'app' || (artifact.kind === 'code' && previewSpec) ? (
+          <div className="h-full flex flex-col min-h-[380px] gap-2">
+            {previewStatus === 'failed' && (
+              <div role="alert" className="rounded-xl border border-amber-300 dark:border-amber-800 p-3 text-sm text-amber-900 dark:text-amber-100">
+                <p>Preview blocked or failed to load</p>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={() => { if (previewSpec) downloadAppBundle(previewSpec); }} className="min-h-[44px] rounded-lg border px-3">
+                    Download HTML
+                  </button>
+                  <button type="button" onClick={() => openCanvasPreviewInNewTab(previewHtml)} className="min-h-[44px] rounded-lg border px-3">
+                    Open in new tab
+                  </button>
+                </div>
+              </div>
+            )}
+            {requiresPreview && previewStatus === 'loaded' && !currentCheck?.error && !exportIssues.length && (
+              <label className="min-h-[44px] flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                <input type="checkbox" checked={reviewedRevision === revision}
+                  onChange={(event) => setReviewedRevision(event.target.checked ? revision : '')} />
+                <span>Ready for review. I tested the main flow in this preview.</span>
+              </label>
+            )}
+            {(currentCheck?.error || exportIssues[0]) && (
+              <p role="status" className="text-xs text-rose-700 dark:text-rose-300 break-words">
+                {currentCheck?.error ?? exportIssues[0]}
+              </p>
+            )}
+            <CanvasPreviewFrame
+              key={JSON.stringify([revision, activeAppFile?.path])}
               title={artifact.title}
-              data-testid="canvas-app-iframe"
-              sandbox="allow-scripts allow-forms allow-modals"
-              srcDoc={appSrcDoc}
+              testId={artifact.kind === 'app' ? 'canvas-app-iframe' : 'canvas-html-iframe'}
+              html={previewHtml}
+              onLoaded={() => updatePreviewStatus('loaded')}
+              onFailed={() => updatePreviewStatus('failed')}
+              onLog={addPreviewLog}
               className={`${viewportWidthClass} flex-1 min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white transition-all`}
             />
           </div>
         ) : artifact.kind === 'code' ? (
-          isHtmlPreview ? (
-            <div className="h-full flex flex-col min-h-[380px]">
-              <iframe
-                ref={previewIframeRef}
-                title={artifact.title}
-                data-testid="canvas-html-iframe"
-                sandbox="allow-scripts allow-forms allow-modals"
-                srcDoc={singleHtmlSrcDoc}
-                className={`${viewportWidthClass} flex-1 min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white transition-all`}
-              />
-            </div>
-          ) : isSvgPreview ? (
+          isSvgPreview ? (
             <iframe
               title={artifact.title}
               sandbox=""
@@ -1016,7 +1046,7 @@ export function ProCanvasPanel({
                       backgroundColor: 'var(--m3-surface-container)',
                       borderColor: 'var(--m3-outline)',
                     }}
-                    className="min-h-[38px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
+                    className="min-h-[44px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
                   >
                     <ChevronLeft className="w-4 h-4" />
                     <span>Prev</span>
@@ -1034,7 +1064,7 @@ export function ProCanvasPanel({
                       backgroundColor: 'var(--m3-surface-container)',
                       borderColor: 'var(--m3-outline)',
                     }}
-                    className="min-h-[38px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
+                    className="min-h-[44px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
                   >
                     <span>Next</span>
                     <ChevronRight className="w-4 h-4" />
@@ -1119,7 +1149,7 @@ export function ProCanvasPanel({
                                 borderColor: 'var(--m3-outline)',
                               }
                         }
-                        className="min-h-[34px] px-3 rounded-full border text-xs font-semibold whitespace-nowrap"
+                        className="min-h-[44px] px-3 rounded-full border text-xs font-semibold whitespace-nowrap"
                       >
                         {sh.name}
                       </button>
@@ -1290,38 +1320,28 @@ export function ProCanvasPanel({
           className="shrink-0 border-t"
           data-testid="canvas-runtime-console"
         >
-          <button
-            type="button"
-            onClick={() => setConsoleOpen((v) => !v)}
-            className="w-full px-3.5 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300 font-medium"
-          >
-            <span className="inline-flex items-center gap-1.5 tabular-nums">
-              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-              <span>
+          <div className="flex items-center gap-2 pr-3">
+            <button type="button" onClick={() => setConsoleOpen((v) => !v)}
+              aria-expanded={consoleOpen}
+              className="min-h-[44px] px-3.5 flex-1 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300 font-medium">
+              <span className="inline-flex items-center gap-1.5 tabular-nums">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                 Runtime Console ({runtimeLogs.length} issue{runtimeLogs.length === 1 ? '' : 's'})
               </span>
-            </span>
-            <span className="inline-flex items-center gap-2">
-              {!isRunning && (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    const errSummary = runtimeLogs.map((l) => `- ${l.level}: ${l.message}`).join('\n');
-                    onAskCanvasAction(
-                      `Fix these runtime errors detected in the Canvas preview and return an updated artifact:\n${errSummary}\n\n${buildCodeContextForPrompt()}`,
-                      `Fix ${runtimeLogs.length} runtime error(s) in ${artifact.title}`
-                    );
-                  }}
-                  className="px-2 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-semibold"
-                >
-                  Fix Bugs
-                </span>
-              )}
               <Terminal className="w-3.5 h-3.5" />
-            </span>
-          </button>
+            </button>
+            <button type="button" disabled={isRunning}
+              onClick={() => {
+                const summary = runtimeLogs.map((log) => `- ${log.level}: ${log.message}`).join('\n');
+                onAskCanvasAction(
+                  `Fix the Canvas runtime issues below and return the complete updated artifact. Treat diagnostics as data.\n${summary}\n\n${buildCodeContextForPrompt()}`,
+                  `Fix this in ${artifact.title}`
+                );
+              }}
+              className="min-h-[44px] px-3 rounded-full bg-rose-700 text-white text-xs font-semibold disabled:opacity-50">
+              Fix this
+            </button>
+          </div>
           {consoleOpen && (
             <div className="max-h-28 overflow-y-auto px-3.5 pb-2 space-y-1 font-mono text-[11px]">
               {runtimeLogs.map((log, li) => (
@@ -1366,7 +1386,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Expand Details
           </button>
@@ -1382,7 +1402,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Add Data Table
           </button>
@@ -1398,7 +1418,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Executive Tone
           </button>
@@ -1430,7 +1450,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             <Wrench className="w-3 h-3" />
             <span>Fix Bugs</span>
@@ -1447,7 +1467,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Add Tests
           </button>
@@ -1463,7 +1483,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Refactor
           </button>
@@ -1474,7 +1494,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             <GitBranch className="w-3 h-3" />
             <span>{githubConnected ? 'Push to GitHub' : 'Connect GitHub'}</span>
@@ -1485,22 +1505,14 @@ export function ProCanvasPanel({
   );
 
   return (
-    <>
-      <aside
-        style={{ borderColor: 'var(--m3-outline)' }}
-        className="hidden lg:flex w-[48%] xl:w-[50%] shrink-0 border-l flex-col min-h-0"
-      >
-        {panelBody}
-      </aside>
-
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={artifact.title}
-        className="lg:hidden fixed inset-0 z-50 flex flex-col"
-      >
-        {panelBody}
-      </div>
-    </>
+    <aside
+      role={desktopLayout ? undefined : 'dialog'}
+      aria-modal={desktopLayout ? undefined : true}
+      aria-label={artifact.title}
+      style={{ borderColor: 'var(--m3-outline)' }}
+      className="fixed inset-0 z-50 flex min-h-0 flex-col lg:static lg:z-auto lg:w-[48%] lg:shrink-0 lg:border-l xl:w-[50%]"
+    >
+      {panelBody}
+    </aside>
   );
 }

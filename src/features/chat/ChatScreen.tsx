@@ -630,13 +630,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     await executeGetMcpPrompt(server, prompt, {});
   };
 
-  const handleQuickPrompt = async (promptText: string, displayText?: string) => {
+  const handleQuickPrompt = async (promptText: string, displayText?: string, requireWriteApproval?: boolean) => {
     if (isRunning) return;
     setStudyPlanOpen(false);
     setSourceMenuOpen(false);
     setMcpPickerMode(null);
     triggerHaptic(settings.hapticsEnabled, 'light');
-    await sendMessage(promptText, displayText ? { displayText } : undefined);
+    await sendMessage(promptText, { displayText, requireWriteApproval });
   };
 
   const handleCycleEffort = () => {
@@ -2311,8 +2311,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         )}
         onRequestConnectGithub={() => setGithubConnectOpen(true)}
         onChangeArtifact={setCanvasArtifact}
-        onAskCanvasAction={(promptText, label) => {
-          void handleQuickPrompt(promptText, label);
+        onAskCanvasAction={(promptText, label, requireWriteApproval) => {
+          void handleQuickPrompt(promptText, label, requireWriteApproval);
         }}
         onClose={() => setCanvasOpen(false)}
       />

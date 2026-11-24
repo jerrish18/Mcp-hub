@@ -645,13 +645,16 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
           path: 'styles.css',
           language: 'css',
           content: `:root {
-  color-scheme: light;
+  color-scheme: light dark;
   --bg: #f8fafc;
   --card: #ffffff;
   --border: #e2e8f0;
   --ink: #0f172a;
   --muted: #64748b;
   --accent: #0b57d0;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0f172a; --card: #1e293b; --border: #475569; --ink: #f8fafc; --muted: #cbd5e1; }
 }
 * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
 body { margin: 0; padding: 20px; background: var(--bg); color: var(--ink); }
@@ -661,12 +664,12 @@ h1 { margin: 0; font-size: 18px; }
 .topbar p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .pill { font-size: 12px; font-weight: 600; background: #eff6ff; color: var(--accent); border: 1px solid #bfdbfe; padding: 5px 10px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 .composer { display: flex; gap: 8px; margin-bottom: 16px; }
-.composer input { flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; }
-.composer button { padding: 10px 16px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; cursor: pointer; }
+.composer input { flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; }
+.composer button { min-height: 44px; padding: 10px 16px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; cursor: pointer; }
 .board { display: flex; flex-direction: column; gap: 8px; }
 .item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; font-size: 13px; }
 .item.done span { text-decoration: line-through; color: var(--muted); }
-.item button { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 5px 10px; font-size: 11px; font-weight: 600; cursor: pointer; }`,
+.item button { min-width: 44px; min-height: 44px; color: var(--ink); border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 5px 10px; font-size: 11px; font-weight: 600; cursor: pointer; }`,
         },
         {
           path: 'app.js',

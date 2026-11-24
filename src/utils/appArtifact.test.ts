@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import assert from 'node:assert/strict';
 import {
   buildAppPreviewSrcDoc,
@@ -6,6 +7,7 @@ import {
   inferFileLanguage,
   parseAppArtifactBlock,
   suggestRepoSlug,
+  validateAppExport,
   type AppArtifactSpec,
 } from './appArtifact';
 
@@ -122,4 +124,51 @@ test('suggestRepoSlug and buildGitHubSyncPrompt generate valid repo slugs and MC
   });
   assert.ok(existingRepoPrompt.includes('octocat/my-app'));
   assert.ok(existingRepoPrompt.includes('feat/ide'));
+});
+
+test('preview shim runs first and provides isolated storage and cookies when access throws', () => {
+  const spec: AppArtifactSpec = {
+    title: 'Storage',
+    files: [{ path: 'index.html', language: 'html', content: '<!doctype html><script>boot()</script>' }],
+  };
+  const html = buildAppPreviewSrcDoc(spec);
+  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
+  assert.match(scripts[0], /installCanvasStorage/);
+  assert.match(scripts[1], /mcphub-canvas-runtime/);
+  assert.match(scripts[1], /securitypolicyviolation/);
+  assert.equal(scripts[2], 'boot()');
+  const blocked = { configurable: true, get: () => { throw new Error('SecurityError'); } };
+  const window = Object.defineProperties({}, { localStorage: blocked, sessionStorage: blocked }) as Window;
+  const document = Object.defineProperty({}, 'cookie', blocked) as Document;
+  runInNewContext(scripts[0], { window, document });
+  window.localStorage.setItem('count', '2');
+  assert.equal(window.localStorage.length, 1);
+  assert.equal(window.localStorage.key(0), 'count');
+  assert.equal(window.localStorage.getItem('count'), '2');
+  assert.equal(window.sessionStorage.getItem('count'), null);
+  window.localStorage.removeItem('count');
+  assert.equal(window.localStorage.length, 0);
+  document.cookie = 'theme=dark; path=/';
+  assert.equal(document.cookie, 'theme=dark');
+  document.cookie = 'theme=; max-age=0';
+  assert.equal(document.cookie, '');
+});
+
+test('export checks honor nested relative paths, case, and traversal', () => {
+  const spec: AppArtifactSpec = {
+    title: 'Export',
+    entryFile: 'site/index.html',
+    files: [
+      { path: 'site/index.html', language: 'html', content: '<link href="./style.css" rel="stylesheet"><script src="../app.js"></script>' },
+      { path: 'site/style.css', language: 'css', content: 'body {}' },
+      { path: 'app.js', language: 'javascript', content: '' },
+    ],
+  };
+  assert.deepEqual(validateAppExport(spec), []);
+  spec.files[1].path = 'site/Style.css';
+  spec.files.push({ path: '../out.js', language: 'javascript', content: '' });
+  assert.deepEqual(validateAppExport(spec), [
+    'Invalid project file path: ../out.js',
+    'Missing local resource: ./style.css (from site/index.html)',
+  ]);
 });
