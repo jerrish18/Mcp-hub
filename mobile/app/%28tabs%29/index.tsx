@@ -273,6 +273,7 @@ export default function MobileChatScreen() {
         keys,
         servers: servers.filter((s) => s.enabled),
         history: buildHistoryFromMessages(historyBeforeSend),
+        a2uiMode: settings.a2uiMode,
         maxSteps: settings.maxAgentSteps,
         confirmBeforeWrite: settings.confirmBeforeWrite,
         alwaysAllowedTools: settings.alwaysAllowedTools,

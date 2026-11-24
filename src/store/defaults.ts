@@ -216,7 +216,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
   accentTheme: 'pixel_blue',
   oledDark: false,
-  a2uiEnabled: true,
+  a2uiMode: 'smart',
   confirmBeforeWrite: true,
   maxAgentSteps: 10,
   toolOutputBudgetChars: 8000,

@@ -1,3 +1,84 @@
+import type { A2uiMode, AppSettings, ChatMode } from '../types';
+
+export const A2UI_MODES: A2uiMode[] = ['off', 'smart', 'always'];
+
+export function readA2uiMode(settings?: Partial<Pick<AppSettings, 'a2uiMode' | 'a2uiEnabled'>>): A2uiMode {
+  if (settings?.a2uiMode && A2UI_MODES.includes(settings.a2uiMode)) return settings.a2uiMode;
+  return settings?.a2uiEnabled === false ? 'off' : 'smart';
+}
+
+const PLAIN_OUTPUT = /\b(?:(?:plain text|(?:raw )?json|code) only|only (?:respond with |provide |return |the )?(?:code|raw json|plain text)|(?:no|without) (?:widgets?|a2ui|markdown|explanations?))\b/i;
+const GREETING = /^(?:hi|hello|hey|good (?:morning|afternoon|evening)|thank(?:s| you))[!.\s]*$/i;
+const WIDGET_INTENT = /\b(?:compare|versus|vs|trade-?offs|checklist|to-?do list|step by step|steps|plan|roadmap|schedule|timeline|milestones|metrics|kpis?|budget|forecast|(?:bar )?chart|table of (?:numbers|results)|rank|form|next steps)\b/i;
+const SUPPORTING_INTENT = /\b(?:plan|process|recap|review|progress|status|options|results)\b/i;
+
+export function requestsPlainA2uiOutput(text: string): boolean {
+  return PLAIN_OUTPUT.test(text) || GREETING.test(text.trim());
+}
+
+export function shouldOfferA2ui(
+  userText: string, chatMode: ChatMode, a2uiMode: A2uiMode, lastAssistantHadA2ui: boolean
+): boolean {
+  if (a2uiMode === 'always') return true;
+  if (a2uiMode === 'off') return false;
+  const text = userText.trim();
+  if (!text || requestsPlainA2uiOutput(text)) return false;
+  if (WIDGET_INTENT.test(text)) return true;
+  return chatMode !== 'general' && !lastAssistantHadA2ui && SUPPORTING_INTENT.test(text);
+}
+
+// Keep other fenced languages intact, including examples containing an A2UI fence.
+export function limitA2uiFences(text: string, allow: boolean): string {
+  if (!/a2ui/i.test(text)) return text;
+  let fence: { marker: string; skip: boolean } | undefined;
+  let seen = false;
+  return text.split('\n').filter((line) => {
+    const trimmed = line.trim();
+    if (fence) {
+      const { skip, marker } = fence;
+      if (trimmed.length >= marker.length && [...trimmed].every((char) => char === marker[0])) {
+        fence = undefined;
+      }
+      return !skip;
+    }
+    const opening = /^(`{3,}|~{3,})\s*([\w+-]*)\s*$/.exec(trimmed);
+    if (!opening) return true;
+    const isWidget = /^(?:artifact-)?a2ui$/i.test(opening[2]);
+    fence = { marker: opening[1], skip: isWidget && (!allow || seen) };
+    if (isWidget) seen = true;
+    return !fence.skip;
+  }).join('\n');
+}
+
+function repairA2uiJson(code: string): string {
+  let repaired = '';
+  let closingQuote = '';
+  let escaped = false;
+  for (let i = 0; i < code.length; i++) {
+    const char = code[i];
+    if (closingQuote) {
+      if (escaped) {
+        repaired += char;
+        escaped = false;
+      } else if (char === '\\') {
+        repaired += char;
+        escaped = true;
+      } else if (char === closingQuote) {
+        repaired += '"';
+        closingQuote = '';
+      } else {
+        repaired += char === '"' ? '\\"' : char;
+      }
+    } else if (char === '"' || char === '“' || char === '”') {
+      closingQuote = char === '“' ? '”' : char;
+      repaired += '"';
+    } else if (char !== ',' || !/^\s*[}\]]/.test(code.slice(i + 1))) {
+      repaired += char;
+    }
+  }
+  return repaired;
+}
+
 export type A2UIWidget =
   | {
       type: 'kpi_grid';
@@ -245,7 +326,7 @@ function parseWidget(raw: unknown): A2UIWidget | null {
   return null;
 }
 
-export function parseA2uiBlock(language: string, code: string): A2UISurfaceSpec | null {
+export function parseA2uiBlock(language: string, code: string, maxWidgets = 8): A2UISurfaceSpec | null {
   const norm = language.trim().toLowerCase();
   if (norm !== 'a2ui' && norm !== 'artifact-a2ui') {
     return null;
@@ -254,7 +335,8 @@ export function parseA2uiBlock(language: string, code: string): A2UISurfaceSpec 
   try {
     parsed = JSON.parse(code);
   } catch {
-    return null;
+    try { parsed = JSON.parse(repairA2uiJson(code)); }
+    catch { return null; }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return null;
@@ -264,7 +346,7 @@ export function parseA2uiBlock(language: string, code: string): A2UISurfaceSpec 
   const widgets = rawWidgets
     .map(parseWidget)
     .filter((w): w is A2UIWidget => Boolean(w))
-    .slice(0, 8);
+    .slice(0, maxWidgets);
   if (widgets.length === 0) return null;
 
   return {
@@ -274,4 +356,16 @@ export function parseA2uiBlock(language: string, code: string): A2UISurfaceSpec 
     themeColor: asTrimmedString(obj.themeColor, 16) || undefined,
     widgets,
   };
+}
+
+export function loadA2uiState<T extends boolean | Record<string, unknown>>(
+  storage: Pick<Storage, 'getItem'>, key: string, fallback: T
+): T {
+  try {
+    const value: unknown = JSON.parse(storage.getItem(key) ?? 'null');
+    if (typeof fallback === 'boolean') return typeof value === 'boolean' ? value as T : fallback;
+    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(fallback as Record<string, unknown>), ...value } as T : fallback;
+  } catch {
+    return fallback;
+  }
 }

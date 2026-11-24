@@ -72,13 +72,18 @@ service cloud.firestore {
           'accentTheme',
           'oledDark',
           'a2uiEnabled',
+          'a2uiMode',
+          'toolOutputBudgetChars',
+          'alwaysAllowedRules',
+          'toolPolicies',
           'confirmBeforeWrite',
           'maxAgentSteps',
           'alwaysAllowedTools',
           'biometricLockEnabled',
           'hapticsEnabled',
           'onboardingCompleted'
-        ]);
+        ])
+        && (!('a2uiMode' in settings) || settings.a2uiMode in ['off', 'smart', 'always']);
     }
 
     function isValidWorkspaceState(data, userId) {
@@ -99,9 +104,11 @@ service cloud.firestore {
           'servers',
           'dynamicModels',
           'dismissedDefaultServerIds',
+          'savedPrompts',
           'createdAt',
           'updatedAt'
         ])
+        && (!('savedPrompts' in data) || (data.savedPrompts is list && data.savedPrompts.size() <= 100))
         && isValidId(data.ownerId)
         && data.ownerId == userId
         && data.ownerId == request.auth.uid

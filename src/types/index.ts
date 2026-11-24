@@ -300,6 +300,7 @@ export interface ChatMessage {
   agentId?: string;
   effort?: EffortLevel;
   runTrace?: RunTrace;
+  a2uiMaxWidgets?: number;
   createdAt: number;
   isStreaming?: boolean;
   error?: string;
@@ -350,11 +351,14 @@ export interface PendingApproval {
 
 export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'monochrome';
 
+export type A2uiMode = 'off' | 'smart' | 'always';
+
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   accentTheme: PixelAccentTheme;
   oledDark: boolean;
-  a2uiEnabled: boolean;
+  a2uiMode: A2uiMode;
+  a2uiEnabled?: boolean;
   confirmBeforeWrite: boolean;
   maxAgentSteps: number;
   toolOutputBudgetChars?: number;

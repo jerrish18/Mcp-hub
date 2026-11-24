@@ -24,7 +24,6 @@ import {
   History,
   Info,
   Layers,
-  LayoutGrid,
   Loader2,
   Maximize2,
   MessageCircle,
@@ -247,7 +246,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     deletePromptMacro,
     runCompareTurn,
     acceptComparedReply,
-    updateSettings,
   } = useHubStore();
 
   const [input, setInput] = useState('');
@@ -1115,39 +1113,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </button>
               )}
 
-              {/* Live A2UI Interactive Widgets Toggle across General / Pro / Study */}
-              <button
-                type="button"
-                data-testid="a2ui-toggle-btn"
-                aria-pressed={settings.a2uiEnabled}
-                aria-label={
-                  settings.a2uiEnabled
-                    ? 'A2UI interactive widgets enabled, tap to disable'
-                    : 'A2UI interactive widgets disabled, tap to enable'
-                }
-                title={settings.a2uiEnabled ? 'Interactive A2UI widgets: On' : 'Interactive A2UI widgets: Off'}
-                onClick={() => {
-                  triggerHaptic(settings.hapticsEnabled, 'light');
-                  updateSettings({ a2uiEnabled: !settings.a2uiEnabled });
-                }}
-                style={
-                  settings.a2uiEnabled
-                    ? {
-                        backgroundColor: 'var(--m3-primary-container)',
-                        color: 'var(--m3-on-primary-container)',
-                        borderColor: 'var(--m3-primary)',
-                      }
-                    : {
-                        backgroundColor: 'var(--m3-surface-container-high)',
-                        borderColor: 'var(--m3-outline)',
-                      }
-                }
-                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-              >
-                <LayoutGrid className="w-3.5 h-3.5" />
-                <span>A2UI</span>
-              </button>
-
               {/* Multi-Model Side-by-Side Compare Toggle */}
               <button
                 type="button"
@@ -1273,7 +1238,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             results={compareResults}
             lastPrompt={compareLastPrompt}
             isRunning={isRunning}
-            a2uiEnabled={settings.a2uiEnabled}
+            a2uiEnabled={settings.a2uiMode !== 'off'}
             onToggleModel={(mId) => {
               setCompareModelIds((prev) => {
                 if (prev.includes(mId)) {
@@ -1541,9 +1506,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     >
                       <MarkdownRenderer
                         content={msg.content}
-                        a2uiEnabled={settings.a2uiEnabled}
-                        onToggleA2ui={() => updateSettings({ a2uiEnabled: !settings.a2uiEnabled })}
-                        onA2UIAction={(promptText, displayLabel) => {
+                        a2uiEnabled={settings.a2uiMode !== 'off'}
+                        a2uiStorageKey={JSON.stringify([authUser?.id ?? 'guest', activeConv?.id, msg.id])}
+                        isStreaming={msg.isStreaming}
+                        a2uiMaxWidgets={msg.a2uiMaxWidgets ?? (msg.isStreaming ? 3 : undefined)}
+                        onA2UIAction={isRunning ? undefined : (promptText, displayLabel) => {
                           void handleQuickPrompt(promptText, displayLabel);
                         }}
                         onOpenInteractiveFlashcards={() =>

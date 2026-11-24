@@ -1470,3 +1470,18 @@ test('a Canvas push requires one-time approval despite an always-allowed write',
   assert.equal(requested, 1);
   assert.equal(result.toolCalls[0].status, 'success');
 });
+
+test('A2UI prompt only sends the full schema on eligible Smart and Always turns', () => {
+  const basePrompt = 'Help the user';
+  const smart = composeEffectiveSystemPrompt({ basePrompt, chatMode: 'study', a2uiMode: 'smart', userText: 'Plan the next steps' });
+  assert.match(smart, /"widgets":/);
+  assert.match(smart, /Prefer a checklist, timeline/);
+  assert.match(smart, /at most three widgets/);
+  const short = composeEffectiveSystemPrompt({ basePrompt, chatMode: 'general', a2uiMode: 'smart', userText: 'hello' });
+  assert.doesNotMatch(short, /"widgets":/);
+  const always = composeEffectiveSystemPrompt({ basePrompt, chatMode: 'professional', a2uiMode: 'always', userText: 'hello' });
+  assert.match(always, /"widgets":/);
+  assert.match(always, /tool results/);
+  const off = composeEffectiveSystemPrompt({ basePrompt, chatMode: 'professional', a2uiMode: 'off', userText: 'compare metrics' });
+  assert.doesNotMatch(off, /"widgets":/);
+});

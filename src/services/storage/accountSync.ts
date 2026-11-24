@@ -1,3 +1,4 @@
+import { readA2uiMode } from '../../utils/a2ui';
 import {
   collection,
   deleteDoc,
@@ -115,6 +116,7 @@ export function mergeWorkspaceSnapshots(
     ...DEFAULT_SETTINGS,
     ...(preferRemote ? local.settings : remote.settings),
     ...(preferRemote ? remote.settings : local.settings),
+    a2uiMode: readA2uiMode((preferRemote ? remote.settings : local.settings) ?? local.settings),
     onboardingCompleted: Boolean(
       local.settings.onboardingCompleted || remote.settings?.onboardingCompleted
     ),
@@ -312,6 +314,7 @@ export async function fetchRemoteWorkspace(
       settings: sanitizeSettingsForSync({
         ...DEFAULT_SETTINGS,
         ...((stateData.settings as Partial<AppSettings>) ?? {}),
+        a2uiMode: readA2uiMode(stateData.settings as Partial<AppSettings> | undefined),
       }),
       agents: stripUndefined(
         (Array.isArray(stateData.agents) ? (stateData.agents as AgentProfile[]) : []).slice(0, 50)

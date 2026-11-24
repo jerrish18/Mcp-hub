@@ -1,3 +1,4 @@
+import { A2UI_MODES, readA2uiMode } from '../../utils/a2ui';
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import {
@@ -838,14 +839,15 @@ export function SettingsScreen() {
                 Interactive A2UI Widgets across chat
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                Render interactive cards, checklists, KPIs, timelines & forms in replies
+                Smart shows a widget when it helps with a comparison, plan, or other task.
               </div>
             </div>
-            <M3Switch
-              checked={settings.a2uiEnabled}
-              ariaLabel="Interactive A2UI Widgets across chat"
-              onChange={() => updateSettings({ a2uiEnabled: !settings.a2uiEnabled })}
-            />
+            <select aria-label="Interactive A2UI mode" data-testid="a2ui-mode"
+              value={settings.a2uiMode}
+              onChange={(event) => updateSettings({ a2uiMode: readA2uiMode({ a2uiMode: event.target.value as typeof settings.a2uiMode }) })}
+              className="min-h-[44px] rounded-xl border px-3 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-white border-slate-300 dark:border-slate-700">
+              {A2UI_MODES.map((mode) => <option key={mode} value={mode}>{mode[0].toUpperCase() + mode.slice(1)}</option>)}
+            </select>
           </div>
 
           <div className="flex items-center justify-between gap-4 min-h-[44px] pt-2 border-t border-slate-200/60 dark:border-slate-800">

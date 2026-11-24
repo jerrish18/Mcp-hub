@@ -156,7 +156,7 @@ export function CompareModelsPane({
                       </p>
                     ) : item.content ? (
                       <div className="text-xs max-h-48 overflow-y-auto pr-1">
-                        <MarkdownRenderer content={item.content} a2uiEnabled={a2uiEnabled} />
+                        <MarkdownRenderer content={item.content} a2uiEnabled={a2uiEnabled} a2uiMaxWidgets={3} isStreaming={item.status === 'running'} />
                       </div>
                     ) : (
                       <p className="text-xs text-slate-400">Waiting for tokens...</p>

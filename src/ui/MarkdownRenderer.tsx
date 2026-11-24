@@ -50,7 +50,9 @@ export type MarkdownCanvasRequest =
 interface MarkdownRendererProps {
   content: string;
   a2uiEnabled?: boolean;
-  onToggleA2ui?: () => void;
+  a2uiStorageKey?: string;
+  isStreaming?: boolean;
+  a2uiMaxWidgets?: number;
   onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
@@ -444,7 +446,9 @@ function CodeBlock({
   code,
   isUnclosed,
   a2uiEnabled = true,
-  onToggleA2ui,
+  a2uiStorageKey,
+  isStreaming,
+  a2uiMaxWidgets,
   onA2UIAction,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
@@ -454,7 +458,9 @@ function CodeBlock({
   code: string;
   isUnclosed?: boolean;
   a2uiEnabled?: boolean;
-  onToggleA2ui?: () => void;
+  a2uiStorageKey?: string;
+  isStreaming?: boolean;
+  a2uiMaxWidgets?: number;
   onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
@@ -465,18 +471,19 @@ function CodeBlock({
   const normalizedLang = language.toLowerCase().trim();
 
   if (normalizedLang === 'a2ui' || normalizedLang === 'artifact-a2ui') {
-    const parsedUi = isUnclosed ? null : parseA2uiBlock(normalizedLang, code);
+    if (!a2uiEnabled) return null;
+    const parsedUi = isUnclosed ? null : parseA2uiBlock(normalizedLang, code, a2uiMaxWidgets);
     if (parsedUi) {
       return (
         <A2UIRenderer
           spec={parsedUi}
-          enabled={a2uiEnabled}
-          onToggleEnabled={onToggleA2ui}
+          key={a2uiStorageKey}
+          storageKey={a2uiStorageKey}
           onAction={onA2UIAction}
         />
       );
     }
-    if (isUnclosed) {
+    if (isUnclosed && isStreaming) {
       return (
         <div
           style={{
@@ -486,10 +493,20 @@ function CodeBlock({
           className="my-3 rounded-2xl border p-4 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300"
         >
           <LayoutGrid style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
-          <span>Rendering interactive A2UI interface…</span>
+          <div role="status" className="flex-1">
+            <span className="sr-only">Loading interactive widget</span>
+            <div aria-hidden="true" className="h-3 w-1/3 rounded bg-slate-200 dark:bg-slate-700 motion-safe:animate-pulse" />
+            <div aria-hidden="true" className="mt-2 h-8 w-full rounded bg-slate-100 dark:bg-slate-800 motion-safe:animate-pulse" />
+          </div>
         </div>
       );
     }
+    return (
+      <details className="rounded-xl border border-slate-300 dark:border-slate-700">
+        <summary className="min-h-[44px] p-3 cursor-pointer text-sm">Invalid widget data</summary>
+        <pre className="overflow-auto p-3 text-xs"><code>{code}</code></pre>
+      </details>
+    );
   }
 
   if (normalizedLang === 'mermaid') {
@@ -793,7 +810,9 @@ function renderBlock(
   block: MarkdownBlock,
   key: number,
   a2uiEnabled?: boolean,
-  onToggleA2ui?: () => void,
+  a2uiStorageKey?: string,
+  isStreaming?: boolean,
+  a2uiMaxWidgets?: number,
   onA2UIAction?: (prompt: string, displayLabel?: string) => void,
   onOpenInteractiveFlashcards?: () => void,
   onOpenInteractiveQuiz?: () => void,
@@ -808,7 +827,9 @@ function renderBlock(
           code={block.code}
           isUnclosed={block.isUnclosed}
           a2uiEnabled={a2uiEnabled}
-          onToggleA2ui={onToggleA2ui}
+          a2uiStorageKey={a2uiStorageKey ? `${a2uiStorageKey}:${key}` : undefined}
+          isStreaming={isStreaming}
+          a2uiMaxWidgets={a2uiMaxWidgets}
           onA2UIAction={onA2UIAction}
           onOpenInteractiveFlashcards={onOpenInteractiveFlashcards}
           onOpenInteractiveQuiz={onOpenInteractiveQuiz}
@@ -977,7 +998,9 @@ function renderBlock(
 export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
   a2uiEnabled = true,
-  onToggleA2ui,
+  a2uiStorageKey,
+  isStreaming,
+  a2uiMaxWidgets,
   onA2UIAction,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
@@ -993,7 +1016,9 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
           block,
           i,
           a2uiEnabled,
-          onToggleA2ui,
+          a2uiStorageKey,
+          isStreaming,
+          a2uiMaxWidgets,
           onA2UIAction,
           onOpenInteractiveFlashcards,
           onOpenInteractiveQuiz,

@@ -1,6 +1,8 @@
+import { limitA2uiFences, requestsPlainA2uiOutput, shouldOfferA2ui } from '../../utils/a2ui';
 import { CANVAS_SCRIPT_ORIGINS } from '../../utils/canvasPreview';
 import { getModelById } from '../../config/models';
 import type {
+  A2uiMode,
   AgentProfile,
   AlwaysAllowDuration,
   AlwaysAllowRule,
@@ -316,6 +318,9 @@ export function composeEffectiveSystemPrompt(params: {
   studyInstructions?: string;
   knowledgeSource?: KnowledgeSourceMode;
   a2uiEnabled?: boolean;
+  a2uiMode?: A2uiMode;
+  userText?: string;
+  lastAssistantHadA2ui?: boolean;
 }): string {
   const parts: string[] = [params.basePrompt.trim()];
 
@@ -360,17 +365,26 @@ export function composeEffectiveSystemPrompt(params: {
     );
   }
 
-  if (params.a2uiEnabled !== false) {
+  const mode = params.a2uiMode ?? (params.a2uiEnabled === false ? 'off' : params.a2uiEnabled === true ? 'always' : 'smart');
+  if (shouldOfferA2ui(params.userText ?? '', params.chatMode, mode, params.lastAssistantHadA2ui ?? false)) {
+    const preferred = params.chatMode === 'professional'
+      ? 'Prefer kpi_grid, timeline, comparison_cards, or actions when they help interpret tool results.'
+      : params.chatMode === 'study'
+        ? 'Prefer a checklist, timeline, or callout recap.'
+        : 'In General mode, use widgets sparingly.';
     parts.push(
       '[A2UI INTERACTIVE WIDGETS ENABLED]\n' +
-        'End EVERY substantive response across General, Pro, and Study modes with a concise, strictly tailored ```a2ui JSON block (interactive kpi_grid, checklist, comparison_cards, form, timeline, bar_chart, callout, or next-action buttons) unless the user explicitly requested raw JSON/code-only output:\n' +
+        (mode === 'always' ? 'Add one tailored widget block after every substantive answer.\n' :
+          'Add a widget only when it adds something prose cannot.\n') +
+        'Compare 2+ options with comparison_cards, show 3+ grounded metrics with kpi_grid or bar_chart, use timeline for a process, checklist for tickable tasks, form for missing parameters, and actions for 1–3 genuinely useful next steps. ' + preferred + '\n' +
+        'Place at most one a2ui fence after the prose, with at most three widgets and valid JSON. Add new information, and source every number from the conversation or tool results. Skip greetings, answers under about 80 words, pure code, errors, apologies, and requests for plain text or code only.\n' +
         '{"title":"...","subtitle":"...","badge":"...","widgets":[{"type":"kpi_grid","items":[{"label","value","delta","hint"}]},{"type":"comparison_cards","cards":[{"title","subtitle","badge","points":[],"actionLabel","actionPrompt"}]},{"type":"checklist","title":"...","items":[{"id","label","note","checked":false}]},{"type":"form","title":"...","submitLabel":"Apply","promptTemplate":"Update with {{fieldId}}","fields":[{"id","label","kind":"text"|"number"|"select"|"toggle","defaultValue":"","options":[]}]},{"type":"timeline","title":"...","steps":[{"title","detail","status":"done"|"active"|"upcoming"}]},{"type":"bar_chart","title":"...","unit":"...","bars":[{"label","value":42,"max":100,"note"}]},{"type":"callout","tone":"info"|"success"|"warning","title":"...","text":"..."},{"type":"actions","buttons":[{"label","prompt","style":"primary"|"secondary"}]}]}\n' +
         'Keep A2UI JSON concise, valid, and strictly tailored to the user’s question.'
     );
   } else {
     parts.push(
       '[A2UI INTERACTIVE WIDGETS DISABLED]\n' +
-        'Do NOT emit ```a2ui fenced blocks in your response. Respond cleanly using standard Markdown prose, tables, or requested document/code blocks only.'
+        'Skip A2UI fences for this reply. Use ordinary Markdown or the requested format.'
     );
   }
 
@@ -422,6 +436,7 @@ export interface RunAgentLoopParams {
   studyInstructions?: string;
   knowledgeSource?: KnowledgeSourceMode;
   a2uiEnabled?: boolean;
+  a2uiMode?: A2uiMode;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
   servers: McpServerConfig[];
@@ -458,7 +473,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     chatMode = 'professional',
     studyInstructions,
     knowledgeSource = 'auto',
-    a2uiEnabled = true,
+    a2uiEnabled: legacyA2uiEnabled,
     keys,
     dynamicModels,
     servers,
@@ -478,12 +493,22 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const built = buildAgentToolCatalog(agent, servers);
   const tools = chatMode === 'professional' ? built.tools : [];
   const lookup = chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
+  const a2uiMode = params.a2uiMode ?? (legacyA2uiEnabled === false ? 'off' : legacyA2uiEnabled === true ? 'always' : 'smart');
+  const latestUser = [...params.history].reverse().find((item) => item.role === 'user');
+  const latestAssistant = [...params.history].reverse().find((item) => item.role === 'assistant');
+  const userText = latestUser?.role === 'user' ? latestUser.text : '';
+  const lastAssistantHadA2ui = latestAssistant?.role === 'assistant' &&
+    /^(?:`{3,}|~{3,})\s*(?:artifact-)?a2ui\s*$/im.test(latestAssistant.text);
+  const a2uiEnabled = !requestsPlainA2uiOutput(userText) &&
+    shouldOfferA2ui(userText, chatMode, a2uiMode, lastAssistantHadA2ui);
   let effectiveSystemPrompt = composeEffectiveSystemPrompt({
     basePrompt: agent.systemPrompt,
     chatMode,
     studyInstructions,
     knowledgeSource,
-    a2uiEnabled,
+    a2uiMode,
+    userText,
+    lastAssistantHadA2ui,
   });
 
   const ragProcessed = applyLocalRagToMessages(params.history);
@@ -573,7 +598,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) {
       return {
-        finalText: accumulatedText,
+        finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
         finalReasoning: accumulatedReasoning,
         toolCalls: allToolRecords,
         citations: Array.from(allCitations.values()),
@@ -617,7 +642,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           if (ev.type === 'text_delta') {
             stepText += ev.delta;
             accumulatedText += ev.delta;
-            callbacks.onTextDelta(accumulatedText);
+            callbacks.onTextDelta(limitA2uiFences(accumulatedText, a2uiEnabled));
           } else if (ev.type === 'reasoning_delta') {
             accumulatedReasoning += ev.delta;
             callbacks.onReasoningDelta(accumulatedReasoning);
@@ -635,7 +660,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     } catch (err) {
       if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
         return {
-          finalText: accumulatedText,
+          finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
           finalReasoning: accumulatedReasoning,
           toolCalls: allToolRecords,
           citations: Array.from(allCitations.values()),
@@ -672,11 +697,11 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             )
             .join('\n\n');
         accumulatedText += imageMarkdown;
-        callbacks.onTextDelta(accumulatedText);
+        callbacks.onTextDelta(limitA2uiFences(accumulatedText, a2uiEnabled));
       }
 
       return {
-        finalText: accumulatedText,
+        finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
         finalReasoning: accumulatedReasoning,
         toolCalls: allToolRecords,
         citations: Array.from(allCitations.values()),
@@ -929,7 +954,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     while (idx < prepared.length) {
       if (signal.aborted) {
         return {
-          finalText: accumulatedText,
+          finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
           finalReasoning: accumulatedReasoning,
           toolCalls: allToolRecords,
           citations: Array.from(allCitations.values()),
@@ -966,7 +991,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         const outcomes = await Promise.all(batch.map((b) => executePreparedCall(b)));
         if (outcomes.some((o) => o.aborted)) {
           return {
-            finalText: accumulatedText,
+            finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
             finalReasoning: accumulatedReasoning,
             toolCalls: allToolRecords,
             citations: Array.from(allCitations.values()),
@@ -1034,7 +1059,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           current.record.durationMs = Date.now() - current.record.startedAt;
           callbacks.onToolCallsUpdated([...allToolRecords]);
           return {
-            finalText: accumulatedText,
+            finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
             finalReasoning: accumulatedReasoning,
             toolCalls: allToolRecords,
             citations: Array.from(allCitations.values()),
@@ -1087,7 +1112,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       const outcome = await executePreparedCall(current);
       if (outcome.aborted) {
         return {
-          finalText: accumulatedText,
+          finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
           finalReasoning: accumulatedReasoning,
           toolCalls: allToolRecords,
           citations: Array.from(allCitations.values()),
@@ -1109,10 +1134,10 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
   const notice = `\n\n_Reached maximum step limit (${maxSteps}). Tap Continue or increase max steps in Settings._`;
   accumulatedText += notice;
-  callbacks.onTextDelta(accumulatedText);
+  callbacks.onTextDelta(limitA2uiFences(accumulatedText, a2uiEnabled));
 
   return {
-    finalText: accumulatedText,
+    finalText: limitA2uiFences(accumulatedText, a2uiEnabled),
     finalReasoning: accumulatedReasoning,
     toolCalls: allToolRecords,
     citations: Array.from(allCitations.values()),

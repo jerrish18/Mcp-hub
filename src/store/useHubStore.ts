@@ -1,3 +1,4 @@
+import { readA2uiMode } from '../utils/a2ui';
 import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
 import { logoutCurrentAccount, type AuthUser } from '../services/auth/appAuth';
@@ -173,7 +174,8 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
         parsed.agents && parsed.agents.length > 0
           ? mergeBuiltInAgents(parsed.agents)
           : BUILT_IN_AGENTS;
-      const mergedSettings: AppSettings = { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) };
+      const mergedSettings: AppSettings = { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}), a2uiMode: readA2uiMode(parsed.settings) };
+      delete mergedSettings.a2uiEnabled;
       const rawRules = mergedSettings.alwaysAllowedRules ?? [];
       const prunedRules = pruneExpiredAlwaysAllowRules(rawRules);
       const expiredKeys = new Set(
@@ -1488,7 +1490,7 @@ export const useHubStore = create<HubState>((set, get) => {
                 chatMode: conv?.chatMode ?? 'professional',
                 studyInstructions: conv?.studyInstructions ?? '',
                 knowledgeSource: conv?.knowledgeSource ?? 'auto',
-                a2uiEnabled: state.settings.a2uiEnabled,
+                a2uiMode: state.settings.a2uiMode,
                 keys: state.providerKeys,
                 dynamicModels: state.dynamicModels,
                 servers: state.servers,
@@ -1592,6 +1594,7 @@ export const useHubStore = create<HubState>((set, get) => {
         agentId: conv.agentId,
         effort: conv.effort,
         runTrace: item.runTrace,
+        a2uiMaxWidgets: 3,
         createdAt: now + 1,
         isStreaming: false,
       };
@@ -1792,7 +1795,7 @@ export const useHubStore = create<HubState>((set, get) => {
           chatMode,
           studyInstructions,
           knowledgeSource,
-          a2uiEnabled: get().settings.a2uiEnabled,
+          a2uiMode: get().settings.a2uiMode,
           keys: get().providerKeys,
           dynamicModels: get().dynamicModels,
           servers: get().servers,
@@ -1913,6 +1916,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   citations: result.citations,
                   modelId: result.usedModelId,
                   runTrace: result.runTrace,
+                  a2uiMaxWidgets: 3,
                   isStreaming: false,
                 }
               : m

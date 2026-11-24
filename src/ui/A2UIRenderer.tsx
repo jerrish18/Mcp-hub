@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -10,21 +10,38 @@ import {
   LayoutGrid,
   Sparkles,
 } from 'lucide-react';
-import type { A2UISurfaceSpec, A2UIWidget } from '../utils/a2ui';
+import { loadA2uiState, type A2UISurfaceSpec, type A2UIWidget } from '../utils/a2ui';
 
 interface A2UIRendererProps {
   spec: A2UISurfaceSpec;
-  enabled: boolean;
-  onToggleEnabled?: () => void;
+  storageKey?: string;
   onAction?: (prompt: string, displayLabel?: string) => void;
+}
+
+function useWidgetState<T extends boolean | Record<string, unknown>>(key: string | undefined, initial: () => T) {
+  const storageKey = key ? `mcphub.a2ui.${key}` : undefined;
+  const [value, setValue] = useState<T>(() => {
+    const fallback = initial();
+    if (!storageKey) return fallback;
+    try { return loadA2uiState(localStorage, storageKey, fallback); }
+    catch { return fallback; }
+  });
+  useEffect(() => {
+    if (!storageKey) return;
+    try { localStorage.setItem(storageKey, JSON.stringify(value)); }
+    catch { /* In-memory state remains available. */ }
+  }, [storageKey, value]);
+  return [value, setValue] as const;
 }
 
 function ChecklistWidget({
   widget,
+  storageKey,
 }: {
   widget: Extract<A2UIWidget, { type: 'checklist' }>;
+  storageKey?: string;
 }) {
-  const [checkedMap, setCheckedMap] = useState<Record<string, boolean>>(() => {
+  const [checkedMap, setCheckedMap] = useWidgetState<Record<string, boolean>>(storageKey, () => {
     const initial: Record<string, boolean> = {};
     for (const it of widget.items) {
       initial[it.id] = Boolean(it.checked);
@@ -58,7 +75,7 @@ function ChecklistWidget({
                 backgroundColor: 'var(--m3-surface)',
                 borderColor: checked ? 'var(--m3-primary)' : 'var(--m3-outline)',
               }}
-              className="w-full min-h-[40px] px-3 py-2 rounded-xl border text-left flex items-start gap-2.5 transition-colors hover:opacity-95"
+              className="w-full min-h-[44px] px-3 py-2 rounded-xl border text-left flex items-start gap-2.5 transition-colors hover:opacity-95"
             >
               <span
                 style={
@@ -99,11 +116,14 @@ function ChecklistWidget({
 function InteractiveFormWidget({
   widget,
   onAction,
+  storageKey,
 }: {
   widget: Extract<A2UIWidget, { type: 'form' }>;
+  storageKey?: string;
   onAction?: (prompt: string, displayLabel?: string) => void;
 }) {
-  const [values, setValues] = useState<Record<string, string | number | boolean>>(() => {
+  const formId = useId();
+  const [values, setValues] = useWidgetState<Record<string, string | number | boolean>>(storageKey, () => {
     const init: Record<string, string | number | boolean> = {};
     for (const f of widget.fields) {
       if (f.defaultValue !== undefined) {
@@ -159,7 +179,7 @@ function InteractiveFormWidget({
                   backgroundColor: 'var(--m3-surface-container)',
                   borderColor: checked ? 'var(--m3-primary)' : 'var(--m3-outline)',
                 }}
-                className="min-h-[40px] px-3 rounded-xl border flex items-center justify-between gap-2 text-xs text-slate-800 dark:text-slate-100"
+                className="min-h-[44px] px-3 rounded-xl border flex items-center justify-between gap-2 text-xs text-slate-800 dark:text-slate-100"
               >
                 <span className="font-medium truncate">{field.label}</span>
                 <span
@@ -181,21 +201,21 @@ function InteractiveFormWidget({
           return (
             <div key={field.id} className="space-y-1">
               <label
-                htmlFor={`a2ui-${field.id}`}
+                htmlFor={`${formId}-${field.id}`}
                 className="block text-[11px] font-medium text-slate-600 dark:text-slate-300"
               >
                 {field.label}
               </label>
               {field.kind === 'select' && field.options?.length ? (
                 <select
-                  id={`a2ui-${field.id}`}
+                  id={`${formId}-${field.id}`}
                   value={String(val ?? '')}
-                  onChange={(e) => setValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                  onChange={(e) => setValues((prev) => ({ ...prev, [field.id]: e.target.value.slice(0, 1000) }))}
                   style={{
                     backgroundColor: 'var(--m3-surface-container)',
                     borderColor: 'var(--m3-outline)',
                   }}
-                  className="w-full min-h-[38px] px-2.5 rounded-xl border text-xs text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] px-2.5 rounded-xl border text-xs text-slate-900 dark:text-white"
                 >
                   {field.options.map((opt) => (
                     <option key={opt} value={opt}>
@@ -205,16 +225,16 @@ function InteractiveFormWidget({
                 </select>
               ) : (
                 <input
-                  id={`a2ui-${field.id}`}
+                  id={`${formId}-${field.id}`}
                   type={field.kind === 'number' ? 'number' : 'text'}
                   value={String(val ?? '')}
                   placeholder={field.placeholder}
-                  onChange={(e) => setValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                  onChange={(e) => setValues((prev) => ({ ...prev, [field.id]: e.target.value.slice(0, 1000) }))}
                   style={{
                     backgroundColor: 'var(--m3-surface-container)',
                     borderColor: 'var(--m3-outline)',
                   }}
-                  className="w-full min-h-[38px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
                 />
               )}
             </div>
@@ -230,7 +250,7 @@ function InteractiveFormWidget({
               backgroundColor: 'var(--m3-primary)',
               color: 'var(--m3-on-primary)',
             }}
-            className="min-h-[36px] px-4 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90"
+            className="min-h-[36px] px-4 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90 disabled:opacity-50"
           >
             <span>{widget.submitLabel || 'Apply & Run'}</span>
             <ArrowRight className="w-3.5 h-3.5" />
@@ -243,10 +263,18 @@ function InteractiveFormWidget({
 
 export const A2UIRenderer = React.memo(function A2UIRenderer({
   spec,
-  enabled,
-  onToggleEnabled,
+  storageKey,
   onAction,
 }: A2UIRendererProps) {
+  const [hidden, setHidden] = useWidgetState<boolean>(storageKey && `${storageKey}:hidden`, () => false);
+  const [used, setUsed] = useWidgetState<Record<string, boolean>>(storageKey && `${storageKey}:used`, () => ({}));
+  const usedRef = useRef(used);
+  const runAction = (id: string, prompt: string, label?: string) => {
+    if (usedRef.current[id] || !onAction) return;
+    usedRef.current = { ...usedRef.current, [id]: true };
+    setUsed(usedRef.current);
+    onAction(prompt, label);
+  };
   const maxBarByWidget = useMemo(() => {
     const map = new Map<number, number>();
     spec.widgets.forEach((w, idx) => {
@@ -261,42 +289,11 @@ export const A2UIRenderer = React.memo(function A2UIRenderer({
     return map;
   }, [spec]);
 
-  if (!enabled) {
-    return (
-      <div
-        data-testid="a2ui-disabled-card"
-        style={{
-          backgroundColor: 'var(--m3-surface-container)',
-          borderColor: 'var(--m3-outline)',
-        }}
-        className="my-3 rounded-2xl border px-4 py-3 flex items-center justify-between gap-3"
-      >
-        <div className="flex items-center gap-2.5 min-w-0">
-          <LayoutGrid className="w-4 h-4 text-slate-400 shrink-0" />
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-slate-700 dark:text-slate-200 truncate">
-              A2UI surface paused: {spec.title}
-            </div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400">
-              Interactive cards are currently disabled across chat.
-            </div>
-          </div>
-        </div>
-        {onToggleEnabled && (
-          <button
-            type="button"
-            onClick={onToggleEnabled}
-            style={{
-              backgroundColor: 'var(--m3-primary-container)',
-              color: 'var(--m3-on-primary-container)',
-            }}
-            className="min-h-[34px] px-3 rounded-full text-xs font-semibold shrink-0 hover:opacity-90"
-          >
-            Enable A2UI
-          </button>
-        )}
-      </div>
-    );
+  if (hidden) {
+    return <button type="button" onClick={() => setHidden(false)}
+      className="min-h-[44px] rounded-lg border border-slate-300 dark:border-slate-700 px-3 text-xs">
+      Show widget
+    </button>;
   }
 
   return (
@@ -332,15 +329,10 @@ export const A2UIRenderer = React.memo(function A2UIRenderer({
           </div>
         </div>
 
-        <span
-          style={{
-            backgroundColor: 'var(--m3-surface)',
-            borderColor: 'var(--m3-outline)',
-          }}
-          className="px-2.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300 shrink-0"
-        >
-          {spec.badge || 'A2UI'}
-        </span>
+        <button type="button" onClick={() => setHidden(true)}
+          className="min-h-[44px] shrink-0 rounded-lg border border-slate-300 px-3 text-xs dark:border-slate-700">
+          Hide widget
+        </button>
       </div>
 
       <div className="space-y-3.5">
@@ -429,12 +421,13 @@ export const A2UIRenderer = React.memo(function A2UIRenderer({
                     {card.actionLabel && card.actionPrompt && onAction && (
                       <button
                         type="button"
-                        onClick={() => onAction(card.actionPrompt!, card.actionLabel)}
+                        disabled={Boolean(used[`${wi}:comparison:${ci}`])}
+                        onClick={() => runAction(`${wi}:comparison:${ci}`, card.actionPrompt!, card.actionLabel)}
                         style={{
                           backgroundColor: 'var(--m3-primary-container)',
                           color: 'var(--m3-on-primary-container)',
                         }}
-                        className="min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1 hover:opacity-90"
+                        className="min-h-[44px] px-3 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1 hover:opacity-90 disabled:opacity-50"
                       >
                         <span>{card.actionLabel}</span>
                         <ArrowRight className="w-3 h-3" />
@@ -447,11 +440,11 @@ export const A2UIRenderer = React.memo(function A2UIRenderer({
           }
 
           if (widget.type === 'checklist') {
-            return <ChecklistWidget key={wi} widget={widget} />;
+            return <ChecklistWidget key={wi} widget={widget} storageKey={storageKey && `${storageKey}:${wi}`} />;
           }
 
           if (widget.type === 'form') {
-            return <InteractiveFormWidget key={wi} widget={widget} onAction={onAction} />;
+            return <InteractiveFormWidget key={wi} widget={widget} storageKey={storageKey && `${storageKey}:${wi}`} onAction={onAction} />;
           }
 
           if (widget.type === 'timeline') {
@@ -576,7 +569,8 @@ export const A2UIRenderer = React.memo(function A2UIRenderer({
                   <button
                     key={bi}
                     type="button"
-                    onClick={() => onAction(btn.prompt, btn.label)}
+                    disabled={Boolean(used[`${wi}:action:${bi}`])}
+                    onClick={() => runAction(`${wi}:action:${bi}`, btn.prompt, btn.label)}
                     style={
                       btn.style === 'primary'
                         ? {
@@ -588,7 +582,7 @@ export const A2UIRenderer = React.memo(function A2UIRenderer({
                             borderColor: 'var(--m3-outline)',
                           }
                     }
-                    className={`min-h-[34px] px-3.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90 ${
+                    className={`min-h-[44px] px-3.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 hover:opacity-90 disabled:opacity-50 ${
                       btn.style === 'primary' ? '' : 'border text-slate-800 dark:text-slate-100'
                     }`}
                   >

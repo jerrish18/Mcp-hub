@@ -1,3 +1,4 @@
+import { readA2uiMode } from '@core/utils/a2ui';
 import { BUILT_IN_AGENTS, DEFAULT_SERVERS, DEFAULT_SETTINGS } from '@core/store/defaults';
 import type { AgentProfile, AppSettings, McpServerConfig } from '@core/types';
 import { sqliteHistoryDb } from './sqliteHistory';
@@ -33,6 +34,8 @@ export async function loadMobilePrefs(): Promise<MobilePrefs> {
   const settings: AppSettings = {
     ...DEFAULT_SETTINGS,
     ...(saved?.settings ?? {}),
+    a2uiMode: readA2uiMode(saved?.settings),
+
   };
 
   const savedServers = Array.isArray(saved?.servers) ? saved.servers : [];

@@ -1,3 +1,4 @@
+import { readA2uiMode } from '../../utils/a2ui';
 import type {
   AgentProfile,
   AppSettings,
@@ -70,7 +71,7 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
     theme: settings.theme,
     accentTheme: settings.accentTheme,
     oledDark: Boolean(settings.oledDark),
-    a2uiEnabled: settings.a2uiEnabled !== false,
+    a2uiMode: readA2uiMode(settings),
     confirmBeforeWrite: Boolean(settings.confirmBeforeWrite),
     maxAgentSteps: Math.max(1, Math.min(25, Number(settings.maxAgentSteps) || 10)),
     toolOutputBudgetChars: budget,
