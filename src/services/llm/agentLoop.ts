@@ -1,3 +1,4 @@
+import { createRunTraceRecorder, tracePreview } from '../../utils/runTrace';
 import { limitA2uiFences, requestsPlainA2uiOutput, shouldOfferA2ui } from '../../utils/a2ui';
 import { CANVAS_SCRIPT_ORIGINS } from '../../utils/canvasPreview';
 import { getModelById } from '../../config/models';
@@ -18,6 +19,7 @@ import type {
   ProviderKeys,
   RunTrace,
   RunTraceFallback,
+  RunTraceStepStatus,
   ServerSecretPayload,
   ToolCallRecord,
   ToolPermissionPolicy,
@@ -415,6 +417,7 @@ export interface AgentLoopCallbacks {
   onTextDelta: (fullText: string) => void;
   onReasoningDelta: (fullReasoning: string) => void;
   onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => void;
+  onTraceUpdated?: (trace: RunTrace) => void;
   onCitationsUpdated?: (citations: GroundingCitation[]) => void;
   onFallbackNotice: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
   requestApproval: (
@@ -426,6 +429,13 @@ export interface AgentLoopCallbacks {
   ) => void;
   getServerSecrets: (serverId: string) => Promise<ServerSecretPayload>;
   saveServerSecrets: (serverId: string, updated: ServerSecretPayload) => Promise<void>;
+}
+
+export interface TraceToolRetry {
+  serverId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  retryCount?: number;
 }
 
 export interface RunAgentLoopParams {
@@ -444,6 +454,7 @@ export interface RunAgentLoopParams {
   maxSteps: number;
   confirmBeforeWrite: boolean;
   requireWriteApproval?: boolean;
+  retryToolCall?: TraceToolRetry;
   alwaysAllowedTools: string[];
   alwaysAllowedRules?: AlwaysAllowRule[];
   toolPolicies?: ToolPolicyRule[];
@@ -487,12 +498,23 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   } = params;
 
   const runStartedAt = Date.now();
+  const providerSecrets = Object.values(keys).filter((value): value is string => typeof value === 'string');
+  let publishTrace = () => {};
+  const trace = createRunTraceRecorder(runStartedAt, () => publishTrace());
+  const retryRequest = params.retryToolCall;
+  const forceWriteApproval = params.requireWriteApproval || Boolean(retryRequest);
   const localAlwaysAllow = new Set(params.alwaysAllowedTools);
   const localAlwaysAllowRules: AlwaysAllowRule[] = [...(params.alwaysAllowedRules ?? [])];
   // Only expose MCP tools in Professional mode; General and Study Session never invoke MCPs
   const built = buildAgentToolCatalog(agent, servers);
   const tools = chatMode === 'professional' ? built.tools : [];
   const lookup = chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
+  const retryDefinition = retryRequest
+    ? [...lookup.values()].find((definition) =>
+      definition.serverId === retryRequest.serverId && definition.originalName === retryRequest.toolName)
+    : undefined;
+  if (retryRequest && !retryDefinition) throw new Error('This tool is no longer available to the active agent.');
+
   const a2uiMode = params.a2uiMode ?? (legacyA2uiEnabled === false ? 'off' : legacyA2uiEnabled === true ? 'always' : 'smart');
   const latestUser = [...params.history].reverse().find((item) => item.role === 'user');
   const latestAssistant = [...params.history].reverse().find((item) => item.role === 'assistant');
@@ -511,7 +533,11 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     lastAssistantHadA2ui,
   });
 
-  const ragProcessed = applyLocalRagToMessages(params.history);
+  const finishRag = !retryRequest && params.history.some((message) =>
+    message.role === 'user' && message.attachments?.some((attachment) => attachment.textContent))
+    ? trace.start({ type: 'rag', label: 'Local retrieval' }) : undefined;
+  const ragProcessed = applyLocalRagToMessages(retryRequest ? [] : params.history);
+  finishRag?.('success', { resultPreview: `${ragProcessed.retrievedCount} chunks retrieved` });
   if (ragProcessed.usedRag) {
     effectiveSystemPrompt +=
       `\n\n[LOCAL RAG INDEX ACTIVE — ${ragProcessed.retrievedCount} top matching chunk(s) retrieved from ${ragProcessed.totalSourceChars} source chars]\n` +
@@ -527,7 +553,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
   // In Study mode, fetch verified educational web images when user asks for pictures/images/diagrams
   let studyImages: StudyWebImage[] = [];
-  if (chatMode === 'study' && knowledgeSource !== 'uploaded') {
+  if (!retryRequest && chatMode === 'study' && knowledgeSource !== 'uploaded') {
     const lastUserItem = [...workingMessages].reverse().find((m) => m.role === 'user');
     const visualQuery =
       lastUserItem?.role === 'user'
@@ -570,7 +596,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   let accumulatedReasoning = '';
   let stepsExecuted = 0;
 
-  const buildTrace = (stoppedByUser: boolean): RunTrace => {
+  const buildTrace = (stoppedByUser: boolean, error?: string): RunTrace => {
     const finishedAt = Date.now();
     return {
       startedAt: runStartedAt,
@@ -578,7 +604,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       durationMs: Math.max(0, finishedAt - runStartedAt),
       primaryModelId: modelId,
       usedModelId: activeModelId,
-      fallbacks,
+      fallbacks: [...fallbacks],
+      steps: trace.snapshot(stoppedByUser),
+      error,
       toolCalls: allToolRecords.map((tc) => ({
         id: tc.id,
         toolName: tc.toolName,
@@ -594,6 +622,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       stoppedByUser,
     };
   };
+
+  publishTrace = () => callbacks.onTraceUpdated?.(buildTrace(false));
+  publishTrace();
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal.aborted) {
@@ -618,8 +649,15 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     stepsExecuted++;
     let stepText = '';
     let proposedCalls: LlmToolCall[] = [];
-
-    try {
+    let finishModel: ReturnType<typeof trace.start> | undefined;
+    let attemptTextStart = 0;
+    let attemptReasonStart = 0;
+    if (retryDefinition && retryRequest) {
+      const [name] = [...lookup.entries()].find(([, definition]) => definition === retryDefinition)!;
+      proposedCalls = [{
+        id: `retry_${runStartedAt}`, name, rawArguments: JSON.stringify(retryRequest.args), parsedArguments: retryRequest.args,
+      }];
+    } else try {
       const { usedModel } = await streamWithRateLimitFallback({
         primaryModelId: activeModelId,
         keys,
@@ -633,10 +671,27 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         tools,
         signal,
         fetchFn,
+        onModelAttemptStart: (model, retryCount, prompt) => {
+          activeModelId = model.id;
+          attemptTextStart = stepText.length;
+          attemptReasonStart = accumulatedReasoning.length;
+          finishModel = trace.start({
+            type: 'model_call', label: model.id, modelId: model.id, retryCount,
+            estimatedInputTokens: estimateMessagesTokens(workingMessages) + Math.ceil(prompt.length / 4),
+          });
+        },
+        onModelAttemptEnd: (status, error) => {
+          finishModel?.(status, {
+            estimatedOutputTokens: Math.ceil((stepText.length - attemptTextStart + accumulatedReasoning.length - attemptReasonStart) / 4),
+            resultPreview: error === undefined ? undefined : tracePreview(safeErrorMessage(error, providerSecrets)),
+          });
+        },
         onModelFallback: (from, to, reason) => {
           activeModelId = to.id;
-          fallbacks.push({ from: from.id, to: to.id, reason, at: Date.now() });
-          callbacks.onFallbackNotice(from, to, reason);
+          const safeReason = tracePreview(reason, providerSecrets);
+          fallbacks.push({ from: from.id, to: to.id, reason: safeReason, at: Date.now() });
+          trace.start({ type: 'fallback', label: `${from.id} → ${to.id}`, modelId: to.id })('warning', { resultPreview: safeReason });
+          callbacks.onFallbackNotice(from, to, safeReason);
         },
         onEvent: (ev) => {
           if (ev.type === 'text_delta') {
@@ -670,6 +725,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           runTrace: buildTrace(true),
         };
       }
+      callbacks.onTraceUpdated?.(buildTrace(false, tracePreview(safeErrorMessage(err, providerSecrets))));
       throw err;
     }
 
@@ -736,12 +792,34 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       record.startedAt = Date.now();
       callbacks.onToolCallsUpdated([...allToolRecords]);
 
+      const finishTool = trace.start({
+        type: 'tool_call',
+        label: `${server.name} · ${def.originalName}`,
+        serverId: server.id,
+        serverName: server.name,
+        toolName: def.originalName,
+        toolCallId: call.id,
+        decision: item.needsApproval ? 'ask' : 'allow',
+        retryCount: retryRequest ? (retryRequest.retryCount ?? 0) + 1 : 0,
+      });
+      let knownSecrets = [...providerSecrets];
+      const rememberSecrets = (payload: ServerSecretPayload) => {
+        knownSecrets = knownSecrets.concat([
+          payload.bearerToken, payload.basicPassword, payload.oauthClientSecret,
+          payload.oauthTokens?.accessToken, payload.oauthTokens?.refreshToken,
+          ...Object.values(payload.customHeaders ?? {}),
+        ].filter((value): value is string => Boolean(value)));
+      };
       try {
         const secrets = await callbacks.getServerSecrets(server.id);
+        rememberSecrets(secrets);
         const toolRes = await callMcpTool({
           server,
           secrets,
-          saveUpdatedSecrets: (updated) => callbacks.saveServerSecrets(server.id, updated),
+          saveUpdatedSecrets: (updated) => {
+            rememberSecrets(updated);
+            return callbacks.saveServerSecrets(server.id, updated);
+          },
           toolName: def.originalName,
           args: record.arguments,
           signal,
@@ -757,6 +835,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         const injectionSignals = detectPromptInjectionSignals(toolRes.text);
         if (injectionSignals.length > 0) {
           taintedInjectionWarning = `Untrusted output from ${server.name}/${def.originalName} triggered prompt-injection guard (${injectionSignals.join(', ')}). Verify all write arguments carefully.`;
+          trace.start({ type: 'injection_warning', label: 'Prompt injection warning', serverId: server.id,
+            serverName: server.name, toolName: def.originalName, toolCallId: call.id })('warning',
+            { resultPreview: tracePreview(taintedInjectionWarning, knownSecrets) });
         }
 
         const budgeted = truncateToolOutput(toolRes.text, toolOutputBudgetChars);
@@ -767,6 +848,12 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         record.structuredContent = toolRes.structuredContent;
         record.isError = toolRes.isError;
         record.status = toolRes.isError ? 'error' : 'success';
+        finishTool(record.status, {
+          originalChars: toolRes.text.length,
+          keptChars: budgeted.text.length,
+          argumentsPreview: tracePreview(record.arguments, knownSecrets),
+          resultPreview: tracePreview(toolRes.text, knownSecrets),
+        });
         callbacks.onToolCallsUpdated([...allToolRecords]);
 
         const wrappedText = wrapUntrustedToolOutput(budgeted.text, def.originalName, server.name);
@@ -786,12 +873,14 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         if (signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
           record.status = 'cancelled';
           record.result = 'Tool execution aborted by user.';
+          finishTool('cancelled');
           record.isError = true;
           callbacks.onToolCallsUpdated([...allToolRecords]);
           return { aborted: true };
         }
 
-        const msg = safeErrorMessage(err);
+        const msg = safeErrorMessage(err, knownSecrets);
+        finishTool('error', { argumentsPreview: tracePreview(record.arguments, knownSecrets), resultPreview: tracePreview(msg, knownSecrets) });
         record.status = 'error';
         record.result = msg;
         record.isError = true;
@@ -814,6 +903,8 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     for (const call of proposedCalls) {
       const def = lookup.get(call.name);
       if (!def) {
+        trace.start({ type: 'tool_call', label: tracePreview(call.name, providerSecrets), toolCallId: call.id })('error',
+          { resultPreview: 'Tool is unavailable' });
         const record: ToolCallRecord = {
           id: call.id,
           toolName: call.name,
@@ -842,6 +933,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       }
 
       if (call.parseError) {
+        trace.start({ type: 'tool_call', label: `${def.serverName} · ${def.originalName}`, serverId: def.serverId,
+          serverName: def.serverName, toolName: def.originalName, toolCallId: call.id })('error',
+          { resultPreview: 'Malformed tool arguments' });
         const record: ToolCallRecord = {
           id: call.id,
           toolName: def.originalName,
@@ -883,6 +977,8 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       });
 
       if (policy === 'deny') {
+        trace.start({ type: 'tool_call', label: `${server.name} · ${def.originalName}`, serverId: server.id,
+          serverName: server.name, toolName: def.originalName, toolCallId: call.id, decision: 'deny' })('denied');
         const record: ToolCallRecord = {
           id: call.id,
           toolName: def.originalName,
@@ -919,7 +1015,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       });
 
       const needsApproval =
-        (taintedInjectionWarning !== null || params.requireWriteApproval) && !def.isReadOnly
+        (taintedInjectionWarning !== null || forceWriteApproval) && !def.isReadOnly
           ? true
           : policy === 'ask'
             ? confirmBeforeWrite && !def.isReadOnly && !alreadyAlwaysAllowed
@@ -1009,7 +1105,12 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
       // Sequential handling for writes or approval-gated calls
       idx++;
+      if (taintedInjectionWarning && !current.def.isReadOnly) current.needsApproval = true;
       if (current.needsApproval) {
+        const finishApproval = trace.start({
+          type: 'approval_wait', label: `Approve ${current.def.originalName}`, serverId: current.server.id,
+          serverName: current.server.name, toolName: current.def.originalName, toolCallId: current.call.id, decision: 'ask',
+        });
         current.record.status = 'pending_approval';
         callbacks.onToolCallsUpdated([...allToolRecords]);
 
@@ -1056,6 +1157,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
         if (signal.aborted) {
           current.record.status = 'cancelled';
+          finishApproval('cancelled');
           current.record.durationMs = Date.now() - current.record.startedAt;
           callbacks.onToolCallsUpdated([...allToolRecords]);
           return {
@@ -1073,7 +1175,14 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         const resolution: ApprovalResolution =
           typeof rawDecision === 'string' ? { decision: rawDecision } : rawDecision;
 
+        const approvalStatus: RunTraceStepStatus = resolution.decision === 'deny' ? 'denied' : 'success';
+        finishApproval(approvalStatus);
         if (resolution.decision === 'deny') {
+          trace.start({
+            type: 'tool_call', label: `${current.server.name} · ${current.def.originalName}`,
+            serverId: current.server.id, serverName: current.server.name, toolName: current.def.originalName,
+            toolCallId: current.call.id, decision: 'ask',
+          })('denied');
           current.record.status = 'denied';
           current.record.result = resolution.denyReason?.trim()
             ? `User denied this write action. User guidance: ${resolution.denyReason.trim()}`
@@ -1095,7 +1204,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           current.record.arguments = resolution.editedArguments;
         }
 
-        if (resolution.decision === 'always_allow' && !taintedInjectionWarning && !params.requireWriteApproval) {
+        if (resolution.decision === 'always_allow' && !taintedInjectionWarning && !forceWriteApproval) {
           localAlwaysAllow.add(current.qualifiedKey);
           localAlwaysAllowRules.push({
             qualifiedKey: current.qualifiedKey,
@@ -1125,6 +1234,20 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       if (outcome.message) {
         workingMessages.push(outcome.message);
       }
+    }
+
+    if (retryRequest) {
+      const record = allToolRecords[0];
+      return {
+        finalText: record?.status === 'success' ? 'Tool call completed.' : 'Tool call did not complete.',
+        finalReasoning: '',
+        toolCalls: allToolRecords,
+        citations: [],
+        usedModelId: activeModelId,
+        stoppedByUser: false,
+        stepsExecuted,
+        runTrace: buildTrace(false),
+      };
     }
 
     if (accumulatedText && !accumulatedText.endsWith('\n')) {

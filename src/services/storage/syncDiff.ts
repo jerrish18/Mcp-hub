@@ -123,6 +123,18 @@ function sanitizeAttachments(attachments?: ChatAttachment[]): ChatAttachment[] |
 }
 
 export function sanitizeConversationForSync(conv: Conversation): Conversation {
+  const recent = (conv.messages ?? []).slice(-150);
+  let traceBudget = 120_000;
+  const syncedMessages = [...recent].reverse().map((message) => {
+    const trace = message.runTrace;
+    if (!trace?.steps?.length) return message;
+    const bytes = new TextEncoder().encode(JSON.stringify(trace.steps)).length;
+    if (traceBudget >= bytes) {
+      traceBudget -= bytes;
+      return message;
+    }
+    return { ...message, runTrace: { ...trace, steps: undefined } };
+  }).reverse();
   return stripUndefined({
     ...conv,
     id: sanitizeDocId(conv.id, 'conv'),
@@ -133,7 +145,7 @@ export function sanitizeConversationForSync(conv: Conversation): Conversation {
     chatMode: conv.chatMode ?? 'professional',
     knowledgeSource: conv.knowledgeSource ?? 'auto',
     studyInstructions: String(conv.studyInstructions ?? '').slice(0, 4000),
-    messages: (conv.messages ?? []).slice(-150).map((m) =>
+    messages: syncedMessages.map((m) =>
       stripUndefined({
         ...m,
         content: String(m.content ?? '').slice(0, 60000),

@@ -115,6 +115,8 @@ export async function streamWithRateLimitFallback(params: {
   tools: StreamCompletionRequest['tools'];
   signal?: AbortSignal;
   onEvent: (event: LlmStreamEvent) => void;
+  onModelAttemptStart?: (model: ModelConfig, index: number, prompt: string) => void;
+  onModelAttemptEnd?: (status: 'success' | 'error' | 'cancelled', error?: unknown) => void;
   onModelFallback?: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
   fetchFn?: typeof fetch;
 }): Promise<{ usedModel: ModelConfig }> {
@@ -130,6 +132,7 @@ export async function streamWithRateLimitFallback(params: {
     const apiKey = getApiKeyForProvider(model.provider, params.keys);
     const augmentedPrompt = buildEffortAugmentedPrompt(params.systemPrompt, params.effort, model);
 
+    params.onModelAttemptStart?.(model, i, augmentedPrompt);
     try {
       await dispatchStreamCompletion({
         model,
@@ -145,8 +148,10 @@ export async function streamWithRateLimitFallback(params: {
         onEvent: params.onEvent,
         fetchFn: params.fetchFn,
       });
+      params.onModelAttemptEnd?.('success');
       return { usedModel: model };
     } catch (err) {
+      params.onModelAttemptEnd?.(params.signal?.aborted ? 'cancelled' : 'error', err);
       const recoverable = err instanceof RateLimitError || err instanceof ModelUnavailableError;
       if (recoverable && i + 1 < candidates.length) {
         const nextModel = candidates[i + 1];

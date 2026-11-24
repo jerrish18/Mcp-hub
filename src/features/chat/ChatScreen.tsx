@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
-  Activity,
   AlertCircle,
   ArrowUp,
   AtSign,
@@ -64,7 +63,6 @@ import type {
   McpPrompt,
   McpResource,
   McpServerConfig,
-  RunTrace,
 } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { MarkdownRenderer, type MarkdownCanvasRequest } from '../../ui/MarkdownRenderer';
@@ -92,7 +90,7 @@ import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
 import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
 import { PromptMacrosSheet } from './PromptMacrosSheet';
-import { RunTraceSheet } from './RunTraceSheet';
+import { RunTraceChip, RunTraceSheet } from './RunTraceSheet';
 import { SavedNotesModal } from './SavedNotesModal';
 import { StudyFlashcardsModal } from './StudyFlashcardsModal';
 import { StudyQuizModal } from './StudyQuizModal';
@@ -226,6 +224,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     savedStudyNotes,
     savedPrompts,
     isRunning,
+    liveTrace,
     pendingApproval,
     sendMessage,
     stopRun,
@@ -280,10 +279,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
   // Phase 4: Run Trace, Saved Macros & Compare Mode
-  const [traceSheetState, setTraceSheetState] = useState<{
-    trace: RunTrace;
-    title: string;
-  } | null>(null);
+  const [traceSheetState, setTraceSheetState] = useState<{ messageId: string; title: string } | null>(null);
   const [macrosSheetOpen, setMacrosSheetOpen] = useState(false);
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelIds, setCompareModelIds] = useState<string[]>(['demo-sandbox', 'gemini-4-hydrogen']);
@@ -342,6 +338,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   const { tools } = buildAgentToolCatalog(activeAgent, servers);
   const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
+  const traceHistory = useMemo(() => (activeConv?.messages ?? []).flatMap((message) => {
+    const trace = liveTrace?.messageId === message.id ? liveTrace.trace : message.runTrace;
+    return trace ? [{ id: message.id, trace }] : [];
+  }).reverse(), [activeConv?.messages, liveTrace]);
+  const selectedTrace = traceHistory.find((entry) => entry.id === traceSheetState?.messageId)?.trace ?? null;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
 
   const availableResources = useMemo(() => {
@@ -1679,24 +1680,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           <span>Share</span>
                         </button>
 
-                        {msg.runTrace && (
-                          <button
-                            type="button"
-                            data-testid="open-run-trace-btn"
-                            onClick={() =>
-                              setTraceSheetState({
-                                trace: msg.runTrace!,
-                                title: `${msgModelShort} · ${activeAgent.name}`,
-                              })
-                            }
-                            aria-label="Inspect execution trace"
-                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
-                          >
-                            <Activity className="w-3.5 h-3.5" />
-                            <span>Trace</span>
-                          </button>
-                        )}
-
                         {(msg.chatMode ?? activeChatMode) === 'professional' && (
                           <div className="ml-1 flex items-center gap-1 flex-wrap">
                             {(
@@ -1802,6 +1785,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       </div>
                     )}
                   </div>
+                )}
+
+                {(msg.runTrace || liveTrace?.messageId === msg.id) && (
+                  <RunTraceChip
+                    trace={liveTrace?.messageId === msg.id ? liveTrace.trace : msg.runTrace!}
+                    onOpen={() => setTraceSheetState({ messageId: msg.id, title: `${msgModelShort} · ${activeAgent.name}` })}
+                  />
                 )}
 
                 {msg.error && (
@@ -2458,8 +2448,15 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
       <RunTraceSheet
         open={Boolean(traceSheetState)}
-        trace={traceSheetState?.trace ?? null}
+        trace={selectedTrace}
         messageTitle={traceSheetState?.title}
+        history={traceHistory}
+        selectedId={traceSheetState?.messageId}
+        onSelect={(messageId) => setTraceSheetState((current) => current ? { ...current, messageId } : null)}
+        onRetry={isRunning ? undefined : (retryToolCall) => {
+          setTraceSheetState(null);
+          void sendMessage(`Retry tool call: ${retryToolCall.toolName}`, { retryToolCall });
+        }}
         onClose={() => setTraceSheetState(null)}
       />
 

@@ -260,6 +260,31 @@ export interface RunTraceToolCall {
   truncated?: boolean;
 }
 
+export type RunTraceStepKind = 'model_call' | 'tool_call' | 'approval_wait' | 'rag' | 'fallback' | 'injection_warning';
+export type RunTraceStepStatus = 'running' | 'success' | 'error' | 'warning' | 'denied' | 'cancelled';
+
+export interface RunTraceStep {
+  id: string;
+  type: RunTraceStepKind;
+  label: string;
+  startOffsetMs: number;
+  durationMs: number;
+  status: RunTraceStepStatus;
+  modelId?: string;
+  estimatedInputTokens?: number;
+  estimatedOutputTokens?: number;
+  serverId?: string;
+  serverName?: string;
+  toolName?: string;
+  toolCallId?: string;
+  decision?: ToolPermissionPolicy;
+  originalChars?: number;
+  keptChars?: number;
+  retryCount?: number;
+  argumentsPreview?: string;
+  resultPreview?: string;
+}
+
 export interface RunTrace {
   startedAt: number;
   finishedAt: number;
@@ -268,6 +293,7 @@ export interface RunTrace {
   usedModelId: string;
   fallbacks: RunTraceFallback[];
   toolCalls: RunTraceToolCall[];
+  steps?: RunTraceStep[];
   estimatedPromptTokens: number;
   stepsExecuted: number;
   ragUsed?: boolean;

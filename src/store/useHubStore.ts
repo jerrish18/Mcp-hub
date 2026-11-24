@@ -1,3 +1,4 @@
+import type { TraceToolRetry } from '../services/llm/agentLoop';
 import { readA2uiMode } from '../utils/a2ui';
 import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
@@ -287,6 +288,7 @@ export interface CompareResultItem {
 }
 
 export interface HubState {
+  liveTrace?: { messageId: string; trace: RunTrace };
   initialized: boolean;
   isLocked: boolean;
   passphraseVaultEnabled: boolean;
@@ -370,7 +372,7 @@ export interface HubState {
   setStudyInstructions: (instructions: string) => void;
   sendMessage: (
     text: string,
-    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; attachments?: ChatAttachment[]; displayText?: string }
+    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
   resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution) => void;
@@ -1642,7 +1644,7 @@ export const useHubStore = create<HubState>((set, get) => {
       const agent = state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0];
       const model = getModelById(conv.modelId, state.dynamicModels);
       const apiKey = getApiKeyForProvider(model.provider, state.providerKeys);
-      const chatMode = conv.chatMode ?? 'professional';
+      const chatMode = options?.retryToolCall ? 'professional' : conv.chatMode ?? 'professional';
       const knowledgeSource = conv.knowledgeSource ?? 'auto';
       const studyInstructions = conv.studyInstructions ?? '';
 
@@ -1695,7 +1697,7 @@ export const useHubStore = create<HubState>((set, get) => {
         return latest;
       };
 
-      if (model.provider !== 'demo' && !apiKey) {
+      if (!options?.retryToolCall && model.provider !== 'demo' && !apiKey) {
         const errorAssistant: ChatMessage = {
           ...assistantMsg,
           isStreaming: false,
@@ -1715,7 +1717,8 @@ export const useHubStore = create<HubState>((set, get) => {
       }
 
       const abortController = new AbortController();
-      set({ isRunning: true, abortController });
+      set({ isRunning: true, abortController, liveTrace: undefined });
+      let latestTrace: RunTrace | undefined;
 
       patchConv((c) => ({
         ...c,
@@ -1803,6 +1806,7 @@ export const useHubStore = create<HubState>((set, get) => {
           maxSteps: get().settings.maxAgentSteps,
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
           requireWriteApproval: options?.requireWriteApproval,
+          retryToolCall: options?.retryToolCall,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
           toolPolicies: get().settings.toolPolicies ?? [],
@@ -1822,6 +1826,10 @@ export const useHubStore = create<HubState>((set, get) => {
               }
               pendingReasoning = fullReasoning;
               scheduleDeltaFlush();
+            },
+            onTraceUpdated: (trace) => {
+              latestTrace = trace;
+              set({ liveTrace: { messageId: assistantMsgId, trace } });
             },
             onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => {
               if (thinkingStartMs !== null && thinkingDurationMs === undefined) {
@@ -1939,6 +1947,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   ...m,
                   isStreaming: false,
                   error: msg,
+                  runTrace: latestTrace,
                 }
               : m
           ),
@@ -1949,7 +1958,7 @@ export const useHubStore = create<HubState>((set, get) => {
         }
       } finally {
         if (flushTimer !== null) clearTimeout(flushTimer);
-        set({ isRunning: false, abortController: null, pendingApproval: null });
+        set({ isRunning: false, abortController: null, pendingApproval: null, liveTrace: undefined });
       }
     },
   };
