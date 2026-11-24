@@ -7,11 +7,12 @@ import {
 
 interface CanvasSession {
   scope: string;
+  conversationId: string;
   artifact: CanvasArtifact;
   history: CanvasHistory;
 }
 
-export function useCanvasWorkspace(scope: string) {
+export function useCanvasWorkspace(scope: string, conversationId: string) {
   const [session, setSession] = useState<CanvasSession>();
   const [storageError, setStorageError] = useState('');
   const current = useRef<CanvasSession | undefined>(undefined);
@@ -41,15 +42,15 @@ export function useCanvasWorkspace(scope: string) {
 
   useEffect(() => {
     openToken.current++;
-    if (current.current && current.current.scope !== scope) {
+    if (current.current && (current.current.scope !== scope || current.current.conversationId !== conversationId)) {
       void save();
       current.current = undefined;
       setSession(undefined);
       setStorageError('');
     }
-  }, [scope, save]);
+  }, [scope, conversationId, save]);
 
-  const visible = session?.scope === scope ? session : undefined;
+  const visible = session?.scope === scope && session.conversationId === conversationId ? session : undefined;
   useEffect(() => {
     if (!visible) return;
     const timer = window.setTimeout(() => void save(), 850);
@@ -86,7 +87,7 @@ export function useCanvasWorkspace(scope: string) {
     const origin = linked ? messageId : sourceId;
     const prior = history ?? { artifactId: id, revisions: [] };
     const updated = appendCanvasRevision(prior, incoming, linked ? 'AI revision' : 'Original', origin);
-    const next = { scope, history: updated, artifact: updated.revisions.at(-1)?.artifact ?? incoming };
+    const next = { scope, conversationId, history: updated, artifact: updated.revisions.at(-1)?.artifact ?? incoming };
     current.current = next;
     setSession(next);
     setStorageError('');

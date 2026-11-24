@@ -1,3 +1,5 @@
+import { ConversationForkSheet } from './ConversationForkSheet';
+import type { ConversationForkRequest } from '../../utils/chatBranches';
 import { compareCommand, composerCommand, matchingPromptMacros, removeComposerCommand } from '../../utils/composerCommands';
 import type { SavedPrompt } from '../../types';
 import { VerificationSheet } from './VerificationSheet';
@@ -59,7 +61,7 @@ import {
 import { getModelById, getShortModelName } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
 import { getMcpPrompt, readMcpResource } from '../../services/mcp/client';
-import { mergeModelCatalog } from '../../services/llm/provider';
+import { getApiKeyForProvider, mergeModelCatalog } from '../../services/llm/provider';
 import { loadServerSecrets, saveServerSecrets } from '../../services/storage/secureStorage';
 import { DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
 import { type CompareResultItem, useHubStore } from '../../store/useHubStore';
@@ -244,6 +246,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     stopRun,
     resolvePendingApproval,
     startNewConversation,
+    forkConversation,
     selectConversation,
     renameConversation,
     deleteConversation,
@@ -288,6 +291,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [vaultOpen, setVaultOpen] = useState(false);
 
   // Pro Canvas & Document Export state
+  const [forkDialog, setForkDialog] = useState<{ mode: 'edit' | 'regenerate'; message: ChatMessage }>();
+  const [forkError, setForkError] = useState('');
   const [verification, setVerification] = useState<{ answer: ChatMessage; question: string }>();
   const [projectsOpen, setProjectsOpen] = useState(false);
   const projectScope = getAccountScope(authUser);
@@ -297,12 +302,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   useEffect(() => {
     setProjectsOpen(false);
     setVerification(undefined);
+    setForkDialog(undefined);
+    setForkError('');
     setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
   }, [projectScope]);
   const projects = projectSnapshot.scope === projectScope ? projectSnapshot.projects : [];
   const refreshProjects = () => setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
   const [canvasOpen, setCanvasOpen] = useState(false);
-  const canvas = useCanvasWorkspace(getAccountScope(authUser));
+  const canvasConversation = activeConversationId ?? conversations[0]?.id ?? 'scratch';
+  const canvas = useCanvasWorkspace(getAccountScope(authUser), canvasConversation);
+  useEffect(() => { setCanvasOpen(false); }, [canvasConversation, projectScope]);
   const canvasArtifact = canvas.artifact;
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
@@ -847,6 +856,21 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     }, 'scratch', 0);
   };
 
+  const createFork = async (request: ConversationForkRequest) => {
+    if (!activeConv) return;
+    setForkError('');
+    await forkConversation(activeConv.id, request);
+    refreshProjects();
+    setForkDialog(undefined);
+    closeCanvas();
+  };
+
+  const forkFrom = (messageId?: string) => {
+    void createFork({ mode: 'fork', messageId }).catch((error) => {
+      setForkError(error instanceof Error ? error.message : 'Could not fork this chat.');
+    });
+  };
+
   const handleQuickExportPro = async (msgId: string, content: string, format: DocFormat) => {
     const key = `${msgId}:${format}`;
     setExportingKey(key);
@@ -1001,6 +1025,18 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               </button>
             </div>
           </div>
+
+          {(Boolean(activeConv?.messages.length) || activeConv?.forkedFrom) && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <button type="button" disabled={isRunning} onClick={() => forkFrom()}
+                className="min-h-[44px] rounded-full border border-slate-200 px-3 dark:border-slate-700">Fork conversation</button>
+              {activeConv?.forkedFrom && conversations.some((conversation) => conversation.id === activeConv.forkedFrom?.conversationId) && (
+                <button type="button" onClick={() => selectConversation(activeConv.forkedFrom!.conversationId)}
+                  className="min-h-[44px] px-2 underline">Open source conversation</button>
+              )}
+              {forkError && <p role="alert" className="text-rose-700 dark:text-rose-300">{forkError}</p>}
+            </div>
+          )}
 
           {/* Row 2: Mode Segmented Tabs (left) + Effort / Study Tools (wraps cleanly on narrow mobile) */}
           <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2">
@@ -1475,6 +1511,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   >
                     {msg.displayContent ?? msg.content}
                   </div>
+                  <button type="button" disabled={isRunning} onClick={() => setForkDialog({ mode: 'edit', message: msg })}
+                    className="min-h-[44px] rounded-full px-3 text-xs text-slate-600 underline dark:text-slate-300">
+                    Edit and rerun
+                  </button>
                 </motion.div>
               );
             }
@@ -1729,6 +1769,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                             Verify
                           </button>
                         )}
+                        {!msg.isStreaming && <>
+                          <button type="button" disabled={isRunning} onClick={() => setForkDialog({ mode: 'regenerate', message: msg })}
+                            className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs dark:border-slate-700">
+                            Regenerate
+                          </button>
+                          <button type="button" disabled={isRunning} onClick={() => forkFrom(msg.id)}
+                            className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs dark:border-slate-700">
+                            Fork here
+                          </button>
+                        </>}
+
 
                         <button
                           type="button"
@@ -2381,6 +2432,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         }}
         onClose={closeCanvas}
       />
+
+      {forkDialog && <ConversationForkSheet key={forkDialog.message.id}
+        mode={forkDialog.mode} message={forkDialog.message}
+        models={allCatalogModels.filter((model) => model.isFreeTier && model.id !== (forkDialog.message.modelId ?? activeModel.id) &&
+          (model.provider === 'demo' || Boolean(getApiKeyForProvider(model.provider, providerKeys))))}
+        onClose={() => setForkDialog(undefined)} onConfirm={createFork} />}
 
       {verification && <VerificationSheet key={verification.answer.id}
         answer={verification.answer} question={verification.question} keys={providerKeys}

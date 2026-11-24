@@ -1,3 +1,4 @@
+import { buildConversationFork, type ConversationForkRequest } from '../utils/chatBranches';
 import { githubApprovalReads } from '../utils/approvalDiff';
 import { attachConversationToProject, listWorkspaceProjects, projectAgent, projectForConversation, projectReferenceContext, projectServers, saveWorkspaceProjects } from '../utils/projects';
 import { publishCanvasRevision, type CanvasPublishRequest, type CanvasPublishResult } from '../services/mcp/canvasPublish';
@@ -14,7 +15,7 @@ import {
   pruneExpiredAlwaysAllowRules,
   runAgentLoop,
 } from '../services/llm/agentLoop';
-import { getApiKeyForProvider, streamWithRateLimitFallback, syncLiveProviderModels } from '../services/llm/provider';
+import { getApiKeyForProvider, mergeModelCatalog, streamWithRateLimitFallback, syncLiveProviderModels } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
 import {
@@ -375,6 +376,7 @@ export interface HubState {
 
   // Conversations & Chat
   startNewConversation: (agentId?: string, modelId?: string, projectId?: string) => void;
+  forkConversation: (sourceId: string, request: ConversationForkRequest) => Promise<void>;
   selectConversation: (conversationId: string) => void;
   renameConversation: (conversationId: string, title: string) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
@@ -386,7 +388,7 @@ export interface HubState {
   setStudyInstructions: (instructions: string) => void;
   sendMessage: (
     text: string,
-    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; canvasEdit?: CanvasEditLink; attachments?: ChatAttachment[]; displayText?: string }
+    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; canvasEdit?: CanvasEditLink; excludeFallbackModelId?: string; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
   loadApprovalBefore: (approval: PendingApproval, args: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, string>>;
@@ -1216,6 +1218,37 @@ export const useHubStore = create<HubState>((set, get) => {
       scheduleRemoteSync();
     },
 
+    forkConversation: async (sourceId, request) => {
+      const state = get();
+      const source = state.conversations.find((item) => item.id === sourceId);
+      if (state.isRunning) throw new Error('Finish the current run before creating a branch.');
+      if (!source) throw new Error('The source chat is unavailable.');
+      const originalModel = source.messages.find((message) => message.id === request.messageId)?.modelId ?? source.modelId;
+      if (request.mode === 'regenerate') {
+        const model = mergeModelCatalog(state.dynamicModels).find((item) => item.id === request.modelId);
+        if (!model || !model.isFreeTier || normalizeModelId(model.id) === normalizeModelId(originalModel) ||
+          (model.provider !== 'demo' && !getApiKeyForProvider(model.provider, state.providerKeys))) {
+          throw new Error('Choose a different configured free-tier model.');
+        }
+      }
+      const scope = activeScope();
+      const id = 'conv_' + (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`);
+      const { conversation, replay } = buildConversationFork(source, request, id);
+      const projects = listWorkspaceProjects(scope);
+      const project = projectForConversation(projects, source.id);
+      if (project) saveWorkspaceProjects(scope, attachConversationToProject(projects, conversation.id, project.id));
+      set((current) => ({ conversations: [conversation, ...current.conversations], activeConversationId: conversation.id }));
+      await historyDb.saveConversation(conversation, scope);
+      if (activeScope() !== scope) return;
+      scheduleRemoteSync();
+      if (replay && get().activeConversationId === conversation.id) {
+        void get().sendMessage(replay.content, {
+          attachments: replay.attachments, displayText: replay.displayContent, requireWriteApproval: true,
+          excludeFallbackModelId: request.mode === 'regenerate' ? originalModel : undefined,
+        });
+      }
+    },
+
     selectConversation: (conversationId) => {
       set({ activeConversationId: conversationId });
     },
@@ -1817,7 +1850,7 @@ export const useHubStore = create<HubState>((set, get) => {
 
       const titleSource = displayLabel || text;
       const isFirstUserMsg = conv.messages.filter((m) => m.role === 'user').length === 0;
-      const derivedTitle = isFirstUserMsg
+      const derivedTitle = isFirstUserMsg && !conv.forkedFrom
         ? titleSource.length > 42
           ? `${titleSource.slice(0, 42)}…`
           : titleSource
@@ -1997,6 +2030,7 @@ export const useHubStore = create<HubState>((set, get) => {
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
           requireWriteApproval: options?.requireWriteApproval,
           retryToolCall: options?.retryToolCall,
+          excludeFallbackModelId: options?.excludeFallbackModelId,
           approvedPlan: approvedSteps ?? undefined,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],

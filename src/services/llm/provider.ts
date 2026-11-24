@@ -1,4 +1,4 @@
-import { formatReadableModelSlug, FREE_MODELS, getModelById, PROVIDER_INFO } from '../../config/models';
+import { formatReadableModelSlug, FREE_MODELS, getModelById, PROVIDER_INFO, normalizeModelId } from '../../config/models';
 import type { EffortLevel, ModelConfig, ProviderId, ProviderKeys } from '../../types';
 import { streamDemoCompletion } from './demoProvider';
 import { streamGeminiCompletion } from './gemini';
@@ -104,6 +104,7 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
 
 export async function streamWithRateLimitFallback(params: {
   primaryModelId: string;
+  excludeFallbackModelId?: string;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
   systemPrompt: string;
@@ -124,7 +125,7 @@ export async function streamWithRateLimitFallback(params: {
     params.primaryModelId,
     params.keys,
     params.dynamicModels
-  );
+  ).filter((model, index) => index === 0 || normalizeModelId(model.id) !== normalizeModelId(params.excludeFallbackModelId ?? ''));
   let lastError: unknown;
 
   for (let i = 0; i < candidates.length; i++) {

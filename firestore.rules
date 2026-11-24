@@ -157,11 +157,18 @@ service cloud.firestore {
           'knowledgeSource',
           'studyInstructions',
           'messages',
+          'forkedFrom',
           'clientCreatedAt',
           'clientUpdatedAt',
           'createdAt',
           'updatedAt'
         ])
+        && (!('forkedFrom' in data) || (
+          data.forkedFrom is map
+          && data.forkedFrom.keys().hasOnly(['conversationId', 'messageId'])
+          && isValidId(data.forkedFrom.conversationId)
+          && (!('messageId' in data.forkedFrom) || isValidId(data.forkedFrom.messageId))
+        ))
         && isValidId(data.ownerId)
         && data.ownerId == userId
         && data.ownerId == request.auth.uid
@@ -330,6 +337,7 @@ service cloud.firestore {
           'knowledgeSource',
           'studyInstructions',
           'messages',
+          'forkedFrom',
           'clientUpdatedAt',
           'updatedAt'
         ])

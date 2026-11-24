@@ -458,6 +458,7 @@ export interface RunAgentLoopParams {
   requireWriteApproval?: boolean;
   retryToolCall?: TraceToolRetry;
   approvedPlan?: readonly string[];
+  excludeFallbackModelId?: string;
   alwaysAllowedTools: string[];
   alwaysAllowedRules?: AlwaysAllowRule[];
   toolPolicies?: ToolPolicyRule[];
@@ -679,6 +680,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     } else try {
       const { usedModel } = await streamWithRateLimitFallback({
         primaryModelId: activeModelId,
+        excludeFallbackModelId: params.excludeFallbackModelId,
         keys,
         dynamicModels,
         systemPrompt: effectiveSystemPrompt,

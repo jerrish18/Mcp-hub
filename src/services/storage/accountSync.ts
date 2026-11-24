@@ -285,6 +285,12 @@ export async function fetchRemoteWorkspace(
       chatMode: (data.chatMode ?? 'professional') as Conversation['chatMode'],
       knowledgeSource: (data.knowledgeSource ?? 'auto') as Conversation['knowledgeSource'],
       studyInstructions: String(data.studyInstructions ?? ''),
+      ...(typeof data.forkedFrom?.conversationId === 'string' ? {
+        forkedFrom: {
+          conversationId: data.forkedFrom.conversationId,
+          messageId: typeof data.forkedFrom.messageId === 'string' ? data.forkedFrom.messageId : undefined,
+        },
+      } : {}),
       messages: Array.isArray(data.messages) ? (data.messages as Conversation['messages']) : [],
       createdAt: Number(data.clientCreatedAt ?? Date.now()),
       updatedAt: Number(data.clientUpdatedAt ?? Date.now()),
@@ -457,6 +463,7 @@ export async function pushRemoteWorkspace(
       chatMode: conv.chatMode,
       knowledgeSource: conv.knowledgeSource,
       studyInstructions: conv.studyInstructions,
+      ...(conv.forkedFrom ? { forkedFrom: conv.forkedFrom } : {}),
       messages: conv.messages,
       clientUpdatedAt: conv.updatedAt || Date.now(),
       updatedAt: serverTimestamp(),

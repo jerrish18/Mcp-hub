@@ -337,6 +337,7 @@ export interface ChatMessage {
 }
 
 export interface Conversation {
+  forkedFrom?: { conversationId: string; messageId?: string };
   id: string;
   title: string;
   agentId: string;
