@@ -1,3 +1,6 @@
+import { getAccountScope } from '../../services/storage/accountSync';
+import { useCanvasWorkspace } from './useCanvasWorkspace';
+import type { CanvasEditLink } from '../../utils/canvasArtifacts';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
@@ -88,7 +91,7 @@ import { AgentSwitcherSheet } from './AgentSwitcherSheet';
 import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
-import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
+import { ProCanvasPanel } from './ProCanvasPanel';
 import { PromptMacrosSheet } from './PromptMacrosSheet';
 import { ProTaskPlanCard } from './ProTaskPlanCard';
 import { RunTraceChip, RunTraceSheet } from './RunTraceSheet';
@@ -277,7 +280,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Pro Canvas & Document Export state
   const [canvasOpen, setCanvasOpen] = useState(false);
-  const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
+  const canvas = useCanvasWorkspace(getAccountScope(authUser));
+  const canvasArtifact = canvas.artifact;
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
@@ -750,50 +754,33 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
   };
 
-  const handleOpenInCanvas = (payload: MarkdownCanvasRequest) => {
-    const id = `canvas_${Date.now()}`;
-    if (payload.kind === 'code') {
-      setCanvasArtifact({
-        kind: 'code',
-        id,
-        title: payload.title,
-        language: payload.language,
-        code: payload.code,
-      });
-    } else if (payload.kind === 'app') {
-      setCanvasArtifact({
-        kind: 'app',
-        id,
-        title: payload.title,
-        spec: payload.spec,
-        rawJson: payload.rawJson,
-      });
-    } else {
-      setCanvasArtifact({
-        kind: 'document',
-        id,
-        title: payload.title,
-        spec: payload.spec,
-        rawJson: payload.rawJson,
-      });
+  const handleOpenInCanvas = async (payload: MarkdownCanvasRequest, messageId: string, block: number, link?: CanvasEditLink) => {
+    if (await canvas.open(payload, activeConv?.id ?? 'scratch', messageId, block, link)) {
+      setCanvasOpen(true);
+      triggerHaptic(settings.hapticsEnabled, 'light');
     }
-    setCanvasOpen(true);
-    triggerHaptic(settings.hapticsEnabled, 'light');
+  };
+
+  const closeCanvas = () => {
+    void canvas.save();
+    setCanvasOpen(false);
   };
 
   const handleToggleHeaderCanvas = () => {
-    if (canvasArtifact) {
-      setCanvasOpen((v) => !v);
+    if (canvasOpen) {
+      closeCanvas();
       return;
     }
-    setCanvasArtifact({
+    if (canvasArtifact) {
+      setCanvasOpen(true);
+      return;
+    }
+    void handleOpenInCanvas({
       kind: 'code',
-      id: `canvas_${Date.now()}`,
       title: 'Pro Canvas Scratchpad',
       language: 'html',
       code: `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <style>\n    body { font-family: system-ui, sans-serif; padding: 24px; background: #f8fafc; color: #0f172a; }\n    .card { max-width: 480px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px; }\n  </style>\n</head>\n<body>\n  <div class="card">\n    <h2>Interactive Pro Canvas</h2>\n    <p>Ask the Pro agent to build HTML widgets, SVG diagrams, PPTX decks, XLSX workbooks, or PDF/DOCX reports.</p>\n  </div>\n</body>\n</html>`,
-    });
-    setCanvasOpen(true);
+    }, 'scratch', 0);
   };
 
   const handleQuickExportPro = async (msgId: string, content: string, format: DocFormat) => {
@@ -1529,7 +1516,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         onOpenInteractiveQuiz={() =>
                           openQuizFromText(activeConv?.title || 'Practice Quiz', msg.content)
                         }
-                        onOpenInCanvas={handleOpenInCanvas}
+                        onOpenInCanvas={(payload, block) => void handleOpenInCanvas(payload, msg.id, block, msg.canvasEdit)}
                       />
 
                       {msg.citations && msg.citations.length > 0 && (
@@ -2276,11 +2263,24 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             'connected'
         )}
         onRequestConnectGithub={() => setGithubConnectOpen(true)}
-        onChangeArtifact={setCanvasArtifact}
+        onChangeArtifact={canvas.change}
+        revisions={canvas.revisions}
+        historyError={canvas.storageError}
+        onSaveRevision={() => void canvas.save('Saved version')}
+        onRestoreRevision={canvas.restore}
+        onAskCanvasEdit={(prompt, label) => {
+          if (!canvasArtifact || isRunning) return;
+          closeCanvas();
+          void sendMessage(prompt, { displayText: label, canvasEdit: {
+            artifactId: canvasArtifact.id,
+            kind: canvasArtifact.kind,
+            format: canvasArtifact.kind === 'document' ? canvasArtifact.spec.format : undefined,
+          } });
+        }}
         onAskCanvasAction={(promptText, label, requireWriteApproval) => {
           void handleQuickPrompt(promptText, label, requireWriteApproval);
         }}
-        onClose={() => setCanvasOpen(false)}
+        onClose={closeCanvas}
       />
 
       <QuickConnectSheet

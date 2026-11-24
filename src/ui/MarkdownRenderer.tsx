@@ -42,10 +42,7 @@ import { KatexMath } from './KatexMath';
 import { MermaidDiagramCard } from './MermaidDiagramCard';
 import { StudyImageCard } from './StudyImageCard';
 
-export type MarkdownCanvasRequest =
-  | { kind: 'code'; title: string; language: string; code: string }
-  | { kind: 'document'; title: string; spec: DocumentSpec; rawJson: string }
-  | { kind: 'app'; title: string; spec: AppArtifactSpec; rawJson: string };
+export type MarkdownCanvasRequest = import('../utils/canvasArtifacts').CanvasSource;
 
 interface MarkdownRendererProps {
   content: string;
@@ -56,7 +53,7 @@ interface MarkdownRendererProps {
   onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
-  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest, block: number) => void;
 }
 
 const CANVAS_CODE_LANGS = new Set([
@@ -816,7 +813,7 @@ function renderBlock(
   onA2UIAction?: (prompt: string, displayLabel?: string) => void,
   onOpenInteractiveFlashcards?: () => void,
   onOpenInteractiveQuiz?: () => void,
-  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest, block: number) => void
 ): React.ReactNode {
   switch (block.type) {
     case 'code':
@@ -833,7 +830,7 @@ function renderBlock(
           onA2UIAction={onA2UIAction}
           onOpenInteractiveFlashcards={onOpenInteractiveFlashcards}
           onOpenInteractiveQuiz={onOpenInteractiveQuiz}
-          onOpenInCanvas={onOpenInCanvas}
+          onOpenInCanvas={onOpenInCanvas ? (payload) => onOpenInCanvas(payload, key) : undefined}
         />
       );
 

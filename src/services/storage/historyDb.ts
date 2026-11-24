@@ -1,7 +1,9 @@
+import { mergeCanvasHistories, type CanvasHistory } from '../../utils/canvasArtifacts';
 import type { Conversation } from '../../types';
 
 const DB_NAME = 'mcphub_history_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+const CANVAS_STORE_NAME = 'canvas_history';
 const LEGACY_STORE_NAME = 'conversations';
 const SCOPED_STORE_NAME = 'scoped_conversations';
 const LEGACY_LS_FALLBACK_KEY = 'mcphub_conversations_v1';
@@ -28,6 +30,7 @@ function openDatabase(): Promise<IDBDatabase | null> {
       const req = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
+        if (!db.objectStoreNames.contains(CANVAS_STORE_NAME)) db.createObjectStore(CANVAS_STORE_NAME);
         if (!db.objectStoreNames.contains(LEGACY_STORE_NAME)) {
           const legacyStore = db.createObjectStore(LEGACY_STORE_NAME, { keyPath: 'id' });
           legacyStore.createIndex('updatedAt', 'updatedAt', { unique: false });
@@ -107,6 +110,49 @@ function sanitizeConversation(conv: Conversation): Conversation {
 }
 
 export const historyDb = {
+  async readCanvas(scope: string, artifactId: string): Promise<CanvasHistory | undefined> {
+    const db = await openDatabase();
+    const key = JSON.stringify([scope, artifactId]);
+    if (!db) {
+      try { return JSON.parse(localStorage.getItem('mcphub_canvas:' + key) ?? 'null') ?? undefined; }
+      catch { return undefined; }
+    }
+    return new Promise((resolve) => {
+      try {
+        const req = db.transaction(CANVAS_STORE_NAME).objectStore(CANVAS_STORE_NAME).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  },
+
+  async saveCanvas(scope: string, history: CanvasHistory): Promise<boolean> {
+    const db = await openDatabase();
+    const key = JSON.stringify([scope, history.artifactId]);
+    if (!db) {
+      try {
+        const storageKey = 'mcphub_canvas:' + key;
+        const previous = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as CanvasHistory | null;
+        localStorage.setItem(storageKey, JSON.stringify(mergeCanvasHistories(previous ?? undefined, history)));
+        return true;
+      } catch { return false; }
+    }
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(CANVAS_STORE_NAME, 'readwrite');
+        const store = tx.objectStore(CANVAS_STORE_NAME);
+        const request = store.get(key);
+        request.onsuccess = () => store.put(mergeCanvasHistories(request.result, history), key);
+        tx.oncomplete = () => resolve(true);
+        tx.onabort = tx.onerror = () => resolve(false);
+      } catch {
+        resolve(false);
+      }
+    });
+  },
+
   async listConversations(scope = 'guest'): Promise<Conversation[]> {
     const db = await openDatabase();
     if (!db) {

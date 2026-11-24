@@ -1,3 +1,4 @@
+import type { CanvasEditLink } from '../utils/canvasArtifacts';
 import type { ProTaskPlan } from '../utils/proTaskPlan';
 import { z } from 'zod';
 
@@ -329,6 +330,7 @@ export interface ChatMessage {
   runTrace?: RunTrace;
   a2uiMaxWidgets?: number;
   proTaskPlan?: ProTaskPlan;
+  canvasEdit?: CanvasEditLink;
   createdAt: number;
   isStreaming?: boolean;
   error?: string;

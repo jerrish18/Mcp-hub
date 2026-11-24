@@ -1,3 +1,4 @@
+import type { CanvasEditLink } from '../utils/canvasArtifacts';
 import type { TraceToolRetry } from '../services/llm/agentLoop';
 import { readA2uiMode } from '../utils/a2ui';
 import { create } from 'zustand';
@@ -379,7 +380,7 @@ export interface HubState {
   setStudyInstructions: (instructions: string) => void;
   sendMessage: (
     text: string,
-    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; attachments?: ChatAttachment[]; displayText?: string }
+    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; canvasEdit?: CanvasEditLink; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
   resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution) => void;
@@ -1690,6 +1691,7 @@ export const useHubStore = create<HubState>((set, get) => {
         effort: conv.effort,
         createdAt: Date.now(),
         isStreaming: true,
+        canvasEdit: options?.canvasEdit,
       };
 
       const titleSource = displayLabel || text;
@@ -1805,7 +1807,7 @@ export const useHubStore = create<HubState>((set, get) => {
 
       try {
         if (chatMode === 'professional' && !options?.retryToolCall && !options?.requireWriteApproval &&
-            !options?.autoApproveWrites && shouldPlanProTask(text)) {
+            !options?.autoApproveWrites && !options?.canvasEdit && shouldPlanProTask(text)) {
           let planText = '';
           try {
             await streamWithRateLimitFallback({
