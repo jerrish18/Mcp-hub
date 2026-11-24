@@ -377,6 +377,7 @@ export interface PendingApproval {
   isDestructive?: boolean;
   injectionWarning?: string;
   lockedArguments?: boolean;
+  agentId?: string;
   resolve: (result: ApprovalDecision | ApprovalResolution) => void;
 }
 

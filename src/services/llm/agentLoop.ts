@@ -1172,6 +1172,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
               description: current.def.description,
               isDestructive: current.def.isDestructive,
               injectionWarning: taintedInjectionWarning ?? undefined,
+              agentId: agent.id,
             })
             .then((ans) => {
               signal.removeEventListener('abort', onAbort);

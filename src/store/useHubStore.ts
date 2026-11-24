@@ -1,3 +1,4 @@
+import { githubApprovalReads } from '../utils/approvalDiff';
 import { attachConversationToProject, listWorkspaceProjects, projectAgent, projectForConversation, projectReferenceContext, projectServers, saveWorkspaceProjects } from '../utils/projects';
 import { publishCanvasRevision, type CanvasPublishRequest, type CanvasPublishResult } from '../services/mcp/canvasPublish';
 import type { CanvasEditLink } from '../utils/canvasArtifacts';
@@ -388,6 +389,7 @@ export interface HubState {
     options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; canvasEdit?: CanvasEditLink; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
+  loadApprovalBefore: (approval: PendingApproval, args: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, string>>;
   publishCanvas: (request: CanvasPublishRequest) => Promise<CanvasPublishResult>;
   resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution, expectedId?: string) => void;
   enableDemoSandbox: () => Promise<void>;
@@ -1394,6 +1396,35 @@ export const useHubStore = create<HubState>((set, get) => {
       pending.resolve(decision);
     },
 
+    loadApprovalBefore: async (approval, args, signal) => {
+      const state = get();
+      const scope = activeScope();
+      const requested = githubApprovalReads(approval, args);
+      const conversation = state.conversations.find((item) => item.id === state.activeConversationId);
+      const agent = state.agents.find((item) => item.id === (approval.agentId ?? conversation?.agentId)) ?? state.agents[0];
+      const server = state.servers.find((item) => item.id === approval.serverId);
+      const readTool = 'github_read_file';
+      if (!requested.length || !agent || !server || !buildAgentToolCatalog(agent, [server]).tools.some((tool) =>
+        tool.originalName === readTool && tool.isReadOnly)) return {};
+      const secrets = await loadServerSecrets(server.id);
+      const entries = await Promise.all(requested.map(async (readArgs) => {
+        if (signal.aborted || activeScope() !== scope || get().pendingApproval?.toolCallId !== approval.toolCallId ||
+          resolveToolPermissionPolicy({
+            agent, qualifiedKey: `${server.id}:${readTool}`, toolName: readTool, args: readArgs,
+            settingsToolPolicies: get().settings.toolPolicies ?? [],
+          }) === 'deny') return [];
+        try {
+          const result = await callMcpTool({ server, secrets, toolName: readTool, args: readArgs, signal });
+          if (result.isError) return [];
+          const value = JSON.parse(result.text) as { content?: string };
+          return typeof value.content === 'string' ? [[String(readArgs.path), value.content.slice(0, 12001)]] : [];
+        } catch {
+          return [];
+        }
+      }));
+      return Object.fromEntries(entries.flat());
+    },
+
     publishCanvas: async (request) => {
       const initial = get();
       if (initial.isRunning) return { error: 'Finish the current run first.' };
@@ -1455,6 +1486,7 @@ export const useHubStore = create<HubState>((set, get) => {
                 arguments: args,
                 description,
                 lockedArguments: true,
+                agentId,
                 resolve: settle,
               } });
             });

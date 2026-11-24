@@ -1,3 +1,4 @@
+import { ApprovalChangePreview, type LoadApprovalBefore } from './ApprovalChangePreview';
 import { useMemo, useState } from 'react';
 import { motion, useIsPresent } from 'motion/react';
 import {
@@ -17,6 +18,7 @@ import { M3_SPRING } from '../utils/motion';
 
 interface WriteApprovalBannerProps {
   approval: PendingApproval;
+  loadBefore?: LoadApprovalBefore;
   onDecision: (result: ApprovalResolution) => void;
 }
 
@@ -33,9 +35,9 @@ function formatKeyLabel(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBannerProps) {
+export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteApprovalBannerProps) {
   const isPresent = useIsPresent();
-  const [viewMode, setViewMode] = useState<'fields' | 'json'>('fields');
+  const [viewMode, setViewMode] = useState<'fields' | 'json' | 'diff'>('fields');
   const [draftArgs, setDraftArgs] = useState<Record<string, unknown>>(() => ({
     ...approval.arguments,
   }));
@@ -56,9 +58,9 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
     setIsDirty(true);
   };
 
-  const handleSwitchMode = (nextMode: 'fields' | 'json') => {
+  const handleSwitchMode = (nextMode: 'fields' | 'json' | 'diff') => {
     if (nextMode === viewMode) return;
-    if (nextMode === 'fields') {
+    if (viewMode === 'json') {
       try {
         const parsed = JSON.parse(argsText) as unknown;
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -71,7 +73,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
         setArgsError('Fix invalid JSON syntax before switching to Structured Fields.');
         return;
       }
-    } else {
+    } else if (nextMode === 'json') {
       setArgsText(JSON.stringify(draftArgs, null, 2));
       setArgsError('');
     }
@@ -184,10 +186,11 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
         </div>
 
         {/* Fields / Raw JSON Switcher */}
-        {!approval.lockedArguments && (<div
+        <div
           style={{ backgroundColor: 'var(--m3-surface)' }}
           className="inline-flex items-center p-0.5 rounded-full border border-slate-200 dark:border-slate-700 shrink-0"
         >
+          {!approval.lockedArguments && <>
           <button
             type="button"
             data-testid="approval-mode-fields"
@@ -222,7 +225,13 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
             <Code2 className="w-3.5 h-3.5" />
             <span>Raw JSON</span>
           </button>
-        </div>)}
+          </>}
+          <button type="button" aria-pressed={viewMode === 'diff'}
+            onClick={() => handleSwitchMode(viewMode === 'diff' ? 'fields' : 'diff')}
+            className="min-h-[44px] rounded-full px-3 text-xs font-semibold">
+            Preview changes
+          </button>
+        </div>
       </div>
 
       <div className="p-4 space-y-3">
@@ -241,7 +250,8 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
         )}
 
         {/* Structured Field-Level Editor or Raw JSON */}
-        {approval.lockedArguments ? (
+        {viewMode === 'diff' ? <ApprovalChangePreview approval={approval} args={draftArgs} loadBefore={loadBefore} />
+          : approval.lockedArguments ? (
           <details className="rounded-xl border p-2 text-xs">
             <summary className="min-h-[44px] cursor-pointer py-3 font-semibold">Review exact arguments and file contents</summary>
             <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all text-slate-900 dark:text-slate-100">{argsText}</pre>

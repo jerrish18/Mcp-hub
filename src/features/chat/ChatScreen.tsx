@@ -237,6 +237,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     resolveProPlan,
     pendingApproval,
     publishCanvas,
+    loadApprovalBefore,
     sendMessage,
     stopRun,
     resolvePendingApproval,
@@ -1851,6 +1852,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             <WriteApprovalBanner
               key={pendingApproval.toolCallId}
               approval={pendingApproval}
+              loadBefore={loadApprovalBefore}
               onDecision={(resolution) => {
                 triggerHaptic(
                   settings.hapticsEnabled,
