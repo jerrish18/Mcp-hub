@@ -1,3 +1,5 @@
+import { VerificationSheet } from './VerificationSheet';
+import { eligibleReviewModels } from '../../services/llm/verifyAnswer';
 import { ProjectsSheet } from './ProjectsSheet';
 import { listWorkspaceProjects, projectForConversation, type WorkspaceProject } from '../../utils/projects';
 import { getAccountScope } from '../../services/storage/accountSync';
@@ -282,6 +284,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [vaultOpen, setVaultOpen] = useState(false);
 
   // Pro Canvas & Document Export state
+  const [verification, setVerification] = useState<{ answer: ChatMessage; question: string }>();
   const [projectsOpen, setProjectsOpen] = useState(false);
   const projectScope = getAccountScope(authUser);
   const [projectSnapshot, setProjectSnapshot] = useState<{ scope: string; projects: WorkspaceProject[] }>(
@@ -289,6 +292,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   );
   useEffect(() => {
     setProjectsOpen(false);
+    setVerification(undefined);
     setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
   }, [projectScope]);
   const projects = projectSnapshot.scope === projectScope ? projectSnapshot.projects : [];
@@ -1672,6 +1676,15 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           <span>{copiedMsgId === msg.id ? 'Copied' : 'Copy'}</span>
                         </button>
 
+                        {!msg.isStreaming && (
+                          <button type="button" onClick={() => {
+                            const request = activeConv?.messages.slice(0, msgIdx).filter((message) => message.role === 'user').at(-1);
+                            setVerification({ answer: msg, question: request?.content ?? '' });
+                          }} className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs font-semibold dark:border-slate-700">
+                            Verify
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           onClick={() => handleSpeakMessage(msg.id, msg.content)}
@@ -2306,6 +2319,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         }}
         onClose={closeCanvas}
       />
+
+      {verification && <VerificationSheet key={verification.answer.id}
+        answer={verification.answer} question={verification.question} keys={providerKeys}
+        models={eligibleReviewModels(allCatalogModels, providerKeys, verification.answer.modelId ?? activeModel.id)}
+        onClose={() => setVerification(undefined)} />}
 
       <ProjectsSheet key={projectScope}
         open={projectsOpen} scope={projectScope} currentConversation={activeConv?.id}
