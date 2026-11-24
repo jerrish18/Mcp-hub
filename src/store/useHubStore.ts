@@ -1,3 +1,4 @@
+import { attachConversationToProject, listWorkspaceProjects, projectAgent, projectForConversation, projectReferenceContext, projectServers, saveWorkspaceProjects } from '../utils/projects';
 import { publishCanvasRevision, type CanvasPublishRequest, type CanvasPublishResult } from '../services/mcp/canvasPublish';
 import type { CanvasEditLink } from '../utils/canvasArtifacts';
 import type { TraceToolRetry } from '../services/llm/agentLoop';
@@ -372,7 +373,7 @@ export interface HubState {
   deleteAgent: (agentId: string) => void;
 
   // Conversations & Chat
-  startNewConversation: (agentId?: string, modelId?: string) => void;
+  startNewConversation: (agentId?: string, modelId?: string, projectId?: string) => void;
   selectConversation: (conversationId: string) => void;
   renameConversation: (conversationId: string, title: string) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
@@ -1190,10 +1191,13 @@ export const useHubStore = create<HubState>((set, get) => {
       persist();
     },
 
-    startNewConversation: (agentId, modelId) => {
+    startNewConversation: (agentId, modelId, projectId) => {
       const state = get();
+      const scope = activeScope();
+      const projects = projectId ? listWorkspaceProjects(scope) : [];
+      const project = projects.find((item) => item.id === projectId);
       const agent =
-        state.agents.find((a) => a.id === agentId) ??
+        state.agents.find((a) => a.id === (project?.defaultAgentId || agentId)) ??
         state.agents[0] ??
         BUILT_IN_AGENTS[0];
       const hasAnyRealKey = Boolean(
@@ -1201,6 +1205,7 @@ export const useHubStore = create<HubState>((set, get) => {
       );
       const chosenModel = modelId ?? (hasAnyRealKey ? agent.defaultModelId : 'demo-sandbox');
       const conv = createNewConversation(agent, chosenModel);
+      if (project) saveWorkspaceProjects(scope, attachConversationToProject(projects, conv.id, project.id));
       set((s) => ({
         conversations: [conv, ...s.conversations],
         activeConversationId: conv.id,
@@ -1395,7 +1400,8 @@ export const useHubStore = create<HubState>((set, get) => {
       const scope = activeScope();
       const conversation = initial.conversations.find((item) => item.id === initial.activeConversationId);
       const agentId = conversation?.agentId ?? initial.agents[0]?.id;
-      const server = initial.servers.find((item) => item.url === 'virtual://github-api' && item.enabled && item.status === 'connected');
+      const project = projectForConversation(listWorkspaceProjects(scope), conversation?.id);
+      const server = projectServers(initial.servers, project).find((item) => item.url === 'virtual://github-api' && item.enabled && item.status === 'connected');
       if (!server) return { error: 'Connect GitHub first.' };
 
       const controller = new AbortController();
@@ -1542,14 +1548,15 @@ export const useHubStore = create<HubState>((set, get) => {
 
       const state = get();
       const conv = state.conversations.find((c) => c.id === state.activeConversationId) ?? state.conversations[0];
-      const agent = state.agents.find((a) => a.id === conv?.agentId) ?? state.agents[0];
+      const project = projectForConversation(listWorkspaceProjects(activeScope()), conv?.id);
+      const agent = projectAgent(state.agents.find((a) => a.id === conv?.agentId) ?? state.agents[0], project);
       const attachments = options?.attachments ?? [];
       const history: LlmConversationItem[] = [];
       for (const m of conv?.messages ?? []) {
         if (m.role === 'user') history.push({ role: 'user', text: m.content, attachments: m.attachments });
         else if (m.role === 'assistant' && m.content) history.push({ role: 'assistant', text: m.content });
       }
-      history.push({ role: 'user', text, attachments: attachments.length > 0 ? attachments : undefined });
+      history.push({ role: 'user', text: text + projectReferenceContext(text, project), attachments: attachments.length > 0 ? attachments : undefined });
 
       const controller = new AbortController();
       set({ isRunning: true, abortController: controller });
@@ -1592,7 +1599,7 @@ export const useHubStore = create<HubState>((set, get) => {
                 a2uiMode: state.settings.a2uiMode,
                 keys: state.providerKeys,
                 dynamicModels: state.dynamicModels,
-                servers: state.servers,
+                servers: projectServers(state.servers, project),
                 history,
                 maxSteps: state.settings.maxAgentSteps,
                 confirmBeforeWrite: true,
@@ -1738,7 +1745,8 @@ export const useHubStore = create<HubState>((set, get) => {
       }
       if (!conv) return;
 
-      const agent = state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0];
+      const project = projectForConversation(listWorkspaceProjects(scope), conv.id);
+      const agent = projectAgent(state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0], project);
       const model = getModelById(conv.modelId, state.dynamicModels);
       const apiKey = getApiKeyForProvider(model.provider, state.providerKeys);
       const chatMode = options?.retryToolCall ? 'professional' : conv.chatMode ?? 'professional';
@@ -1839,7 +1847,7 @@ export const useHubStore = create<HubState>((set, get) => {
       }
       llmHistory.push({
         role: 'user',
-        text,
+        text: text + projectReferenceContext(text, project),
         attachments: attachments.length > 0 ? attachments : undefined,
       });
 
@@ -1951,7 +1959,7 @@ export const useHubStore = create<HubState>((set, get) => {
           a2uiMode: get().settings.a2uiMode,
           keys: get().providerKeys,
           dynamicModels: get().dynamicModels,
-          servers: get().servers,
+          servers: projectServers(get().servers, project),
           history: llmHistory,
           maxSteps: get().settings.maxAgentSteps,
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,

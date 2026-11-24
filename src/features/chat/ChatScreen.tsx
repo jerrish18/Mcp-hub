@@ -1,3 +1,5 @@
+import { ProjectsSheet } from './ProjectsSheet';
+import { listWorkspaceProjects, projectForConversation, type WorkspaceProject } from '../../utils/projects';
 import { getAccountScope } from '../../services/storage/accountSync';
 import { useCanvasWorkspace } from './useCanvasWorkspace';
 import type { CanvasEditLink } from '../../utils/canvasArtifacts';
@@ -280,6 +282,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [vaultOpen, setVaultOpen] = useState(false);
 
   // Pro Canvas & Document Export state
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const projectScope = getAccountScope(authUser);
+  const [projectSnapshot, setProjectSnapshot] = useState<{ scope: string; projects: WorkspaceProject[] }>(
+    () => ({ scope: projectScope, projects: listWorkspaceProjects(projectScope) })
+  );
+  useEffect(() => {
+    setProjectsOpen(false);
+    setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
+  }, [projectScope]);
+  const projects = projectSnapshot.scope === projectScope ? projectSnapshot.projects : [];
+  const refreshProjects = () => setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
   const [canvasOpen, setCanvasOpen] = useState(false);
   const canvas = useCanvasWorkspace(getAccountScope(authUser));
   const canvasArtifact = canvas.artifact;
@@ -331,6 +344,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const speechTimerRef = useRef<number | null>(null);
 
   const activeConv = conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
+  const activeProject = projectForConversation(projects, activeConv?.id);
   const activeAgent = agents.find((a) => a.id === activeConv?.agentId) ?? agents[0];
   const allCatalogModels = useMemo(() => mergeModelCatalog(dynamicModels), [dynamicModels]);
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
@@ -849,7 +863,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             conversations={conversations}
             activeConversationId={activeConv?.id ?? null}
             onSelect={selectConversation}
-            onNewChat={() => startNewConversation(activeAgent.id, activeModel.id)}
+            onNewChat={() => startNewConversation(activeAgent.id, activeProject ? undefined : activeModel.id, activeProject?.id)}
             onRename={renameConversation}
             onDelete={deleteConversation}
           />
@@ -923,9 +937,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               >
                 <History className="w-5 h-5" />
               </button>
+              <button type="button" onClick={() => { refreshProjects(); setProjectsOpen(true); }}
+                aria-label="Projects" title={activeProject?.name ?? 'Projects'}
+                className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs font-semibold dark:border-slate-700">
+                {activeProject ? <span className="block max-w-20 truncate sm:max-w-32">{activeProject.name}</span> : 'Projects'}
+              </button>
               <button
                 type="button"
-                onClick={() => startNewConversation(activeAgent.id, activeModel.id)}
+                onClick={() => startNewConversation(activeAgent.id, activeProject ? undefined : activeModel.id, activeProject?.id)}
                 aria-label="New conversation"
                 className="min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
               >
@@ -2288,6 +2307,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         onClose={closeCanvas}
       />
 
+      <ProjectsSheet key={projectScope}
+        open={projectsOpen} scope={projectScope} currentConversation={activeConv?.id}
+        projects={projects} agents={agents} servers={servers}
+        onClose={() => setProjectsOpen(false)} onUpdate={refreshProjects}
+        onUse={(project) => { if (project.defaultAgentId) setActiveAgent(project.defaultAgentId); }}
+        onNewChat={(project) => {
+          startNewConversation(project.defaultAgentId, undefined, project.id);
+          refreshProjects();
+        }}
+      />
+
       <QuickConnectSheet
         presetId={githubConnectOpen ? 'github' : null}
         server={servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')}
@@ -2323,7 +2353,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         conversations={conversations}
         activeConversationId={activeConv?.id ?? null}
         onSelect={selectConversation}
-        onNewChat={() => startNewConversation(activeAgent.id, activeModel.id)}
+        onNewChat={() => startNewConversation(activeAgent.id, activeProject ? undefined : activeModel.id, activeProject?.id)}
         onRename={renameConversation}
         onDelete={deleteConversation}
       />
