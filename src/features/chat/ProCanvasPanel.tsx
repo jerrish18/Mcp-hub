@@ -13,6 +13,7 @@ import {
   FileText,
   GitBranch,
   History,
+  ChartNoAxesColumnIncreasing,
   Layers,
   Monitor,
   Presentation,
@@ -24,6 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import { validateCanvasPublish, type CanvasPublishRequest, type CanvasPublishResult } from '../../services/mcp/canvasPublish';
+import { CanvasDataAnalysis } from './CanvasDataAnalysis';
 import { CanvasVersions } from './CanvasVersions';
 import { canvasProjectFiles, canvasProjectZip, canvasSelectionRequest, type CanvasArtifact, type CanvasRevision } from '../../utils/canvasArtifacts';
 import { CanvasPreviewFrame, type CanvasRuntimeLog } from './CanvasPreviewFrame';
@@ -272,7 +274,8 @@ export function ProCanvasPanel({
   onClose,
 }: ProCanvasPanelProps) {
   const [desktopLayout, setDesktopLayout] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
-  const [tab, setTab] = useState<'preview' | 'source'>('preview');
+  const [tab, setTab] = useState<'preview' | 'source' | 'analysis'>('preview');
+  const [analysisOpened, setAnalysisOpened] = useState(false);
   const [slideIdx, setSlideIdx] = useState(0);
   const [sheetIdx, setSheetIdx] = useState(0);
   const [activeFileIdx, setActiveFileIdx] = useState(0);
@@ -314,6 +317,8 @@ export function ProCanvasPanel({
 
   useEffect(() => {
     setActiveFileIdx(0);
+    setAnalysisOpened(false);
+    setTab('preview');
     setSlideIdx(0);
     setSheetIdx(0);
     setConsoleOpen(false);
@@ -671,6 +676,12 @@ export function ProCanvasPanel({
             </button>
           )}
 
+          <button type="button" aria-label="Data analysis" aria-pressed={tab === 'analysis'}
+            onClick={() => { setAnalysisOpened(true); setTab('analysis'); }}
+            className="min-h-[44px] min-w-[44px] rounded-full border border-slate-300 dark:border-slate-700 inline-flex items-center justify-center">
+            <ChartNoAxesColumnIncreasing className="h-4 w-4" />
+          </button>
+
           <button type="button" onClick={() => setVersionsOpen((shown) => !shown)}
             aria-label="Canvas version history" aria-expanded={versionsOpen}
             className="min-h-[44px] min-w-[44px] rounded-full border border-slate-300 dark:border-slate-700 inline-flex items-center justify-center">
@@ -983,7 +994,10 @@ export function ProCanvasPanel({
 
       {/* Main Canvas Body */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3.5 sm:p-4">
-        {tab === 'source' ? (
+        {analysisOpened && <div hidden={tab !== 'analysis'}>
+          <CanvasDataAnalysis key={artifact.id} initialScript={artifact.kind === 'code' && ['javascript', 'js'].includes(codeLanguage) ? artifact.code : undefined} />
+        </div>}
+        {tab === 'analysis' ? null : tab === 'source' ? (
           <div className="h-full flex flex-col gap-2">
             {jsonError && (
               <div className="rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">

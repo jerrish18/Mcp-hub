@@ -1,3 +1,5 @@
+import { CANVAS_ANALYSIS_CSP, CANVAS_ANALYSIS_PAGE } from './src/server/canvasAnalysis.ts';
+import { CANVAS_ANALYSIS_PATH } from './src/utils/canvasAnalysis.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +38,15 @@ async function startServer() {
       'Cache-Control': 'no-store',
     });
     res.type('html').send(buildCanvasPreviewPage(standalone));
+  });
+
+  app.get(CANVAS_ANALYSIS_PATH, (_req, res) => {
+    res.set({
+      'Content-Security-Policy': CANVAS_ANALYSIS_CSP,
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+    }).type('html').send(CANVAS_ANALYSIS_PAGE);
   });
 
   app.use(
