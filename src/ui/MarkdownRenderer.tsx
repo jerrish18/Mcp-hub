@@ -698,7 +698,7 @@ function CodeBlock({
     }
   };
 
-  const canOpenInCanvas = Boolean(onOpenInCanvas && (CANVAS_CODE_LANGS.has(normalizedLang) || code.length > 80));
+  const canOpenInCanvas = Boolean(!(isUnclosed && isStreaming) && onOpenInCanvas && (CANVAS_CODE_LANGS.has(normalizedLang) || code.length > 80));
 
   return (
     <div className="my-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100">
