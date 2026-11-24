@@ -1,7 +1,9 @@
+import { compareCommand, composerCommand, matchingPromptMacros, removeComposerCommand } from '../../utils/composerCommands';
+import type { SavedPrompt } from '../../types';
 import { VerificationSheet } from './VerificationSheet';
 import { eligibleReviewModels } from '../../services/llm/verifyAnswer';
 import { ProjectsSheet } from './ProjectsSheet';
-import { listWorkspaceProjects, projectForConversation, type WorkspaceProject } from '../../utils/projects';
+import { listWorkspaceProjects, projectForConversation, projectServers, type WorkspaceProject } from '../../utils/projects';
 import { getAccountScope } from '../../services/storage/accountSync';
 import { useCanvasWorkspace } from './useCanvasWorkspace';
 import type { CanvasEditLink } from '../../utils/canvasArtifacts';
@@ -96,7 +98,7 @@ import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
 import { ProCanvasPanel } from './ProCanvasPanel';
-import { PromptMacrosSheet } from './PromptMacrosSheet';
+import { PromptMacrosSheet, extractMacroVariables } from './PromptMacrosSheet';
 import { ProTaskPlanCard } from './ProTaskPlanCard';
 import { RunTraceChip, RunTraceSheet } from './RunTraceSheet';
 import { SavedNotesModal } from './SavedNotesModal';
@@ -271,6 +273,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
 
   // MCP @ Resource & / Prompt pickers
+  const commandPicker = useRef<HTMLDivElement>(null);
   const [mcpPickerMode, setMcpPickerMode] = useState<'resource' | 'prompt' | null>(null);
   const [mcpPickerQuery, setMcpPickerQuery] = useState('');
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -307,6 +310,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Phase 4: Run Trace, Saved Macros & Compare Mode
   const [traceSheetState, setTraceSheetState] = useState<{ messageId: string; title: string } | null>(null);
   const [macrosSheetOpen, setMacrosSheetOpen] = useState(false);
+  const [paletteMacro, setPaletteMacro] = useState<SavedPrompt>();
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelIds, setCompareModelIds] = useState<string[]>(['demo-sandbox', 'gemini-4-hydrogen']);
   const [compareLastPrompt, setCompareLastPrompt] = useState('');
@@ -363,7 +367,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     KNOWLEDGE_SOURCE_OPTIONS.find((o) => o.id === activeKnowledgeSource) ??
     KNOWLEDGE_SOURCE_OPTIONS[0];
 
-  const { tools } = buildAgentToolCatalog(activeAgent, servers);
+  const scopedServers = useMemo(() => projectServers(servers, activeProject), [servers, activeProject]);
+  const { tools } = buildAgentToolCatalog(activeAgent, scopedServers);
   const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
   const traceHistory = useMemo(() => (activeConv?.messages ?? []).flatMap((message) => {
     const trace = liveTrace?.messageId === message.id ? liveTrace.trace : message.runTrace;
@@ -374,25 +379,25 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   const availableResources = useMemo(() => {
     const items: Array<{ server: McpServerConfig; resource: McpResource }> = [];
-    for (const srv of servers) {
+    for (const srv of scopedServers) {
       if (!srv.enabled || srv.status !== 'connected') continue;
       for (const res of srv.resources) {
         items.push({ server: srv, resource: res });
       }
     }
     return items;
-  }, [servers]);
+  }, [scopedServers]);
 
   const availablePrompts = useMemo(() => {
     const items: Array<{ server: McpServerConfig; prompt: McpPrompt }> = [];
-    for (const srv of servers) {
+    for (const srv of scopedServers) {
       if (!srv.enabled || srv.status !== 'connected') continue;
       for (const prompt of srv.prompts) {
         items.push({ server: srv, prompt });
       }
     }
     return items;
-  }, [servers]);
+  }, [scopedServers]);
 
   const filteredMcpResources = useMemo(() => {
     const q = mcpPickerQuery.trim().toLowerCase();
@@ -511,6 +516,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if ((!input.trim() && attachments.length === 0) || isRunning) return;
+    const compareText = compareCommand(input);
+    if (compareText !== undefined) {
+      openCompareCommand(compareText);
+      return;
+    }
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
@@ -555,25 +565,59 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     await sendMessage(msg, { attachments: currentAttachments });
   };
 
+  const openCompareCommand = (text = '') => {
+    setCompareEnabled(true);
+    setInput(text);
+    setMcpPickerMode(null);
+    composerRef.current?.focus();
+  };
+
   const handleComposerChange = (value: string) => {
     setInput(value);
-    const resMatch = value.match(/(?:^|\s)@([^\s]*)$/);
-    if (resMatch && availableResources.length > 0) {
-      setMcpPickerMode('resource');
-      setMcpPickerQuery(resMatch[1] ?? '');
-      return;
-    }
-    const promptMatch = value.match(/(?:^|\s)\/([^\s]*)$/);
-    if (promptMatch && availablePrompts.length > 0) {
-      setMcpPickerMode('prompt');
-      setMcpPickerQuery(promptMatch[1] ?? '');
-      return;
-    }
-    if (mcpPickerMode) {
-      setMcpPickerMode(null);
-      setMcpPickerQuery('');
+    const command = composerCommand(value);
+    setMcpPickerMode(command?.mode ?? null);
+    setMcpPickerQuery(command?.query ?? '');
+  };
+
+  const selectPaletteMacro = (macro: SavedPrompt) => {
+    setMcpPickerMode(null);
+    const withoutCommand = removeComposerCommand(input);
+    if (extractMacroVariables(macro.template).length) {
+      setInput(withoutCommand);
+      setPaletteMacro(macro);
+      setMacrosSheetOpen(true);
+    } else {
+      setInput([withoutCommand, macro.template].filter(Boolean).join('\n\n'));
+      composerRef.current?.focus();
     }
   };
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !canvasOpen) {
+        event.preventDefault();
+        setMcpPickerMode(event.shiftKey ? 'resource' : 'prompt');
+        setMcpPickerQuery('');
+        composerRef.current?.focus();
+        return;
+      }
+      if (!mcpPickerMode || !(event.target === composerRef.current || commandPicker.current?.contains(event.target as Node))) return;
+      if (event.key === 'Escape') {
+        setMcpPickerMode(null);
+        composerRef.current?.focus();
+      } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        const items = Array.from(commandPicker.current?.querySelectorAll<HTMLButtonElement>('[data-command-item]:not(:disabled)') ?? []);
+        if (!items.length) return;
+        event.preventDefault();
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next = current < 0 ? (event.key === 'ArrowDown' ? 0 : items.length - 1)
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next].focus();
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [mcpPickerMode, canvasOpen]);
 
   const handleSelectMcpResource = async (server: McpServerConfig, resource: McpResource) => {
     setMcpBusy(true);
@@ -1958,6 +2002,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 6, scale: 0.98 }}
                   transition={M3_EMPHASIZED_EASE}
+                  ref={commandPicker}
                   data-testid={`mcp-${mcpPickerMode}-popover`}
                   style={{
                     backgroundColor: 'var(--m3-surface-container-high)',
@@ -1967,13 +2012,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 >
                   <div className="flex items-center justify-between px-3 py-1.5">
                     <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                      {mcpPickerMode === 'resource' ? 'Attach MCP Resource (@)' : 'Insert MCP Prompt (/)'}
+                      {mcpPickerMode === 'resource' ? 'Attach MCP resource (@)' : 'Commands and saved prompts (/)'}
                     </span>
                     <button
                       type="button"
                       onClick={() => setMcpPickerMode(null)}
                       aria-label="Close MCP picker"
-                      className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                      className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -1986,6 +2031,20 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     </div>
                   )}
 
+                  {mcpPickerMode === 'prompt' && <>
+                    {'compare'.includes(mcpPickerQuery.toLowerCase()) && (
+                      <button type="button" data-command-item onClick={() => openCompareCommand(removeComposerCommand(input))}
+                        className="w-full min-h-[44px] rounded-xl px-3 text-left text-xs font-semibold hover:bg-slate-200 dark:hover:bg-slate-800">
+                        /compare · Compare models
+                      </button>
+                    )}
+                    {matchingPromptMacros(savedPrompts, mcpPickerQuery).map((macro) => (
+                      <button key={macro.id} type="button" data-command-item onClick={() => selectPaletteMacro(macro)}
+                        className="w-full min-h-[44px] rounded-xl px-3 text-left text-xs font-semibold hover:bg-slate-200 dark:hover:bg-slate-800">
+                        {macro.title}<span className="ml-2 font-normal text-slate-600 dark:text-slate-300">Saved prompt</span>
+                      </button>
+                    ))}
+                  </>}
                   {mcpPickerMode === 'resource' ? (
                     filteredMcpResources.length === 0 ? (
                       <div className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
@@ -1995,7 +2054,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       filteredMcpResources.map(({ server, resource }) => (
                         <button
                           key={`${server.id}:${resource.uri}`}
-                          type="button"
+                          type="button" data-command-item
                           onClick={() => void handleSelectMcpResource(server, resource)}
                           className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left hover:bg-slate-200/60 dark:hover:bg-slate-800/70 transition-colors"
                         >
@@ -2016,7 +2075,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     filteredMcpPrompts.map(({ server, prompt }) => (
                       <button
                         key={`${server.id}:${prompt.name}`}
-                        type="button"
+                        type="button" data-command-item
                         onClick={() => void handleSelectMcpPrompt(server, prompt)}
                         className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left hover:bg-slate-200/60 dark:hover:bg-slate-800/70 transition-colors"
                       >
@@ -2099,9 +2158,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     setMcpPickerMode(null);
                     return;
                   }
-                  if (e.key === 'Enter' && !e.shiftKey) {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
-                    void handleSend();
+                    const first = mcpPickerMode && commandPicker.current?.querySelector<HTMLButtonElement>('[data-command-item]:not(:disabled)');
+                    if (first) first.click();
+                    else void handleSend();
                   }
                 }}
                 placeholder={
@@ -2196,16 +2257,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     </button>
                   )}
 
-                  {availablePrompts.length > 0 && (
-                    <button
+                  <button
                       type="button"
                       data-testid="mcp-prompt-picker-btn"
                       onClick={() => {
                         setMcpPickerQuery('');
                         setMcpPickerMode((m) => (m === 'prompt' ? null : 'prompt'));
                       }}
-                      aria-label="Insert MCP prompt template"
-                      title="Insert MCP prompt (/)"
+                      aria-label="Open command palette"
+                      aria-keyshortcuts="Control+K Meta+K"
+                      title="Commands (/) · Ctrl/Cmd+K"
                       style={{
                         backgroundColor: 'var(--m3-surface-container)',
                         borderColor: 'var(--m3-outline)',
@@ -2213,9 +2274,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
                     >
                       <Terminal className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Prompt</span>
-                    </button>
-                  )}
+                      <span className="hidden sm:inline">Commands</span>
+                  </button>
 
                   {activeKnowledgeSource === 'uploaded' && attachments.length === 0 && (
                     <button
@@ -2524,10 +2584,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         onClose={() => setTraceSheetState(null)}
       />
 
-      <PromptMacrosSheet
+      <PromptMacrosSheet key={paletteMacro?.id ?? 'library'}
         open={macrosSheetOpen}
         macros={savedPrompts}
-        onClose={() => setMacrosSheetOpen(false)}
+        initialMacro={paletteMacro}
+        onClose={() => { setMacrosSheetOpen(false); setPaletteMacro(undefined); }}
         onInsertMacro={(resolved) => {
           setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${resolved}` : resolved));
           setTimeout(() => composerRef.current?.focus(), 40);

@@ -28,6 +28,7 @@ export function fillMacroVariables(template: string, values: Record<string, stri
 interface PromptMacrosSheetProps {
   open: boolean;
   macros: SavedPrompt[];
+  initialMacro?: SavedPrompt;
   onClose: () => void;
   onInsertMacro: (resolvedPrompt: string) => void;
   onSaveMacro: (macro: Omit<SavedPrompt, 'id' | 'updatedAt'> & { id?: string }) => void;
@@ -37,6 +38,7 @@ interface PromptMacrosSheetProps {
 export function PromptMacrosSheet({
   open,
   macros,
+  initialMacro,
   onClose,
   onInsertMacro,
   onSaveMacro,
@@ -49,7 +51,7 @@ export function PromptMacrosSheet({
   const [category, setCategory] = useState('Pro');
   const [template, setTemplate] = useState('');
 
-  const [fillTarget, setFillTarget] = useState<SavedPrompt | null>(null);
+  const [fillTarget, setFillTarget] = useState<SavedPrompt | null>(initialMacro ?? null);
   const [varValues, setVarValues] = useState<Record<string, string>>({});
 
   const filteredMacros = useMemo(() => {
