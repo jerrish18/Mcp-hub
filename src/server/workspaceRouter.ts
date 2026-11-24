@@ -15,6 +15,7 @@ const WorkspacePayloadSchema = z.object({
   servers: z.array(z.record(z.string(), z.unknown())).max(60).optional(),
   dynamicModels: z.array(z.record(z.string(), z.unknown())).max(150).optional(),
   dismissedDefaultServerIds: z.array(z.string().max(128)).max(60).optional(),
+  savedPrompts: z.array(z.record(z.string(), z.unknown())).max(100).optional(),
   conversations: z.array(z.record(z.string(), z.unknown())).max(200).optional(),
   savedStudyNotes: z.array(z.record(z.string(), z.unknown())).max(100).optional(),
 });
@@ -26,6 +27,7 @@ export interface StoredWorkspaceSnapshot {
   servers?: Array<Record<string, unknown>>;
   dynamicModels?: Array<Record<string, unknown>>;
   dismissedDefaultServerIds?: string[];
+  savedPrompts?: Array<Record<string, unknown>>;
   conversations?: Array<Record<string, unknown>>;
   savedStudyNotes?: Array<Record<string, unknown>>;
   updatedAt: number;
@@ -134,6 +136,7 @@ export function createWorkspaceRouter(options: CreateWorkspaceRouterOptions): Ro
       dynamicModels: parsed.data.dynamicModels ?? existing?.dynamicModels,
       dismissedDefaultServerIds:
         parsed.data.dismissedDefaultServerIds ?? existing?.dismissedDefaultServerIds,
+      savedPrompts: parsed.data.savedPrompts ?? existing?.savedPrompts,
       conversations: parsed.data.conversations ?? existing?.conversations,
       savedStudyNotes: parsed.data.savedStudyNotes ?? existing?.savedStudyNotes,
       updatedAt: Date.now(),

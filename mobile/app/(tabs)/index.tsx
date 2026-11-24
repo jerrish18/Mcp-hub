@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
@@ -13,27 +14,205 @@ import {
 import * as Haptics from 'expo-haptics';
 import { getModelById } from '@core/config/models';
 import { runAgentLoop } from '@core/services/llm/agentLoop';
-import { BUILT_IN_AGENTS, DEFAULT_SANDBOX_SERVER } from '@core/store/defaults';
+import type { LlmConversationItem } from '@core/services/llm/types';
+import { connectAndInspectServer } from '@core/services/mcp/client';
+import { BUILT_IN_AGENTS, DEFAULT_SETTINGS } from '@core/store/defaults';
 import { loadProviderKeys, loadServerSecrets, saveServerSecrets } from '@core/services/storage/secureStorage';
-import type { ChatMessage, EffortLevel, ToolCallRecord } from '@core/types';
+import type {
+  AgentProfile,
+  AppSettings,
+  ApprovalDecision,
+  ChatMessage,
+  Conversation,
+  EffortLevel,
+  McpServerConfig,
+  PendingApproval,
+  ToolCallRecord,
+} from '@core/types';
+import { loadMobilePrefs, saveMobilePrefs, subscribeMobilePrefs } from '../../services/storage/mobilePrefs';
+import { sqliteHistoryDb } from '../../services/storage/sqliteHistory';
+
+function buildHistoryFromMessages(msgs: ChatMessage[]): LlmConversationItem[] {
+  const items: LlmConversationItem[] = [];
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      items.push({ role: 'user', text: m.content });
+    } else if (m.role === 'assistant' && m.content.trim()) {
+      const toolSummary =
+        m.toolCalls && m.toolCalls.length > 0
+          ? `\n\n[Executed tools: ${m.toolCalls.map((t) => t.toolName).join(', ')}]`
+          : '';
+      items.push({ role: 'assistant', text: `${m.content}${toolSummary}` });
+    }
+  }
+  return items;
+}
 
 export default function MobileChatScreen() {
   const isDark = useColorScheme() === 'dark';
+  const [agents, setAgents] = useState<AgentProfile[]>(BUILT_IN_AGENTS);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>(BUILT_IN_AGENTS[0].id);
+  const [servers, setServers] = useState<McpServerConfig[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [effort, setEffort] = useState<EffortLevel>('medium');
-  const [agentIndex, setAgentIndex] = useState(0);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [running, setRunning] = useState(false);
   const [abortCtrl, setAbortCtrl] = useState<AbortController | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const approvalResolverRef = useRef<((decision: ApprovalDecision) => void) | null>(null);
 
-  const agent = BUILT_IN_AGENTS[agentIndex];
+  const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? BUILT_IN_AGENTS[0];
   const model = getModelById(agent.defaultModelId);
+
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      const [prefs, savedConvs] = await Promise.all([
+        loadMobilePrefs(),
+        sqliteHistoryDb.listConversations(),
+      ]);
+      if (!mounted) return;
+
+      // Ensure virtual sandbox tools are inspected for mobile
+      const hydratedServers = await Promise.all(
+        prefs.servers.map(async (srv) => {
+          if (srv.enabled && srv.url === 'virtual://mcp-hub-sandbox' && srv.tools.length === 0) {
+            try {
+              const res = await connectAndInspectServer({ server: srv, secrets: {} });
+              return { ...srv, status: 'connected' as const, tools: res.tools, resources: res.resources, prompts: res.prompts };
+            } catch {
+              return srv;
+            }
+          }
+          return srv;
+        })
+      );
+      if (!mounted) return;
+
+      setAgents(prefs.agents);
+      setSelectedAgentId(prefs.selectedAgentId);
+      setServers(hydratedServers);
+      setSettings(prefs.settings);
+
+      if (savedConvs.length > 0) {
+        const chosen =
+          savedConvs.find((c) => c.id === prefs.activeConversationId) ?? savedConvs[0];
+        setConversations(savedConvs);
+        setActiveConvId(chosen.id);
+        setMessages(chosen.messages);
+        setEffort(chosen.effort);
+      } else {
+        const now = Date.now();
+        const initialConv: Conversation = {
+          id: `conv_${now}`,
+          title: 'New Chat',
+          agentId: prefs.selectedAgentId,
+          modelId: getModelById(
+            (prefs.agents.find((a) => a.id === prefs.selectedAgentId) ?? prefs.agents[0]).defaultModelId
+          ).id,
+          effort: 'medium',
+          chatMode: 'professional',
+          knowledgeSource: 'auto',
+          studyInstructions: '',
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        await sqliteHistoryDb.saveConversation(initialConv);
+        await saveMobilePrefs({ activeConversationId: initialConv.id });
+        if (!mounted) return;
+        setConversations([initialConv]);
+        setActiveConvId(initialConv.id);
+        setMessages([]);
+      }
+    })();
+
+    const unsub = subscribeMobilePrefs((prefs) => {
+      setAgents(prefs.agents);
+      setSelectedAgentId(prefs.selectedAgentId);
+      setServers(prefs.servers);
+      setSettings(prefs.settings);
+    });
+
+    return () => {
+      mounted = false;
+      unsub();
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
       abortCtrl?.abort();
     };
   }, [abortCtrl]);
+
+  const handleNewChat = async () => {
+    if (running) return;
+    const now = Date.now();
+    const conv: Conversation = {
+      id: `conv_${now}`,
+      title: 'New Chat',
+      agentId: agent.id,
+      modelId: model.id,
+      effort,
+      chatMode: agent.defaultChatMode ?? 'professional',
+      knowledgeSource: 'auto',
+      studyInstructions: agent.studyInstructions ?? '',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await sqliteHistoryDb.saveConversation(conv);
+    await saveMobilePrefs({ activeConversationId: conv.id });
+    setConversations((prev) => [conv, ...prev]);
+    setActiveConvId(conv.id);
+    setMessages([]);
+  };
+
+  const handleCycleAgent = async () => {
+    const idx = agents.findIndex((a) => a.id === agent.id);
+    const nextAgent = agents[(idx + 1) % agents.length];
+    setSelectedAgentId(nextAgent.id);
+    await saveMobilePrefs({ selectedAgentId: nextAgent.id });
+  };
+
+  const persistConvSnapshot = async (nextMessages: ChatMessage[], titleSeed?: string) => {
+    const now = Date.now();
+    const existing = conversations.find((c) => c.id === activeConvId);
+    const convId = activeConvId ?? `conv_${now}`;
+    const conv: Conversation = {
+      id: convId,
+      title:
+        existing && existing.title !== 'New Chat'
+          ? existing.title
+          : (titleSeed?.slice(0, 48) || existing?.title || 'New Chat'),
+      agentId: agent.id,
+      modelId: model.id,
+      effort,
+      chatMode: agent.defaultChatMode ?? 'professional',
+      knowledgeSource: 'auto',
+      studyInstructions: agent.studyInstructions ?? '',
+      messages: nextMessages,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    await sqliteHistoryDb.saveConversation(conv);
+    setConversations((prev) => [conv, ...prev.filter((c) => c.id !== conv.id)]);
+    if (!activeConvId) {
+      setActiveConvId(conv.id);
+      await saveMobilePrefs({ activeConversationId: conv.id });
+    }
+  };
+
+  const resolveApproval = (decision: ApprovalDecision) => {
+    const resolver = approvalResolverRef.current;
+    approvalResolverRef.current = null;
+    setPendingApproval(null);
+    resolver?.(decision);
+  };
 
   const handleSend = async () => {
     const trimmed = input.trim();
@@ -56,12 +235,17 @@ export default function MobileChatScreen() {
       createdAt: Date.now(),
       isStreaming: true,
     };
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+
+    const historyBeforeSend = [...messages, userMsg];
+    const nextMessages = [...historyBeforeSend, assistantMsg];
+    setMessages(nextMessages);
+    await persistConvSnapshot(nextMessages, trimmed);
 
     const ctrl = new AbortController();
     setAbortCtrl(ctrl);
     setRunning(true);
 
+    let latestMessages = nextMessages;
     try {
       const keys = await loadProviderKeys();
       const hasKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
@@ -70,32 +254,50 @@ export default function MobileChatScreen() {
         modelId: hasKey ? model.id : 'demo-sandbox',
         effort,
         keys,
-        servers: [DEFAULT_SANDBOX_SERVER],
-        history: [{ role: 'user', text: trimmed }],
-        maxSteps: 10,
-        confirmBeforeWrite: true,
-        alwaysAllowedTools: [],
+        servers: servers.filter((s) => s.enabled),
+        history: buildHistoryFromMessages(historyBeforeSend),
+        maxSteps: settings.maxAgentSteps,
+        confirmBeforeWrite: settings.confirmBeforeWrite,
+        alwaysAllowedTools: settings.alwaysAllowedTools,
         signal: ctrl.signal,
         callbacks: {
           onTextDelta: (fullText) => {
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: fullText } : m)));
+            latestMessages = latestMessages.map((m) =>
+              m.id === assistantId ? { ...m, content: fullText } : m
+            );
+            setMessages(latestMessages);
           },
           onReasoningDelta: () => {},
           onToolCallsUpdated: (calls: ToolCallRecord[]) => {
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, toolCalls: calls } : m)));
+            latestMessages = latestMessages.map((m) =>
+              m.id === assistantId ? { ...m, toolCalls: calls } : m
+            );
+            setMessages(latestMessages);
           },
           onFallbackNotice: () => {},
-          requestApproval: async () => 'approve',
-          onAlwaysAllowTool: () => {},
+          requestApproval: (req) =>
+            new Promise<ApprovalDecision>((resolve) => {
+              approvalResolverRef.current = resolve;
+              setPendingApproval(req);
+            }),
+          onAlwaysAllowTool: (qualifiedKey) => {
+            const updatedAllowed = Array.from(
+              new Set([...settings.alwaysAllowedTools, qualifiedKey])
+            );
+            const nextSettings = { ...settings, alwaysAllowedTools: updatedAllowed };
+            setSettings(nextSettings);
+            void saveMobilePrefs({ settings: nextSettings });
+          },
           getServerSecrets: loadServerSecrets,
           saveServerSecrets,
         },
       });
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId ? { ...m, content: res.finalText, isStreaming: false } : m
-        )
+
+      const finalized = latestMessages.map((m) =>
+        m.id === assistantId ? { ...m, content: res.finalText, isStreaming: false } : m
       );
+      setMessages(finalized);
+      await persistConvSnapshot(finalized, trimmed);
     } finally {
       setRunning(false);
       setAbortCtrl(null);
@@ -113,23 +315,32 @@ export default function MobileChatScreen() {
           paddingVertical: 10,
           borderBottomWidth: 1,
           borderBottomColor: isDark ? '#1E293B' : '#E2E8F0',
+          gap: 8,
         }}
       >
         <Pressable
-          onPress={() => setAgentIndex((i) => (i + 1) % BUILT_IN_AGENTS.length)}
+          onPress={() => void handleCycleAgent()}
           style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
         >
           <Text style={{ fontWeight: '600', color: isDark ? '#F8FAFC' : '#0F172A' }}>{agent.name}</Text>
         </Pressable>
-        <Pressable
-          onPress={() => {
-            const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
-            setEffort((e) => next[e]);
-          }}
-          style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#2563EB' }}
-        >
-          <Text style={{ fontWeight: '600', color: '#FFFFFF' }}>Effort: {effort}</Text>
-        </Pressable>
+        <View style={{ flexDirection: 'row', gap: 6 }}>
+          <Pressable
+            onPress={() => void handleNewChat()}
+            style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
+          >
+            <Text style={{ fontWeight: '600', color: isDark ? '#F8FAFC' : '#0F172A' }}>New</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
+              setEffort((e) => next[e]);
+            }}
+            style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#2563EB' }}
+          >
+            <Text style={{ fontWeight: '600', color: '#FFFFFF' }}>Effort: {effort}</Text>
+          </Pressable>
+        </View>
       </View>
 
       <FlatList
@@ -146,6 +357,11 @@ export default function MobileChatScreen() {
               maxWidth: '88%',
             }}
           >
+            {item.toolCalls && item.toolCalls.length > 0 ? (
+              <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 4 }}>
+                Tools: {item.toolCalls.map((t) => `${t.toolName} (${t.status})`).join(', ')}
+              </Text>
+            ) : null}
             <Text style={{ color: item.role === 'user' ? '#FFFFFF' : isDark ? '#F1F5F9' : '#0F172A' }}>
               {item.content || 'Thinking...'}
             </Text>
@@ -172,7 +388,7 @@ export default function MobileChatScreen() {
             }}
           />
           <Pressable
-            onPress={running ? () => abortCtrl?.abort() : handleSend}
+            onPress={running ? () => abortCtrl?.abort() : () => void handleSend()}
             style={{
               minWidth: 64,
               minHeight: 44,
@@ -187,6 +403,67 @@ export default function MobileChatScreen() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal visible={Boolean(pendingApproval)} transparent animationType="fade">
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(2, 6, 23, 0.72)',
+            justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
+              borderRadius: 20,
+              padding: 18,
+              gap: 12,
+              borderWidth: 1,
+              borderColor: isDark ? '#334155' : '#E2E8F0',
+            }}
+          >
+            <Text style={{ fontSize: 17, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A' }}>
+              Approve Write Action
+            </Text>
+            <Text style={{ fontSize: 13, color: isDark ? '#CBD5E1' : '#334155' }}>
+              {pendingApproval?.serverName} · {pendingApproval?.toolName}
+            </Text>
+            <Text
+              style={{
+                fontSize: 12,
+                fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                backgroundColor: isDark ? '#020617' : '#F1F5F9',
+                color: isDark ? '#E2E8F0' : '#0F172A',
+                padding: 10,
+                borderRadius: 10,
+              }}
+            >
+              {JSON.stringify(pendingApproval?.args ?? {}, null, 2)}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+              <Pressable
+                onPress={() => resolveApproval('deny')}
+                style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: '#DC2626' }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Deny</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => resolveApproval('always_allow')}
+                style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: '#0F766E' }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Always</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => resolveApproval('approve')}
+                style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: '#2563EB' }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Approve</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }

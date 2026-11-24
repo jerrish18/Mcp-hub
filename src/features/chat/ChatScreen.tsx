@@ -1,18 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
+  Activity,
   AlertCircle,
   ArrowUp,
+  AtSign,
   Bookmark,
   BookmarkCheck,
+  BookMarked,
   BookOpen,
   Briefcase,
   Check,
   ChevronDown,
   ChevronUp,
+  Columns,
   Copy,
   Cpu,
-  Download,
   ExternalLink,
   FileSpreadsheet,
   FileText,
@@ -22,6 +25,7 @@ import {
   Info,
   Layers,
   LayoutGrid,
+  Loader2,
   Maximize2,
   MessageCircle,
   MessageSquarePlus,
@@ -37,6 +41,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
+  Terminal,
   Timer,
   Upload,
   Volume2,
@@ -46,15 +51,23 @@ import {
 } from 'lucide-react';
 import { getModelById, getShortModelName } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
+import { getMcpPrompt, readMcpResource } from '../../services/mcp/client';
+import { mergeModelCatalog } from '../../services/llm/provider';
+import { loadServerSecrets, saveServerSecrets } from '../../services/storage/secureStorage';
 import { DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
-import { useHubStore } from '../../store/useHubStore';
+import { type CompareResultItem, useHubStore } from '../../store/useHubStore';
 import type {
   ChatAttachment,
   ChatMessage,
   ChatMode,
   EffortLevel,
   KnowledgeSourceMode,
+  McpPrompt,
+  McpResource,
+  McpServerConfig,
+  RunTrace,
 } from '../../types';
+import { BottomSheet } from '../../ui/BottomSheet';
 import { MarkdownRenderer, type MarkdownCanvasRequest } from '../../ui/MarkdownRenderer';
 import { ThinkingBlock } from '../../ui/ThinkingBlock';
 import { ToolCallCard } from '../../ui/ToolCallCard';
@@ -75,9 +88,12 @@ import {
 } from '../../utils/studyTools';
 import { QuickConnectSheet } from '../servers/QuickConnectSheet';
 import { AgentSwitcherSheet } from './AgentSwitcherSheet';
+import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
 import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
+import { PromptMacrosSheet } from './PromptMacrosSheet';
+import { RunTraceSheet } from './RunTraceSheet';
 import { SavedNotesModal } from './SavedNotesModal';
 import { StudyFlashcardsModal } from './StudyFlashcardsModal';
 import { StudyQuizModal } from './StudyQuizModal';
@@ -209,6 +225,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     dynamicModels,
     settings,
     savedStudyNotes,
+    savedPrompts,
     isRunning,
     pendingApproval,
     sendMessage,
@@ -226,6 +243,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setStudyInstructions,
     saveStudyNote,
     removeSavedStudyNote,
+    savePromptMacro,
+    deletePromptMacro,
+    runCompareTurn,
+    acceptComparedReply,
     updateSettings,
   } = useHubStore();
 
@@ -240,6 +261,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
 
+  // MCP @ Resource & / Prompt pickers
+  const [mcpPickerMode, setMcpPickerMode] = useState<'resource' | 'prompt' | null>(null);
+  const [mcpPickerQuery, setMcpPickerQuery] = useState('');
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [promptArgsTarget, setPromptArgsTarget] = useState<{
+    server: McpServerConfig;
+    prompt: McpPrompt;
+  } | null>(null);
+  const [promptArgsValues, setPromptArgsValues] = useState<Record<string, string>>({});
+
   // Study Suite state
   const [studyPlanOpen, setStudyPlanOpen] = useState(false);
   const [vaultOpen, setVaultOpen] = useState(false);
@@ -249,6 +280,18 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
+
+  // Phase 4: Run Trace, Saved Macros & Compare Mode
+  const [traceSheetState, setTraceSheetState] = useState<{
+    trace: RunTrace;
+    title: string;
+  } | null>(null);
+  const [macrosSheetOpen, setMacrosSheetOpen] = useState(false);
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [compareModelIds, setCompareModelIds] = useState<string[]>(['demo-sandbox', 'gemini-4-hydrogen']);
+  const [compareLastPrompt, setCompareLastPrompt] = useState('');
+  const [compareLastAttachments, setCompareLastAttachments] = useState<ChatAttachment[]>([]);
+  const [compareResults, setCompareResults] = useState<CompareResultItem[]>([]);
 
   const [readerState, setReaderState] = useState<{
     title: string;
@@ -287,6 +330,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   const activeConv = conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
   const activeAgent = agents.find((a) => a.id === activeConv?.agentId) ?? agents[0];
+  const allCatalogModels = useMemo(() => mergeModelCatalog(dynamicModels), [dynamicModels]);
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeModelShort = getShortModelName(activeModel);
   const activeEffort: EffortLevel = activeConv?.effort ?? activeAgent.defaultEffort;
@@ -301,6 +345,50 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const { tools } = buildAgentToolCatalog(activeAgent, servers);
   const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
+
+  const availableResources = useMemo(() => {
+    const items: Array<{ server: McpServerConfig; resource: McpResource }> = [];
+    for (const srv of servers) {
+      if (!srv.enabled || srv.status !== 'connected') continue;
+      for (const res of srv.resources) {
+        items.push({ server: srv, resource: res });
+      }
+    }
+    return items;
+  }, [servers]);
+
+  const availablePrompts = useMemo(() => {
+    const items: Array<{ server: McpServerConfig; prompt: McpPrompt }> = [];
+    for (const srv of servers) {
+      if (!srv.enabled || srv.status !== 'connected') continue;
+      for (const prompt of srv.prompts) {
+        items.push({ server: srv, prompt });
+      }
+    }
+    return items;
+  }, [servers]);
+
+  const filteredMcpResources = useMemo(() => {
+    const q = mcpPickerQuery.trim().toLowerCase();
+    if (!q) return availableResources;
+    return availableResources.filter(
+      ({ resource, server }) =>
+        resource.name.toLowerCase().includes(q) ||
+        resource.uri.toLowerCase().includes(q) ||
+        server.name.toLowerCase().includes(q)
+    );
+  }, [availableResources, mcpPickerQuery]);
+
+  const filteredMcpPrompts = useMemo(() => {
+    const q = mcpPickerQuery.trim().toLowerCase();
+    if (!q) return availablePrompts;
+    return availablePrompts.filter(
+      ({ prompt, server }) =>
+        prompt.name.toLowerCase().includes(q) ||
+        (prompt.description ?? '').toLowerCase().includes(q) ||
+        server.name.toLowerCase().includes(q)
+    );
+  }, [availablePrompts, mcpPickerQuery]);
 
   const savedByMessageId = useMemo(() => {
     const map = new Map<string, string>();
@@ -408,14 +496,145 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setUploadError('');
     setStudyPlanOpen(false);
     setSourceMenuOpen(false);
+    setMcpPickerMode(null);
     triggerHaptic(settings.hapticsEnabled, 'light');
+
+    if (compareEnabled && compareModelIds.length > 0) {
+      setCompareLastPrompt(msg);
+      setCompareLastAttachments(currentAttachments);
+      setCompareResults(
+        compareModelIds.map((mId) => ({
+          modelId: mId,
+          status: 'running',
+          content: '',
+          reasoning: '',
+          citations: [],
+          durationMs: 0,
+        }))
+      );
+      await runCompareTurn(msg, compareModelIds, {
+        attachments: currentAttachments,
+        onModelUpdate: (mId, updatedItem) => {
+          setCompareResults((prev) => {
+            const exists = prev.some((r) => r.modelId === mId);
+            return exists
+              ? prev.map((r) => (r.modelId === mId ? updatedItem : r))
+              : [...prev, updatedItem];
+          });
+        },
+      });
+      return;
+    }
+
     await sendMessage(msg, { attachments: currentAttachments });
+  };
+
+  const handleComposerChange = (value: string) => {
+    setInput(value);
+    const resMatch = value.match(/(?:^|\s)@([^\s]*)$/);
+    if (resMatch && availableResources.length > 0) {
+      setMcpPickerMode('resource');
+      setMcpPickerQuery(resMatch[1] ?? '');
+      return;
+    }
+    const promptMatch = value.match(/(?:^|\s)\/([^\s]*)$/);
+    if (promptMatch && availablePrompts.length > 0) {
+      setMcpPickerMode('prompt');
+      setMcpPickerQuery(promptMatch[1] ?? '');
+      return;
+    }
+    if (mcpPickerMode) {
+      setMcpPickerMode(null);
+      setMcpPickerQuery('');
+    }
+  };
+
+  const handleSelectMcpResource = async (server: McpServerConfig, resource: McpResource) => {
+    setMcpBusy(true);
+    setUploadError('');
+    try {
+      const secrets = await loadServerSecrets(server.id);
+      const res = await readMcpResource({
+        server,
+        secrets,
+        saveUpdatedSecrets: (u) => saveServerSecrets(server.id, u),
+        uri: resource.uri,
+      });
+      const content = `[MCP Resource: ${resource.name} (${resource.uri}) from ${server.name}]\n${res.textSummary}`;
+      const attachment: ChatAttachment = {
+        id: `res_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: `@${resource.name}`,
+        mimeType: resource.mimeType ?? 'text/plain',
+        kind: 'file',
+        size: new Blob([content]).size,
+        textContent: content,
+      };
+      setAttachments((prev) => [...prev, attachment].slice(0, 4));
+      setInput((prev) => prev.replace(/(?:^|\s)@[^\s]*$/, (m) => (m.startsWith(' ') ? ' ' : '')).trimStart());
+      setMcpPickerMode(null);
+      setMcpPickerQuery('');
+      triggerHaptic(settings.hapticsEnabled, 'light');
+      setTimeout(() => composerRef.current?.focus(), 30);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to read MCP resource.');
+    } finally {
+      setMcpBusy(false);
+    }
+  };
+
+  const executeGetMcpPrompt = async (
+    server: McpServerConfig,
+    prompt: McpPrompt,
+    args: Record<string, string>
+  ) => {
+    setMcpBusy(true);
+    setUploadError('');
+    try {
+      const secrets = await loadServerSecrets(server.id);
+      const res = await getMcpPrompt({
+        server,
+        secrets,
+        saveUpdatedSecrets: (u) => saveServerSecrets(server.id, u),
+        name: prompt.name,
+        arguments: args,
+      });
+      const baseWithoutTrigger = input
+        .replace(/(?:^|\s)\/[^\s]*$/, (m) => (m.startsWith(' ') ? ' ' : ''))
+        .trim();
+      const nextText = baseWithoutTrigger
+        ? `${baseWithoutTrigger}\n\n${res.composedText}`
+        : res.composedText || `Run prompt "${prompt.name}"`;
+      setInput(nextText);
+      setMcpPickerMode(null);
+      setMcpPickerQuery('');
+      setPromptArgsTarget(null);
+      setPromptArgsValues({});
+      triggerHaptic(settings.hapticsEnabled, 'light');
+      setTimeout(() => composerRef.current?.focus(), 40);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to load MCP prompt.');
+    } finally {
+      setMcpBusy(false);
+    }
+  };
+
+  const handleSelectMcpPrompt = async (server: McpServerConfig, prompt: McpPrompt) => {
+    if (prompt.arguments && prompt.arguments.length > 0) {
+      const defaults: Record<string, string> = {};
+      for (const arg of prompt.arguments) defaults[arg.name] = '';
+      setPromptArgsValues(defaults);
+      setPromptArgsTarget({ server, prompt });
+      setMcpPickerMode(null);
+      return;
+    }
+    await executeGetMcpPrompt(server, prompt, {});
   };
 
   const handleQuickPrompt = async (promptText: string, displayText?: string) => {
     if (isRunning) return;
     setStudyPlanOpen(false);
     setSourceMenuOpen(false);
+    setMcpPickerMode(null);
     triggerHaptic(settings.hapticsEnabled, 'light');
     await sendMessage(promptText, displayText ? { displayText } : undefined);
   };
@@ -772,7 +991,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               })}
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
               {activeChatMode === 'study' && (
                 <>
                   {/* Compact Pomodoro Timer */}
@@ -929,6 +1148,34 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 <span>A2UI</span>
               </button>
 
+              {/* Multi-Model Side-by-Side Compare Toggle */}
+              <button
+                type="button"
+                data-testid="compare-toggle-btn"
+                aria-pressed={compareEnabled}
+                title="Compare 2-3 models side by side"
+                onClick={() => {
+                  triggerHaptic(settings.hapticsEnabled, 'light');
+                  setCompareEnabled((v) => !v);
+                }}
+                style={
+                  compareEnabled
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                        borderColor: 'var(--m3-primary)',
+                      }
+                    : {
+                        backgroundColor: 'var(--m3-surface-container-high)',
+                        borderColor: 'var(--m3-outline)',
+                      }
+                }
+                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+              >
+                <Columns className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Compare</span>
+              </button>
+
               {/* Effort Cycle Chip */}
               <button
                 type="button"
@@ -1018,6 +1265,33 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             </div>
           )}
         </header>
+
+        {compareEnabled && (
+          <CompareModelsPane
+            allModels={allCatalogModels}
+            selectedModelIds={compareModelIds}
+            results={compareResults}
+            lastPrompt={compareLastPrompt}
+            isRunning={isRunning}
+            a2uiEnabled={settings.a2uiEnabled}
+            onToggleModel={(mId) => {
+              setCompareModelIds((prev) => {
+                if (prev.includes(mId)) {
+                  return prev.length > 1 ? prev.filter((id) => id !== mId) : prev;
+                }
+                return prev.length >= 3 ? [...prev.slice(1), mId] : [...prev, mId];
+              });
+            }}
+            onAcceptReply={(item) => {
+              void acceptComparedReply(compareLastPrompt, item, compareLastAttachments).then(() => {
+                setCompareResults([]);
+                setCompareEnabled(false);
+              });
+            }}
+            onClearResults={() => setCompareResults([])}
+            onCloseCompare={() => setCompareEnabled(false)}
+          />
+        )}
 
         {/* Scrollable Editorial Message Stream */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 sm:px-6 py-5 space-y-6">
@@ -1438,6 +1712,24 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           <span>Share</span>
                         </button>
 
+                        {msg.runTrace && (
+                          <button
+                            type="button"
+                            data-testid="open-run-trace-btn"
+                            onClick={() =>
+                              setTraceSheetState({
+                                trace: msg.runTrace!,
+                                title: `${msgModelShort} · ${activeAgent.name}`,
+                              })
+                            }
+                            aria-label="Inspect execution trace"
+                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
+                          >
+                            <Activity className="w-3.5 h-3.5" />
+                            <span>Trace</span>
+                          </button>
+                        )}
+
                         {(msg.chatMode ?? activeChatMode) === 'professional' && (
                           <div className="ml-1 flex items-center gap-1 flex-wrap">
                             {(
@@ -1670,6 +1962,90 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               )}
             </AnimatePresence>
 
+            {/* Upward MCP Resource (@) & Prompt (/) Picker Popover */}
+            <AnimatePresence>
+              {mcpPickerMode && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                  transition={M3_EMPHASIZED_EASE}
+                  data-testid={`mcp-${mcpPickerMode}-popover`}
+                  style={{
+                    backgroundColor: 'var(--m3-surface-container-high)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="absolute left-0 bottom-full mb-2 w-80 max-w-[calc(100vw-24px)] max-h-64 overflow-y-auto rounded-2xl border p-1.5 shadow-xl z-30"
+                >
+                  <div className="flex items-center justify-between px-3 py-1.5">
+                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                      {mcpPickerMode === 'resource' ? 'Attach MCP Resource (@)' : 'Insert MCP Prompt (/)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setMcpPickerMode(null)}
+                      aria-label="Close MCP picker"
+                      className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {mcpBusy && (
+                    <div className="px-3 py-2 text-xs text-blue-600 dark:text-blue-400 inline-flex items-center gap-1.5">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Fetching from MCP server...</span>
+                    </div>
+                  )}
+
+                  {mcpPickerMode === 'resource' ? (
+                    filteredMcpResources.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
+                        No matching MCP resources found.
+                      </div>
+                    ) : (
+                      filteredMcpResources.map(({ server, resource }) => (
+                        <button
+                          key={`${server.id}:${resource.uri}`}
+                          type="button"
+                          onClick={() => void handleSelectMcpResource(server, resource)}
+                          className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left hover:bg-slate-200/60 dark:hover:bg-slate-800/70 transition-colors"
+                        >
+                          <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                            @{resource.name}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono truncate">
+                            {server.name} · {resource.uri}
+                          </div>
+                        </button>
+                      ))
+                    )
+                  ) : filteredMcpPrompts.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
+                      No matching MCP prompts found.
+                    </div>
+                  ) : (
+                    filteredMcpPrompts.map(({ server, prompt }) => (
+                      <button
+                        key={`${server.id}:${prompt.name}`}
+                        type="button"
+                        onClick={() => void handleSelectMcpPrompt(server, prompt)}
+                        className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left hover:bg-slate-200/60 dark:hover:bg-slate-800/70 transition-colors"
+                      >
+                        <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                          /{prompt.name}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {server.name}
+                          {prompt.description ? ` · ${prompt.description}` : ''}
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <div
               style={{
                 backgroundColor: 'var(--m3-surface-container-high)',
@@ -1723,7 +2099,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 ref={composerRef}
                 rows={1}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => handleComposerChange(e.target.value)}
                 onPaste={(e) => {
                   const files = Array.from(e.clipboardData?.files ?? []);
                   if (files.length > 0) {
@@ -1731,6 +2107,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   }
                 }}
                 onKeyDown={(e) => {
+                  if (e.key === 'Escape' && mcpPickerMode) {
+                    setMcpPickerMode(null);
+                    return;
+                  }
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     void handleSend();
@@ -1743,15 +2123,15 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       ? 'Ask anything to study, quiz, or outline...'
                       : activeChatMode === 'general'
                         ? 'Message directly...'
-                        : `Ask ${activeAgent.name}...`
+                        : `Ask ${activeAgent.name}... (@ resource, / prompt)`
                 }
                 aria-label="Chat message input"
                 className="w-full min-h-[38px] max-h-36 px-1.5 py-1 leading-[22px] bg-transparent text-[15px] text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 resize-none focus:outline-none"
               />
 
               {/* Compact Bottom Action Toolbar inside Composer */}
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 min-w-0">
+              <div className="flex items-end justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -1761,7 +2141,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       backgroundColor: 'var(--m3-surface-container)',
                       borderColor: 'var(--m3-outline)',
                     }}
-                    className="min-h-[38px] min-w-[38px] rounded-full border flex items-center justify-center shrink-0 text-slate-700 dark:text-slate-200 hover:opacity-90 transition-opacity"
+                    className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:min-w-[38px] rounded-full border flex items-center justify-center shrink-0 text-slate-700 dark:text-slate-200 hover:opacity-90 transition-opacity"
                   >
                     <Plus className="w-4 h-4" />
                   </button>
@@ -1784,12 +2164,70 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                             borderColor: 'var(--m3-outline)',
                           }
                     }
-                    className="min-h-[38px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                    className="min-h-[36px] sm:min-h-[38px] px-2.5 sm:px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
                   >
                     <activeSourceOption.Icon className="w-3.5 h-3.5 shrink-0" />
                     <span>{activeSourceOption.shortLabel}</span>
                     <ChevronUp className="w-3 h-3 opacity-70 shrink-0" />
                   </button>
+
+                  <button
+                    type="button"
+                    data-testid="macros-picker-btn"
+                    onClick={() => setMacrosSheetOpen(true)}
+                    aria-label="Open saved prompt macros"
+                    title="Saved Prompt Macros ({{var}})"
+                    style={{
+                      backgroundColor: 'var(--m3-surface-container)',
+                      borderColor: 'var(--m3-outline)',
+                    }}
+                    className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
+                  >
+                    <BookMarked className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Macros</span>
+                  </button>
+
+                  {availableResources.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="mcp-resource-picker-btn"
+                      onClick={() => {
+                        setMcpPickerQuery('');
+                        setMcpPickerMode((m) => (m === 'resource' ? null : 'resource'));
+                      }}
+                      aria-label="Attach MCP resource"
+                      title="Attach MCP resource (@)"
+                      style={{
+                        backgroundColor: 'var(--m3-surface-container)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
+                    >
+                      <AtSign className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Resource</span>
+                    </button>
+                  )}
+
+                  {availablePrompts.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="mcp-prompt-picker-btn"
+                      onClick={() => {
+                        setMcpPickerQuery('');
+                        setMcpPickerMode((m) => (m === 'prompt' ? null : 'prompt'));
+                      }}
+                      aria-label="Insert MCP prompt template"
+                      title="Insert MCP prompt (/)"
+                      style={{
+                        backgroundColor: 'var(--m3-surface-container)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Prompt</span>
+                    </button>
+                  )}
 
                   {activeKnowledgeSource === 'uploaded' && attachments.length === 0 && (
                     <button
@@ -2000,6 +2438,75 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           }}
         />
       )}
+
+      <BottomSheet
+        open={Boolean(promptArgsTarget)}
+        onClose={() => setPromptArgsTarget(null)}
+        title={promptArgsTarget ? `/${promptArgsTarget.prompt.name}` : 'Prompt Arguments'}
+        subtitle={promptArgsTarget?.prompt.description ?? 'Provide arguments for this MCP prompt'}
+      >
+        {promptArgsTarget && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void executeGetMcpPrompt(
+                promptArgsTarget.server,
+                promptArgsTarget.prompt,
+                promptArgsValues
+              );
+            }}
+            className="space-y-3"
+          >
+            {(promptArgsTarget.prompt.arguments ?? []).map((arg) => (
+              <div key={arg.name}>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                  {arg.name} {arg.required ? '*' : '(optional)'}
+                </label>
+                <input
+                  type="text"
+                  required={Boolean(arg.required)}
+                  value={promptArgsValues[arg.name] ?? ''}
+                  onChange={(e) =>
+                    setPromptArgsValues((prev) => ({ ...prev, [arg.name]: e.target.value }))
+                  }
+                  placeholder={arg.description ?? `Enter ${arg.name}`}
+                  className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm text-slate-900 dark:text-white"
+                />
+              </div>
+            ))}
+            <button
+              type="submit"
+              disabled={mcpBusy}
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="w-full min-h-[46px] rounded-full text-sm font-semibold disabled:opacity-50"
+            >
+              {mcpBusy ? 'Loading prompt...' : 'Insert into Composer'}
+            </button>
+          </form>
+        )}
+      </BottomSheet>
+
+      <RunTraceSheet
+        open={Boolean(traceSheetState)}
+        trace={traceSheetState?.trace ?? null}
+        messageTitle={traceSheetState?.title}
+        onClose={() => setTraceSheetState(null)}
+      />
+
+      <PromptMacrosSheet
+        open={macrosSheetOpen}
+        macros={savedPrompts}
+        onClose={() => setMacrosSheetOpen(false)}
+        onInsertMacro={(resolved) => {
+          setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${resolved}` : resolved));
+          setTimeout(() => composerRef.current?.focus(), 40);
+        }}
+        onSaveMacro={savePromptMacro}
+        onDeleteMacro={deletePromptMacro}
+      />
     </div>
   );
 }

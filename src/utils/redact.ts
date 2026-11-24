@@ -6,6 +6,9 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/gsk_[0-9A-Za-z]{16,}/g, 'gsk_[REDACTED]'],
   [/sk-or-v1-[0-9A-Za-z]{16,}/g, 'sk-or-v1-[REDACTED]'],
   [/sk-[0-9A-Za-z]{20,}/g, 'sk-[REDACTED]'],
+  [/ghp_[0-9A-Za-z]{20,}/g, 'ghp_[REDACTED]'],
+  [/github_pat_[0-9A-Za-z_]{20,}/g, 'github_pat_[REDACTED]'],
+  [/xox[baprs]-[0-9A-Za-z-]{16,}/g, 'xox-[REDACTED]'],
   [/("?(?:access_token|refresh_token|client_secret|api_key|apiKey|password|authorization|token)"?\s*[:=]\s*"?)[^"\s,&}]+/gi, '$1[REDACTED]'],
   [/([?&](?:key|api_key|token|access_token|client_secret)=)[^&\s]+/gi, '$1[REDACTED]'],
 ];

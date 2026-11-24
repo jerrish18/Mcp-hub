@@ -10,6 +10,7 @@
       "expo-router",
       "expo-secure-store",
       "expo-sqlite",
+      "expo-notifications",
       [
         "expo-local-authentication",
         {
@@ -21,7 +22,28 @@
       "package": "app.mcphub.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#2563EB"
-      }
+      },
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "mcphub"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
+          "action": "SEND",
+          "data": [
+            {
+              "mimeType": "text/plain"
+            }
+          ],
+          "category": ["DEFAULT"]
+        }
+      ]
     },
     "ios": {
       "bundleIdentifier": "app.mcphub.mobile",

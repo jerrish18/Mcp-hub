@@ -8,10 +8,11 @@ import {
   ListChecks,
   MessageSquareX,
   Server,
+  ShieldAlert,
   ShieldCheck,
   X,
 } from 'lucide-react';
-import type { ApprovalResolution, PendingApproval } from '../types';
+import type { AlwaysAllowDuration, ApprovalResolution, PendingApproval } from '../types';
 import { M3_SPRING } from '../utils/motion';
 
 interface WriteApprovalBannerProps {
@@ -42,6 +43,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
   const [isDirty, setIsDirty] = useState(false);
   const [denyPanelOpen, setDenyPanelOpen] = useState(false);
   const [denyReason, setDenyReason] = useState('');
+  const [alwaysDuration, setAlwaysDuration] = useState<AlwaysAllowDuration>('24h');
 
   const argEntries = useMemo(() => Object.entries(draftArgs), [draftArgs]);
 
@@ -95,16 +97,19 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
   };
 
   const handleApprove = (decision: 'approve' | 'always_allow') => {
+    const durationMeta =
+      decision === 'always_allow' ? { alwaysAllowDuration: alwaysDuration } : {};
     if (isDirty || viewMode === 'json') {
       const edited = resolveCurrentArguments();
       if (!edited) return;
-      onDecision({ decision, editedArguments: edited });
+      onDecision({ decision, editedArguments: edited, ...durationMeta });
       return;
     }
-    onDecision({ decision });
+    onDecision({ decision, ...durationMeta });
   };
 
   const isDestructive = Boolean(approval.isDestructive);
+  const hasInjectionWarning = Boolean(approval.injectionWarning);
 
   return (
     <motion.div
@@ -214,6 +219,20 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
       </div>
 
       <div className="p-4 space-y-3">
+        {hasInjectionWarning && (
+          <div
+            role="alert"
+            data-testid="approval-injection-warning"
+            className="rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 px-3 py-2.5 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-200"
+          >
+            <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+            <div className="space-y-0.5">
+              <div className="font-semibold">Prompt-Injection Guard Triggered</div>
+              <p className="leading-relaxed">{approval.injectionWarning}</p>
+            </div>
+          </div>
+        )}
+
         {/* Structured Field-Level Editor or Raw JSON */}
         {viewMode === 'fields' ? (
           argEntries.length === 0 ? (
@@ -412,20 +431,37 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
             <span>{isDirty ? 'Approve Edited' : 'Approve & Run'}</span>
           </button>
 
-          {!isDestructive && (
-            <button
-              type="button"
-              data-testid="approval-always-btn"
-              onClick={() => handleApprove('always_allow')}
-              style={{
-                backgroundColor: 'var(--m3-surface)',
-                borderColor: 'var(--m3-outline)',
-              }}
-              className="min-h-[42px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
-            >
-              <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <span>Always allow</span>
-            </button>
+          {!isDestructive && !hasInjectionWarning && (
+            <div className="inline-flex items-center gap-1.5 flex-wrap">
+              <select
+                aria-label="Always allow duration"
+                value={alwaysDuration}
+                onChange={(e) => setAlwaysDuration(e.target.value as AlwaysAllowDuration)}
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[42px] px-2.5 rounded-full border text-xs font-medium text-slate-800 dark:text-slate-100"
+              >
+                <option value="1h">1 hour</option>
+                <option value="24h">24 hours</option>
+                <option value="7d">7 days</option>
+                <option value="never">Always</option>
+              </select>
+              <button
+                type="button"
+                data-testid="approval-always-btn"
+                onClick={() => handleApprove('always_allow')}
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[42px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+              >
+                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                <span>Always allow</span>
+              </button>
+            </div>
           )}
 
           <button

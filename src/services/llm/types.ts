@@ -5,6 +5,7 @@ import type {
   GroundingCitation,
   KnowledgeSourceMode,
   ModelConfig,
+  ToolMediaBlock,
 } from '../../types';
 
 export interface LlmToolDefinition {
@@ -39,6 +40,7 @@ export type LlmConversationItem =
       toolCallId: string;
       toolName: string;
       content: string;
+      mediaBlocks?: ToolMediaBlock[];
       isError?: boolean;
     };
 

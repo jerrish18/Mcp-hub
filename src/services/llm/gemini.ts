@@ -164,12 +164,23 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
           },
         },
       };
+      const mediaParts: Array<Record<string, unknown>> = [];
+      for (const mb of msg.mediaBlocks ?? []) {
+        if (mb.type === 'image' && mb.data) {
+          mediaParts.push({
+            inlineData: {
+              mimeType: mb.mimeType || 'image/png',
+              data: mb.data,
+            },
+          });
+        }
+      }
       // Coalesce consecutive tool responses into a single 'user' turn for parallel function calls
       const prev = contents[contents.length - 1];
-      if (prev && prev.role === 'user' && prev.parts.every((p) => 'functionResponse' in p)) {
-        prev.parts.push(responsePart);
+      if (prev && prev.role === 'user' && prev.parts.some((p) => 'functionResponse' in p)) {
+        prev.parts.push(responsePart, ...mediaParts);
       } else {
-        contents.push({ role: 'user', parts: [responsePart] });
+        contents.push({ role: 'user', parts: [responsePart, ...mediaParts] });
       }
     }
   }

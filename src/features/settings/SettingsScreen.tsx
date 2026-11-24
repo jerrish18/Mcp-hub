@@ -21,7 +21,12 @@ import {
 import { PROVIDER_INFO } from '../../config/models';
 import { mergeModelCatalog, testModelConnection } from '../../services/llm/provider';
 import { useHubStore } from '../../store/useHubStore';
-import type { PixelAccentTheme, ProviderId, ProviderKeys } from '../../types';
+import type {
+  PixelAccentTheme,
+  ProviderId,
+  ProviderKeys,
+  ToolPermissionPolicy,
+} from '../../types';
 import { M3Switch } from '../../ui/M3Switch';
 import { triggerHaptic } from '../../utils/haptics';
 import { cardStaggerContainer, cardStaggerItem } from '../../utils/motion';
@@ -37,12 +42,19 @@ export function SettingsScreen() {
     providerKeys,
     dynamicModels,
     settings,
+    passphraseVaultEnabled,
     setProviderKeys,
     syncModels,
     addCustomModel,
     updateSettings,
     revokeAlwaysAllowedTool,
+    revokeAlwaysAllowedRule,
+    addToolPolicy,
+    removeToolPolicy,
     lockApp,
+    enableVaultPassphrase,
+    disableVaultPassphrase,
+    lockVaultSession,
     signOutAccount,
     syncWorkspaceNow,
   } = useHubStore();
@@ -67,6 +79,13 @@ export function SettingsScreen() {
 
   const [customProvider, setCustomProvider] = useState<ProviderId>('openrouter');
   const [customSlug, setCustomSlug] = useState('');
+  const [newVaultPassphrase, setNewVaultPassphrase] = useState('');
+  const [vaultStatusMsg, setVaultStatusMsg] = useState('');
+  const [vaultBusy, setVaultBusy] = useState(false);
+
+  const [policyToolKey, setPolicyToolKey] = useState('');
+  const [policyLevel, setPolicyLevel] = useState<ToolPermissionPolicy>('ask');
+  const [policyArgPattern, setPolicyArgPattern] = useState('');
 
   useEffect(() => {
     setGeminiKey(providerKeys.gemini ?? '');
@@ -532,6 +551,98 @@ export function SettingsScreen() {
               </span>
             )}
           </div>
+
+          {/* Optional PBKDF2 Passphrase Protection */}
+          <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-slate-900 dark:text-white">
+                  Passphrase-Derived Vault Key (PBKDF2-SHA256)
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {passphraseVaultEnabled
+                    ? 'Active: encryption key stays in memory only and locks on reload.'
+                    : 'Optional: replace the localStorage device key with an in-memory passphrase key.'}
+                </div>
+              </div>
+              {passphraseVaultEnabled && (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={lockVaultSession}
+                    className="min-h-[34px] px-3 rounded-full border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1"
+                  >
+                    <Lock className="w-3 h-3" />
+                    Lock Vault
+                  </button>
+                  <button
+                    type="button"
+                    disabled={vaultBusy}
+                    onClick={async () => {
+                      setVaultBusy(true);
+                      setVaultStatusMsg('');
+                      try {
+                        await disableVaultPassphrase();
+                        setVaultStatusMsg('Passphrase protection disabled; migrated keys to device key.');
+                      } catch (err) {
+                        setVaultStatusMsg(safeErrorMessage(err));
+                      } finally {
+                        setVaultBusy(false);
+                      }
+                    }}
+                    className="min-h-[34px] px-3 rounded-full border border-rose-300 dark:border-rose-800 text-xs font-semibold text-rose-700 dark:text-rose-300"
+                  >
+                    Disable
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {!passphraseVaultEnabled && (
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="password"
+                  value={newVaultPassphrase}
+                  onChange={(e) => setNewVaultPassphrase(e.target.value)}
+                  placeholder="Set vault passphrase (min 6 chars)"
+                  aria-label="Set vault passphrase"
+                  style={{
+                    backgroundColor: 'var(--m3-surface)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="flex-1 min-h-[40px] px-3 rounded-2xl border text-xs text-slate-900 dark:text-white"
+                />
+                <button
+                  type="button"
+                  disabled={vaultBusy || newVaultPassphrase.trim().length < 6}
+                  onClick={async () => {
+                    setVaultBusy(true);
+                    setVaultStatusMsg('');
+                    try {
+                      await enableVaultPassphrase(newVaultPassphrase.trim());
+                      setNewVaultPassphrase('');
+                      setVaultStatusMsg('PBKDF2 passphrase vault enabled and secrets migrated.');
+                    } catch (err) {
+                      setVaultStatusMsg(safeErrorMessage(err));
+                    } finally {
+                      setVaultBusy(false);
+                    }
+                  }}
+                  style={{
+                    backgroundColor: 'var(--m3-primary-container)',
+                    color: 'var(--m3-on-primary-container)',
+                  }}
+                  className="min-h-[40px] px-4 rounded-full text-xs font-semibold disabled:opacity-50"
+                >
+                  {vaultBusy ? 'Encrypting...' : 'Enable Passphrase'}
+                </button>
+              </div>
+            )}
+
+            {vaultStatusMsg && (
+              <div className="text-[11px] text-slate-600 dark:text-slate-300">{vaultStatusMsg}</div>
+            )}
+          </div>
         </motion.form>
 
         {/* App API & External Agent Control */}
@@ -763,6 +874,34 @@ export function SettingsScreen() {
 
           <div className="flex items-center justify-between gap-4 min-h-[44px] pt-2 border-t border-slate-200/60 dark:border-slate-800">
             <div>
+              <div className="text-sm font-medium text-slate-900 dark:text-white">
+                Tool output budget (chars)
+              </div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                Truncates oversized MCP responses before LLM context (1,000–32,000)
+              </div>
+            </div>
+            <input
+              type="number"
+              min={1000}
+              max={32000}
+              step={500}
+              aria-label="Tool output budget characters"
+              value={settings.toolOutputBudgetChars ?? 8000}
+              onChange={(e) =>
+                updateSettings({
+                  toolOutputBudgetChars: Math.max(
+                    1000,
+                    Math.min(32000, Number(e.target.value) || 8000)
+                  ),
+                })
+              }
+              className="w-24 min-h-[44px] px-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm text-center tabular-nums font-mono text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 min-h-[44px] pt-2 border-t border-slate-200/60 dark:border-slate-800">
+            <div>
               <div className="text-sm font-medium text-slate-900 dark:text-white">Haptic feedback</div>
               <div className="text-xs text-slate-500 dark:text-slate-400">
                 Pixel tactile feedback on send, approvals, and toggles
@@ -803,28 +942,183 @@ export function SettingsScreen() {
             </div>
           </div>
 
-          {settings.alwaysAllowedTools.length > 0 && (
+          {/* Per-Tool Permission Policies */}
+          <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-2.5">
+            <div>
+              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Per-tool permission policies
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                Set allow / ask / deny overrides per tool key (e.g. srv_github:github_push_file) and optional argument pattern.
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+              <input
+                type="text"
+                value={policyToolKey}
+                onChange={(e) => setPolicyToolKey(e.target.value)}
+                placeholder="serverId:toolName or toolName"
+                aria-label="Tool policy key"
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="sm:col-span-5 min-h-[40px] px-3 rounded-2xl border text-xs font-mono text-slate-900 dark:text-white"
+              />
+              <select
+                aria-label="Tool policy level"
+                value={policyLevel}
+                onChange={(e) => setPolicyLevel(e.target.value as ToolPermissionPolicy)}
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="sm:col-span-2 min-h-[40px] px-2.5 rounded-2xl border text-xs text-slate-900 dark:text-white"
+              >
+                <option value="ask">Ask</option>
+                <option value="allow">Allow</option>
+                <option value="deny">Deny</option>
+              </select>
+              <input
+                type="text"
+                value={policyArgPattern}
+                onChange={(e) => setPolicyArgPattern(e.target.value)}
+                placeholder="Optional arg pattern (*main*)"
+                aria-label="Tool policy argument pattern"
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="sm:col-span-3 min-h-[40px] px-3 rounded-2xl border text-xs font-mono text-slate-900 dark:text-white"
+              />
+              <button
+                type="button"
+                disabled={!policyToolKey.trim()}
+                onClick={() => {
+                  addToolPolicy({
+                    qualifiedKey: policyToolKey.trim(),
+                    policy: policyLevel,
+                    argPattern: policyArgPattern.trim() || undefined,
+                  });
+                  setPolicyToolKey('');
+                  setPolicyArgPattern('');
+                }}
+                style={{
+                  backgroundColor: 'var(--m3-primary-container)',
+                  color: 'var(--m3-on-primary-container)',
+                }}
+                className="sm:col-span-2 min-h-[40px] px-3 rounded-full text-xs font-semibold disabled:opacity-40"
+              >
+                Add Rule
+              </button>
+            </div>
+            {(settings.toolPolicies ?? []).length > 0 && (
+              <div className="space-y-1.5">
+                {(settings.toolPolicies ?? []).map((rule, idx) => (
+                  <div
+                    key={`${rule.qualifiedKey}-${rule.argPattern ?? 'any'}-${idx}`}
+                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-white dark:bg-slate-950 text-xs"
+                  >
+                    <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-slate-800 dark:text-slate-200 truncate">
+                        {rule.qualifiedKey}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          rule.policy === 'deny'
+                            ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
+                            : rule.policy === 'allow'
+                              ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                              : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                        }`}
+                      >
+                        {rule.policy}
+                      </span>
+                      {rule.argPattern && (
+                        <span className="font-mono text-[11px] text-slate-500">
+                          args~{rule.argPattern}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeToolPolicy(idx)}
+                      aria-label={`Remove policy for ${rule.qualifiedKey}`}
+                      className="min-h-[34px] px-2 text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1 shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {((settings.alwaysAllowedRules ?? []).length > 0 || settings.alwaysAllowedTools.length > 0) && (
             <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-2">
               <div className="text-xs font-semibold text-slate-600 dark:text-slate-400">
                 Always-allowed write tools
               </div>
-              {settings.alwaysAllowedTools.map((key) => (
-                <div
-                  key={key}
-                  className="flex items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-white dark:bg-slate-950 text-xs font-mono"
-                >
-                  <span className="truncate text-slate-700 dark:text-slate-300">{key}</span>
-                  <button
-                    type="button"
-                    onClick={() => revokeAlwaysAllowedTool(key)}
-                    aria-label={`Revoke always allow for ${key}`}
-                    className="min-h-[36px] px-2 text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1"
+              {(settings.alwaysAllowedRules ?? []).map((rule, idx) => {
+                const remainingMs = rule.expiresAt ? rule.expiresAt - Date.now() : null;
+                const expiryLabel =
+                  rule.expiresAt == null
+                    ? 'Never expires'
+                    : remainingMs && remainingMs > 0
+                      ? remainingMs >= 86400000
+                        ? `Expires in ${Math.ceil(remainingMs / 86400000)}d`
+                        : remainingMs >= 3600000
+                          ? `Expires in ${Math.ceil(remainingMs / 3600000)}h`
+                          : `Expires in ${Math.max(1, Math.ceil(remainingMs / 60000))}m`
+                      : 'Expired';
+                return (
+                  <div
+                    key={`${rule.qualifiedKey}-${idx}`}
+                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-white dark:bg-slate-950 text-xs font-mono"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Revoke
-                  </button>
-                </div>
-              ))}
+                    <div className="min-w-0">
+                      <div className="truncate text-slate-700 dark:text-slate-300">
+                        {rule.qualifiedKey}
+                      </div>
+                      <div className="text-[11px] text-slate-500 tabular-nums">
+                        {expiryLabel}
+                        {rule.argPattern ? ` · args~${rule.argPattern}` : ''}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => revokeAlwaysAllowedRule(idx)}
+                      aria-label={`Revoke always allow rule for ${rule.qualifiedKey}`}
+                      className="min-h-[36px] px-2 text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1 shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Revoke
+                    </button>
+                  </div>
+                );
+              })}
+              {settings.alwaysAllowedTools
+                .filter(
+                  (key) => !(settings.alwaysAllowedRules ?? []).some((r) => r.qualifiedKey === key)
+                )
+                .map((key) => (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-white dark:bg-slate-950 text-xs font-mono"
+                  >
+                    <span className="truncate text-slate-700 dark:text-slate-300">{key}</span>
+                    <button
+                      type="button"
+                      onClick={() => revokeAlwaysAllowedTool(key)}
+                      aria-label={`Revoke always allow for ${key}`}
+                      className="min-h-[36px] px-2 text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Revoke
+                    </button>
+                  </div>
+                ))}
             </div>
           )}
         </motion.section>

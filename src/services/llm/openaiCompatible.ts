@@ -92,6 +92,21 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
         name: msg.toolName,
         content: msg.content,
       });
+      const imgBlocks = (msg.mediaBlocks ?? []).filter((b) => b.type === 'image' && b.data);
+      if (imgBlocks.length > 0) {
+        formattedMessages.push({
+          role: 'user',
+          content: [
+            { type: 'text', text: `[Visual output from tool ${msg.toolName}]` },
+            ...imgBlocks.map((b) => ({
+              type: 'image_url',
+              image_url: {
+                url: `data:${b.mimeType || 'image/png'};base64,${b.data}`,
+              },
+            })),
+          ],
+        });
+      }
     }
   }
 

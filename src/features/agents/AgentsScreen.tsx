@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Compass,
   Copy,
+  Download,
   MessageCircle,
   MessageSquare,
   Pencil,
@@ -15,6 +16,7 @@ import {
   Search,
   Terminal,
   Trash2,
+  Upload,
   Wrench,
 } from 'lucide-react';
 import { mergeModelCatalog } from '../../services/llm/provider';
@@ -25,6 +27,7 @@ import {
   AgentProfileSchema,
   type ChatMode,
   type EffortLevel,
+  type ToolPermissionPolicy,
 } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { M3Switch } from '../../ui/M3Switch';
@@ -80,8 +83,12 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
   const [selectedServerIds, setSelectedServerIds] = useState<string[]>([]);
   const [allToolsAllowed, setAllToolsAllowed] = useState(true);
   const [selectedToolNames, setSelectedToolNames] = useState<string[]>([]);
+  const [toolPolicies, setToolPolicies] = useState<Record<string, ToolPermissionPolicy>>({});
   const [expandedServerId, setExpandedServerId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
+  const [importOpen, setImportOpen] = useState(false);
+  const [importJsonText, setImportJsonText] = useState('');
+  const [importError, setImportError] = useState('');
 
   const filteredAgents = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -111,6 +118,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
     setSelectedServerIds(servers.map((s) => s.id));
     setAllToolsAllowed(true);
     setSelectedToolNames([]);
+    setToolPolicies({});
     setExpandedServerId(null);
     setFormError('');
     setEditorOpen(true);
@@ -130,6 +138,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
     setSelectedServerIds(agent.allowedServerIds ?? servers.map((s) => s.id));
     setAllToolsAllowed(agent.allowedToolNames === null);
     setSelectedToolNames(agent.allowedToolNames ?? []);
+    setToolPolicies(agent.toolPolicies ?? {});
     setExpandedServerId(null);
     setFormError('');
     setEditorOpen(true);
@@ -152,6 +161,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
       studyInstructions: studyInstructions.trim(),
       allowedServerIds: allServersAllowed ? null : selectedServerIds,
       allowedToolNames: allToolsAllowed ? null : selectedToolNames,
+      toolPolicies: Object.keys(toolPolicies).length > 0 ? toolPolicies : undefined,
       isBuiltIn: existing?.isBuiltIn ?? false,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -174,6 +184,50 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
     );
   };
 
+  const handleExportAgentJson = (agent: AgentProfile) => {
+    const payload = {
+      ...agent,
+      isBuiltIn: false,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = agent.name.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'agent';
+    a.download = `${safeName}.mcphub-agent.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    triggerHaptic(settings.hapticsEnabled, 'light');
+  };
+
+  const handleImportAgentSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setImportError('');
+    try {
+      const parsedRaw = JSON.parse(importJsonText.trim()) as Record<string, unknown>;
+      const now = Date.now();
+      const candidate = {
+        ...parsedRaw,
+        id: `agent_${now}_${Math.random().toString(36).slice(2, 6)}`,
+        isBuiltIn: false,
+        createdAt: typeof parsedRaw.createdAt === 'number' ? parsedRaw.createdAt : now,
+        updatedAt: now,
+      };
+      const result = AgentProfileSchema.safeParse(candidate);
+      if (!result.success) {
+        setImportError(result.error.issues[0]?.message ?? 'Invalid Agent JSON schema.');
+        return;
+      }
+      saveAgent(result.data);
+      triggerHaptic(settings.hapticsEnabled, 'success');
+      setImportJsonText('');
+      setImportOpen(false);
+    } catch {
+      setImportError('Please provide valid JSON for an Agent profile.');
+    }
+  };
+
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
@@ -189,18 +243,36 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
               Tailored personas with default chat modes, study templates & granular MCP tool scopes
             </p>
           </div>
-          <button
-            type="button"
-            onClick={openCreate}
-            style={{
-              backgroundColor: 'var(--m3-primary)',
-              color: 'var(--m3-on-primary)',
-            }}
-            className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center justify-center gap-1.5 shrink-0 transition-opacity hover:opacity-90"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Agent</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              data-testid="import-agent-json-btn"
+              onClick={() => {
+                setImportError('');
+                setImportOpen(true);
+              }}
+              style={{
+                backgroundColor: 'var(--m3-surface-container-high)',
+                borderColor: 'var(--m3-outline)',
+              }}
+              className="min-h-[44px] px-3.5 py-2 rounded-full border text-sm font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center justify-center gap-1.5 transition-opacity hover:opacity-90"
+            >
+              <Upload className="w-4 h-4" />
+              <span>Import JSON</span>
+            </button>
+            <button
+              type="button"
+              onClick={openCreate}
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="min-h-[44px] px-4 py-2 rounded-full text-sm font-semibold inline-flex items-center justify-center gap-1.5 shrink-0 transition-opacity hover:opacity-90"
+            >
+              <Plus className="w-4 h-4" />
+              <span>New Agent</span>
+            </button>
+          </div>
         </div>
 
         {/* Search + Chat Mode Filter Bar */}
@@ -375,6 +447,16 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                     </button>
 
                     <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleExportAgentJson(agent)}
+                        aria-label={`Export ${agent.name} as JSON`}
+                        title="Export Agent JSON"
+                        data-testid={`export-agent-${agent.id}`}
+                        className="min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-slate-500 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
                       <button
                         type="button"
                         onClick={() => {
@@ -685,21 +767,46 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                               Clear
                             </button>
                           </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                            {srv.tools.map((tool) => (
-                              <label
-                                key={tool.name}
-                                className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={selectedToolNames.includes(tool.name)}
-                                  onChange={() => toggleToolName(tool.name)}
-                                  className="w-3.5 h-3.5 accent-blue-600"
-                                />
-                                <span className="font-mono text-[11px] truncate">{tool.name}</span>
-                              </label>
-                            ))}
+                          <div className="grid grid-cols-1 gap-1.5">
+                            {srv.tools.map((tool) => {
+                              const qKey = `${srv.id}:${tool.name}`;
+                              const currentPol = toolPolicies[qKey] ?? '';
+                              return (
+                                <div
+                                  key={tool.name}
+                                  className="flex items-center justify-between gap-2 text-xs text-slate-700 dark:text-slate-300"
+                                >
+                                  <label className="flex items-center gap-2 min-w-0">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedToolNames.includes(tool.name)}
+                                      onChange={() => toggleToolName(tool.name)}
+                                      className="w-3.5 h-3.5 accent-blue-600 shrink-0"
+                                    />
+                                    <span className="font-mono text-[11px] truncate">{tool.name}</span>
+                                  </label>
+                                  <select
+                                    aria-label={`Policy for ${tool.name}`}
+                                    value={currentPol}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setToolPolicies((prev) => {
+                                        const next = { ...prev };
+                                        if (!val) delete next[qKey];
+                                        else next[qKey] = val as ToolPermissionPolicy;
+                                        return next;
+                                      });
+                                    }}
+                                    className="px-2 py-0.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-[11px] text-slate-700 dark:text-slate-200 shrink-0"
+                                  >
+                                    <option value="">Default</option>
+                                    <option value="allow">Allow</option>
+                                    <option value="ask">Ask</option>
+                                    <option value="deny">Deny</option>
+                                  </select>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
@@ -719,6 +826,75 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
             className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
           >
             Save Agent
+          </button>
+        </form>
+      </BottomSheet>
+
+      <BottomSheet
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        title="Import Agent JSON"
+        subtitle="Upload an exported .json template or paste an AgentProfile JSON payload"
+      >
+        <form onSubmit={handleImportAgentSubmit} className="space-y-4">
+          {importError && (
+            <div className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+              {importError}
+            </div>
+          )}
+
+          <div>
+            <label
+              htmlFor="agent-json-file"
+              className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5"
+            >
+              Load from .json file
+            </label>
+            <input
+              id="agent-json-file"
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                void file.text().then((txt) => {
+                  setImportJsonText(txt);
+                  setImportError('');
+                });
+              }}
+              className="block w-full text-xs text-slate-600 dark:text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 dark:file:bg-blue-950 dark:file:text-blue-200"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="agent-json-paste"
+              className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+            >
+              Agent JSON Payload
+            </label>
+            <textarea
+              id="agent-json-paste"
+              data-testid="agent-import-textarea"
+              rows={8}
+              value={importJsonText}
+              onChange={(e) => setImportJsonText(e.target.value)}
+              placeholder='{"name":"SQL Reviewer","systemPrompt":"Review queries safely.","defaultModelId":"demo-sandbox","defaultChatMode":"professional"}'
+              className="w-full p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-xs text-slate-900 dark:text-white"
+              required
+            />
+          </div>
+
+          <button
+            type="submit"
+            data-testid="agent-import-submit-btn"
+            style={{
+              backgroundColor: 'var(--m3-primary)',
+              color: 'var(--m3-on-primary)',
+            }}
+            className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
+          >
+            Validate & Import Agent
           </button>
         </form>
       </BottomSheet>

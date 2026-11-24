@@ -6,21 +6,54 @@ import {
   getDocs,
   query,
   serverTimestamp,
-  setDoc,
   where,
+  writeBatch,
+  type DocumentReference,
 } from 'firebase/firestore';
 import { DEFAULT_SETTINGS } from '../../store/defaults';
 import type {
   AgentProfile,
   AppSettings,
-  ChatAttachment,
   Conversation,
   McpServerConfig,
   ModelConfig,
+  SavedPrompt,
 } from '../../types';
 import type { SavedStudyNote } from '../../utils/studyTools';
 import { getAppSessionToken, type AuthUser } from '../auth/appAuth';
 import { auth, db, handleFirestoreError, OperationType } from '../firebase/client';
+import {
+  chunkArray,
+  computeConversationSignature,
+  computeDirtySyncPlan,
+  computeStateSignature,
+  computeStudyNoteSignature,
+  FIRESTORE_BATCH_LIMIT,
+  sanitizeConversationForSync,
+  sanitizeDocId,
+  sanitizeSavedPromptsForSync,
+  sanitizeServersForSync,
+  sanitizeSettingsForSync,
+  sanitizeStudyNoteForSync,
+  stripUndefined,
+  type DirtySyncPlan,
+  type RemoteSyncBaseline,
+} from './syncDiff';
+
+export {
+  chunkArray,
+  computeConversationSignature,
+  computeDirtySyncPlan,
+  computeStateSignature,
+  computeStudyNoteSignature,
+  sanitizeConversationForSync,
+  sanitizeServersForSync,
+  sanitizeSettingsForSync,
+  sanitizeStudyNoteForSync,
+  stripUndefined,
+  type DirtySyncPlan,
+  type RemoteSyncBaseline,
+};
 
 export interface WorkspaceSnapshot {
   settings: AppSettings;
@@ -28,122 +61,39 @@ export interface WorkspaceSnapshot {
   servers: McpServerConfig[];
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
+  savedPrompts?: SavedPrompt[];
   conversations: Conversation[];
   savedStudyNotes: SavedStudyNote[];
   updatedAt: number;
 }
 
+const remoteBaselines = new Map<string, RemoteSyncBaseline>();
+
+export function resetRemoteSyncBaseline(uid?: string): void {
+  if (uid) {
+    remoteBaselines.delete(uid);
+  } else {
+    remoteBaselines.clear();
+  }
+}
+
+export function getOrCreateBaseline(uid: string): RemoteSyncBaseline {
+  let baseline = remoteBaselines.get(uid);
+  if (!baseline) {
+    baseline = {
+      stateExists: false,
+      stateSignature: null,
+      convSignatures: new Map(),
+      noteSignatures: new Map(),
+    };
+    remoteBaselines.set(uid, baseline);
+  }
+  return baseline;
+}
+
 export function getAccountScope(user: AuthUser | null): string {
   if (!user) return 'guest';
   return `${user.provider}:${user.id}`;
-}
-
-export function stripUndefined<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => stripUndefined(item)) as unknown as T;
-  }
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (v !== undefined) {
-        out[k] = stripUndefined(v);
-      }
-    }
-    return out as T;
-  }
-  return value;
-}
-
-function sanitizeDocId(rawId: string, fallbackPrefix = 'item'): string {
-  const cleaned = rawId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
-  return cleaned || `${fallbackPrefix}_${Date.now()}`;
-}
-
-export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
-  return {
-    theme: settings.theme,
-    accentTheme: settings.accentTheme,
-    oledDark: Boolean(settings.oledDark),
-    a2uiEnabled: settings.a2uiEnabled !== false,
-    confirmBeforeWrite: Boolean(settings.confirmBeforeWrite),
-    maxAgentSteps: Math.max(1, Math.min(25, Number(settings.maxAgentSteps) || 10)),
-    alwaysAllowedTools: Array.isArray(settings.alwaysAllowedTools)
-      ? settings.alwaysAllowedTools.slice(0, 100)
-      : [],
-    biometricLockEnabled: Boolean(settings.biometricLockEnabled),
-    hapticsEnabled: Boolean(settings.hapticsEnabled),
-    onboardingCompleted: Boolean(settings.onboardingCompleted),
-  };
-}
-
-export function sanitizeServersForSync(servers: McpServerConfig[]): McpServerConfig[] {
-  return servers.slice(0, 50).map((srv) =>
-    stripUndefined({
-      id: srv.id,
-      name: srv.name.slice(0, 80),
-      url: srv.url,
-      authType: srv.authType,
-      enabled: srv.enabled,
-      transportPreference: srv.transportPreference,
-      status: 'disconnected' as const,
-      tools: srv.url.startsWith('virtual://') ? [] : (srv.tools ?? []).slice(0, 25),
-      resources: [],
-      prompts: [],
-      disabledTools: (srv.disabledTools ?? []).slice(0, 100),
-      presetId: srv.presetId,
-      docsUrl: srv.docsUrl,
-    })
-  );
-}
-
-function sanitizeAttachments(attachments?: ChatAttachment[]): ChatAttachment[] | undefined {
-  if (!attachments || attachments.length === 0) return undefined;
-  return attachments.slice(0, 6).map((att) =>
-    stripUndefined({
-      id: att.id,
-      name: att.name.slice(0, 120),
-      mimeType: att.mimeType.slice(0, 120),
-      kind: att.kind,
-      size: att.size,
-      textContent: att.textContent ? att.textContent.slice(0, 8000) : undefined,
-      previewUrl:
-        att.previewUrl && att.previewUrl.length <= 2048 ? att.previewUrl : undefined,
-    })
-  );
-}
-
-export function sanitizeConversationForSync(conv: Conversation): Conversation {
-  return stripUndefined({
-    ...conv,
-    id: sanitizeDocId(conv.id, 'conv'),
-    title: (conv.title || 'New Chat').trim().slice(0, 200) || 'New Chat',
-    agentId: (conv.agentId || 'agent_general').slice(0, 128),
-    modelId: (conv.modelId || 'demo-sandbox').slice(0, 160),
-    effort: conv.effort ?? 'medium',
-    chatMode: conv.chatMode ?? 'professional',
-    knowledgeSource: conv.knowledgeSource ?? 'auto',
-    studyInstructions: String(conv.studyInstructions ?? '').slice(0, 4000),
-    messages: (conv.messages ?? []).slice(-150).map((m) =>
-      stripUndefined({
-        ...m,
-        content: String(m.content ?? '').slice(0, 60000),
-        reasoning: m.reasoning ? m.reasoning.slice(0, 12000) : undefined,
-        attachments: sanitizeAttachments(m.attachments),
-        isStreaming: false,
-      })
-    ),
-  });
-}
-
-export function sanitizeStudyNoteForSync(note: SavedStudyNote): SavedStudyNote {
-  return stripUndefined({
-    id: sanitizeDocId(note.id, 'snote'),
-    title: (note.title || 'Study Note').trim().slice(0, 200) || 'Study Note',
-    content: String(note.content ?? '').slice(0, 120000) || 'Empty note',
-    modelLabel: note.modelLabel ? note.modelLabel.slice(0, 120) : undefined,
-    messageId: note.messageId ? note.messageId.slice(0, 128) : undefined,
-    createdAt: Number(note.createdAt) || Date.now(),
-  });
 }
 
 /**
@@ -235,12 +185,28 @@ export function mergeWorkspaceSnapshots(
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, 80);
 
+  // Merge saved prompt macros by id (newest updatedAt wins)
+  const promptMap = new Map<string, SavedPrompt>();
+  for (const p of local.savedPrompts ?? []) {
+    promptMap.set(p.id, p);
+  }
+  for (const p of remote.savedPrompts ?? []) {
+    const existing = promptMap.get(p.id);
+    if (!existing || (p.updatedAt ?? 0) >= (existing.updatedAt ?? 0)) {
+      promptMap.set(p.id, p);
+    }
+  }
+  const savedPrompts = Array.from(promptMap.values())
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 100);
+
   return {
     settings,
     agents: Array.from(agentMap.values()),
     servers: Array.from(serverMap.values()),
     dynamicModels: Array.from(modelMap.values()),
     dismissedDefaultServerIds: Array.from(dismissedSet),
+    savedPrompts,
     conversations,
     savedStudyNotes,
     updatedAt: Math.max(localUpdated, remoteUpdated, Date.now()),
@@ -301,9 +267,14 @@ export async function fetchRemoteWorkspace(
   }
 
   const stateData = stateSnap?.exists() ? stateSnap.data() : null;
+  const baseline = getOrCreateBaseline(uid);
+  baseline.stateExists = Boolean(stateData);
+  baseline.convSignatures.clear();
+  baseline.noteSignatures.clear();
+
   const conversations: Conversation[] = convDocs.docs.map((d) => {
     const data = d.data();
-    return {
+    const conv: Conversation = {
       id: String(data.id ?? d.id),
       title: String(data.title ?? 'New Chat'),
       agentId: String(data.agentId ?? 'agent_general'),
@@ -316,11 +287,14 @@ export async function fetchRemoteWorkspace(
       createdAt: Number(data.clientCreatedAt ?? Date.now()),
       updatedAt: Number(data.clientUpdatedAt ?? Date.now()),
     };
+    const sanitized = sanitizeConversationForSync(conv);
+    baseline.convSignatures.set(sanitized.id, computeConversationSignature(sanitized));
+    return conv;
   });
 
   const savedStudyNotes: SavedStudyNote[] = noteDocs.docs.map((d) => {
     const data = d.data();
-    return {
+    const note: SavedStudyNote = {
       id: String(data.id ?? d.id),
       title: String(data.title ?? 'Study Note'),
       content: String(data.content ?? ''),
@@ -328,7 +302,41 @@ export async function fetchRemoteWorkspace(
       messageId: typeof data.messageId === 'string' ? data.messageId : undefined,
       createdAt: Number(data.clientCreatedAt ?? Date.now()),
     };
+    const sanitized = sanitizeStudyNoteForSync(note);
+    baseline.noteSignatures.set(sanitized.id, computeStudyNoteSignature(sanitized));
+    return note;
   });
+
+  if (stateData) {
+    baseline.stateSignature = computeStateSignature({
+      settings: sanitizeSettingsForSync({
+        ...DEFAULT_SETTINGS,
+        ...((stateData.settings as Partial<AppSettings>) ?? {}),
+      }),
+      agents: stripUndefined(
+        (Array.isArray(stateData.agents) ? (stateData.agents as AgentProfile[]) : []).slice(0, 50)
+      ),
+      servers: sanitizeServersForSync(
+        Array.isArray(stateData.servers) ? (stateData.servers as McpServerConfig[]) : []
+      ),
+      dynamicModels: stripUndefined(
+        (Array.isArray(stateData.dynamicModels)
+          ? (stateData.dynamicModels as ModelConfig[])
+          : []
+        ).slice(0, 100)
+      ),
+      dismissedDefaultServerIds: Array.isArray(stateData.dismissedDefaultServerIds)
+        ? (stateData.dismissedDefaultServerIds as string[]).slice(0, 50)
+        : [],
+      ...(Array.isArray(stateData.savedPrompts)
+        ? {
+            savedPrompts: sanitizeSavedPromptsForSync(stateData.savedPrompts as SavedPrompt[]),
+          }
+        : {}),
+    });
+  } else {
+    baseline.stateSignature = null;
+  }
 
   if (!stateData && conversations.length === 0 && savedStudyNotes.length === 0) {
     return null;
@@ -349,10 +357,20 @@ export async function fetchRemoteWorkspace(
     dismissedDefaultServerIds: Array.isArray(stateData?.dismissedDefaultServerIds)
       ? (stateData.dismissedDefaultServerIds as string[])
       : undefined,
+    savedPrompts: Array.isArray(stateData?.savedPrompts)
+      ? (stateData.savedPrompts as SavedPrompt[])
+      : undefined,
     conversations,
     savedStudyNotes,
     updatedAt: updatedAtMillis,
   };
+}
+
+interface BatchWriteItem {
+  op: 'create' | 'update';
+  ref: DocumentReference;
+  data: Record<string, unknown>;
+  onCommitted: () => void;
 }
 
 export async function pushRemoteWorkspace(
@@ -365,6 +383,7 @@ export async function pushRemoteWorkspace(
     servers: sanitizeServersForSync(snapshot.servers),
     dynamicModels: stripUndefined(snapshot.dynamicModels.slice(0, 100)),
     dismissedDefaultServerIds: snapshot.dismissedDefaultServerIds.slice(0, 50),
+    savedPrompts: sanitizeSavedPromptsForSync(snapshot.savedPrompts ?? []),
     conversations: snapshot.conversations.slice(0, 150).map(sanitizeConversationForSync),
     savedStudyNotes: snapshot.savedStudyNotes.slice(0, 80).map(sanitizeStudyNoteForSync),
   };
@@ -389,82 +408,121 @@ export async function pushRemoteWorkspace(
     return body.updatedAt ?? Date.now();
   }
 
-  // Google account via Firestore
+  // Google account via Firestore — batched & dirty-only writes (no per-doc getDoc!)
   const fbUser = auth.currentUser;
   if (!fbUser || fbUser.uid !== user.id || !fbUser.emailVerified) {
     return Date.now();
   }
   const uid = fbUser.uid;
-  const stateRef = doc(db, 'users', uid, 'workspace', 'state');
-  const statePath = `users/${uid}/workspace/state`;
-  try {
-    const existingState = await getDoc(stateRef).catch(() => null);
-    await setDoc(stateRef, {
-      ownerId: uid,
+  const baseline = getOrCreateBaseline(uid);
+  const plan = computeDirtySyncPlan(cleanPayload, baseline);
+  const writeItems: BatchWriteItem[] = [];
+
+  if (plan.stateOp) {
+    const stateRef = doc(db, 'users', uid, 'workspace', 'state');
+    const sharedStateFields = {
       settings: cleanPayload.settings,
       agents: cleanPayload.agents,
       servers: cleanPayload.servers,
       dynamicModels: cleanPayload.dynamicModels,
       dismissedDefaultServerIds: cleanPayload.dismissedDefaultServerIds,
-      createdAt:
-        existingState && existingState.exists()
-          ? existingState.data().createdAt
-          : serverTimestamp(),
+      savedPrompts: cleanPayload.savedPrompts,
       updatedAt: serverTimestamp(),
+    };
+    writeItems.push({
+      op: plan.stateOp,
+      ref: stateRef,
+      data:
+        plan.stateOp === 'create'
+          ? { ownerId: uid, ...sharedStateFields, createdAt: serverTimestamp() }
+          : sharedStateFields,
+      onCommitted: () => {
+        baseline.stateExists = true;
+        baseline.stateSignature = plan.stateSignature;
+      },
     });
-  } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, statePath);
   }
 
-  for (const conv of cleanPayload.conversations) {
+  for (const item of plan.dirtyConversations) {
+    const conv = item.conv;
     const convRef = doc(db, 'users', uid, 'conversations', conv.id);
-    const convPath = `users/${uid}/conversations/${conv.id}`;
-    try {
-      const existingConv = await getDoc(convRef).catch(() => null);
-      await setDoc(convRef, {
-        ownerId: uid,
-        id: conv.id,
-        title: conv.title,
-        agentId: conv.agentId,
-        modelId: conv.modelId,
-        effort: conv.effort,
-        chatMode: conv.chatMode,
-        knowledgeSource: conv.knowledgeSource,
-        studyInstructions: conv.studyInstructions,
-        messages: conv.messages,
-        clientCreatedAt: existingConv?.exists()
-          ? existingConv.data().clientCreatedAt
-          : conv.createdAt || Date.now(),
-        clientUpdatedAt: conv.updatedAt || Date.now(),
-        createdAt: existingConv?.exists() ? existingConv.data().createdAt : serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, convPath);
-    }
+    const mutableFields = {
+      title: conv.title,
+      agentId: conv.agentId,
+      modelId: conv.modelId,
+      effort: conv.effort,
+      chatMode: conv.chatMode,
+      knowledgeSource: conv.knowledgeSource,
+      studyInstructions: conv.studyInstructions,
+      messages: conv.messages,
+      clientUpdatedAt: conv.updatedAt || Date.now(),
+      updatedAt: serverTimestamp(),
+    };
+    writeItems.push({
+      op: item.op,
+      ref: convRef,
+      data:
+        item.op === 'create'
+          ? {
+              ownerId: uid,
+              id: conv.id,
+              ...mutableFields,
+              clientCreatedAt: conv.createdAt || Date.now(),
+              createdAt: serverTimestamp(),
+            }
+          : mutableFields,
+      onCommitted: () => {
+        baseline.convSignatures.set(conv.id, item.signature);
+      },
+    });
   }
 
-  for (const note of cleanPayload.savedStudyNotes) {
+  for (const item of plan.dirtyNotes) {
+    const note = item.note;
     const noteRef = doc(db, 'users', uid, 'studyNotes', note.id);
-    const notePath = `users/${uid}/studyNotes/${note.id}`;
+    const mutableFields: Record<string, unknown> = {
+      title: note.title,
+      content: note.content,
+      updatedAt: serverTimestamp(),
+    };
+    if (note.modelLabel) mutableFields.modelLabel = note.modelLabel;
+    if (note.messageId) mutableFields.messageId = note.messageId;
+    writeItems.push({
+      op: item.op,
+      ref: noteRef,
+      data:
+        item.op === 'create'
+          ? {
+              ownerId: uid,
+              id: note.id,
+              ...mutableFields,
+              clientCreatedAt: note.createdAt || Date.now(),
+              createdAt: serverTimestamp(),
+            }
+          : mutableFields,
+      onCommitted: () => {
+        baseline.noteSignatures.set(note.id, item.signature);
+      },
+    });
+  }
+
+  const chunks = chunkArray(writeItems, FIRESTORE_BATCH_LIMIT);
+  for (const chunk of chunks) {
+    const batch = writeBatch(db);
+    for (const item of chunk) {
+      if (item.op === 'create') {
+        batch.set(item.ref, item.data);
+      } else {
+        batch.update(item.ref, item.data);
+      }
+    }
     try {
-      const existingNote = await getDoc(noteRef).catch(() => null);
-      const payload: Record<string, unknown> = {
-        ownerId: uid,
-        id: note.id,
-        title: note.title,
-        content: note.content,
-        clientCreatedAt: existingNote?.exists()
-          ? existingNote.data().clientCreatedAt
-          : note.createdAt || Date.now(),
-        createdAt: existingNote?.exists() ? existingNote.data().createdAt : serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      if (note.modelLabel) payload.modelLabel = note.modelLabel;
-      if (note.messageId) payload.messageId = note.messageId;
-      await setDoc(noteRef, payload);
+      await batch.commit();
+      for (const item of chunk) {
+        item.onCommitted();
+      }
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, notePath);
+      handleFirestoreError(err, OperationType.WRITE, `users/${uid}/workspace_batch`);
     }
   }
 
@@ -478,6 +536,7 @@ export async function deleteRemoteConversation(user: AuthUser, convId: string): 
   const safeId = sanitizeDocId(convId, 'conv');
   try {
     await deleteDoc(doc(db, 'users', fbUser.uid, 'conversations', safeId));
+    remoteBaselines.get(fbUser.uid)?.convSignatures.delete(safeId);
   } catch {
     // ignore missing remote doc
   }
@@ -490,6 +549,7 @@ export async function deleteRemoteStudyNote(user: AuthUser, noteId: string): Pro
   const safeId = sanitizeDocId(noteId, 'snote');
   try {
     await deleteDoc(doc(db, 'users', fbUser.uid, 'studyNotes', safeId));
+    remoteBaselines.get(fbUser.uid)?.noteSignatures.delete(safeId);
   } catch {
     // ignore missing remote doc
   }

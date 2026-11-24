@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
-import { Bot, Fingerprint, LayoutDashboard, MessageSquare, Server, Settings, Sparkles } from 'lucide-react';
+import { Bot, Fingerprint, KeyRound, LayoutDashboard, MessageSquare, Server, Settings, Sparkles } from 'lucide-react';
 import { AgentsScreen } from './features/agents/AgentsScreen';
 import { AuthScreen } from './features/auth/AuthScreen';
 import { ChatScreen } from './features/chat/ChatScreen';
@@ -8,6 +8,7 @@ import { DashboardScreen } from './features/dashboard/DashboardScreen';
 import { OnboardingModal } from './features/onboarding/OnboardingModal';
 import { ServersScreen } from './features/servers/ServersScreen';
 import { SettingsScreen } from './features/settings/SettingsScreen';
+import { parseMcpAddDeepLink } from './config/connectors';
 import { subscribeGoogleAuth } from './services/auth/appAuth';
 import { startBrowserControlBridge } from './services/control/browserBridge';
 import { useHubStore, type HubTabId } from './store/useHubStore';
@@ -27,23 +28,52 @@ export default function App() {
   const {
     initialized,
     isLocked,
+    passphraseVaultEnabled,
+    vaultLocked,
     authUser,
     authGuestMode,
     activeTab,
     settings,
     setActiveTab,
+    setPendingDeepLinkServer,
     setAuthUser,
     continueAsGuest,
     initializeApp,
     unlockApp,
+    unlockVault,
     disconnectAllForBackground,
   } = useHubStore();
+  const [vaultPassphrase, setVaultPassphrase] = useState('');
+  const [vaultUnlockError, setVaultUnlockError] = useState('');
+  const [unlockingVault, setUnlockingVault] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const autostart = params.get('autostart') === '1';
+    const deepLink = parseMcpAddDeepLink(window.location.href);
+    if (deepLink) {
+      setPendingDeepLinkServer(deepLink);
+      setActiveTab('servers');
+      params.delete('mcphub_add');
+      params.delete('add_server');
+      params.delete('name');
+      params.delete('authType');
+      const nextSearch = params.toString();
+      const cleanUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, '', cleanUrl);
+    }
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.registerProtocolHandler === 'function') {
+        navigator.registerProtocolHandler(
+          'web+mcphub',
+          `${window.location.origin}/?mcphub_add=%s`
+        );
+      }
+    } catch {
+      // ignore unsupported protocol handler environments
+    }
     void initializeApp(autostart);
-  }, [initializeApp]);
+  }, [initializeApp, setActiveTab, setPendingDeepLinkServer]);
 
   useEffect(() => {
     return subscribeGoogleAuth((googleUser) => {
@@ -139,6 +169,91 @@ export default function App() {
               Unlock MCP Hub
             </button>
           </div>
+        </div>
+      </ErrorBoundary>
+    );
+  }
+
+  if (passphraseVaultEnabled && vaultLocked) {
+    return (
+      <ErrorBoundary>
+        <div
+          style={{ backgroundColor: 'var(--m3-surface)' }}
+          className="h-dvh flex items-center justify-center p-6"
+        >
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!vaultPassphrase) return;
+              setUnlockingVault(true);
+              setVaultUnlockError('');
+              try {
+                const ok = await unlockVault(vaultPassphrase);
+                if (!ok) {
+                  setVaultUnlockError('Incorrect vault passphrase.');
+                } else {
+                  setVaultPassphrase('');
+                }
+              } finally {
+                setUnlockingVault(false);
+              }
+            }}
+            style={{
+              backgroundColor: 'var(--m3-surface-container)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="w-full max-w-sm rounded-[28px] border p-6 space-y-5 shadow-xl"
+          >
+            <div className="text-center space-y-2">
+              <div
+                style={{
+                  backgroundColor: 'var(--m3-primary-container)',
+                  color: 'var(--m3-on-primary-container)',
+                }}
+                className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto"
+              >
+                <KeyRound className="w-8 h-8" />
+              </div>
+              <h1 className="font-display text-xl font-bold text-slate-900 dark:text-white">
+                Unlock Secret Vault
+              </h1>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Enter your PBKDF2 vault passphrase to derive the in-memory AES-GCM key for API keys and MCP tokens.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="vault-unlock-passphrase" className="sr-only">
+                Vault passphrase
+              </label>
+              <input
+                id="vault-unlock-passphrase"
+                type="password"
+                autoFocus
+                value={vaultPassphrase}
+                onChange={(e) => setVaultPassphrase(e.target.value)}
+                placeholder="Enter vault passphrase"
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="w-full min-h-[46px] px-3.5 rounded-2xl border text-sm text-slate-900 dark:text-white"
+              />
+              {vaultUnlockError && (
+                <p className="text-xs text-rose-600 dark:text-rose-400">{vaultUnlockError}</p>
+              )}
+            </div>
+            <button
+              type="submit"
+              disabled={unlockingVault || !vaultPassphrase}
+              style={{
+                backgroundColor: 'var(--m3-primary)',
+                color: 'var(--m3-on-primary)',
+              }}
+              className="w-full min-h-[48px] rounded-full text-sm font-semibold transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {unlockingVault ? 'Deriving Key...' : 'Unlock Vault'}
+            </button>
+          </form>
         </div>
       </ErrorBoundary>
     );

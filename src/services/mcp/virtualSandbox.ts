@@ -132,18 +132,27 @@ export async function handleVirtualMcpRequest(payload: {
   const { id = 1, method, params = {} } = payload;
 
   switch (method) {
-    case 'initialize':
+    case 'initialize': {
+      const requestedVersion =
+        typeof params.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18';
+      const negotiated =
+        requestedVersion === '2025-06-18' || requestedVersion === '2025-03-26'
+          ? requestedVersion
+          : '2025-06-18';
       return {
         jsonrpc: '2.0',
         id,
         result: {
-          protocolVersion: '2025-03-26',
-          capabilities: { tools: {}, resources: {}, prompts: {} },
-          serverInfo: { name: 'Workspace Sandbox MCP', version: '1.0.0' },
+          protocolVersion: negotiated,
+          capabilities: { tools: { listChanged: true }, resources: { listChanged: true }, prompts: { listChanged: true } },
+          serverInfo: { name: 'Workspace Sandbox MCP', version: '1.1.0' },
         },
       };
+    }
 
     case 'notifications/initialized':
+    case 'notifications/cancelled':
+    case 'ping':
       return { jsonrpc: '2.0', id, result: {} };
 
     case 'tools/list':
@@ -152,8 +161,61 @@ export async function handleVirtualMcpRequest(payload: {
     case 'resources/list':
       return { jsonrpc: '2.0', id, result: { resources: SANDBOX_RESOURCES } };
 
+    case 'resources/read': {
+      const uri = String(params.uri ?? '');
+      if (uri === 'sandbox://notes/index') {
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            contents: [
+              {
+                uri,
+                mimeType: 'application/json',
+                text: JSON.stringify(sandboxNotes, null, 2),
+              },
+            ],
+          },
+        };
+      }
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32002, message: `Resource not found: ${uri}` },
+      };
+    }
+
     case 'prompts/list':
       return { jsonrpc: '2.0', id, result: { prompts: SANDBOX_PROMPTS } };
+
+    case 'prompts/get': {
+      const promptName = String(params.name ?? '');
+      const promptArgs = (params.arguments ?? {}) as Record<string, string>;
+      if (promptName === 'summarize_workspace') {
+        const focus = promptArgs.focus?.trim();
+        const text = focus
+          ? `Summarize all workspace notes with special focus on "${focus}", highlight open risks, and propose 3 next steps.`
+          : 'Summarize all current workspace notes and suggest 3 concrete follow-up action items.';
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            description: 'Summarize workspace notes prompt',
+            messages: [
+              {
+                role: 'user',
+                content: { type: 'text', text },
+              },
+            ],
+          },
+        };
+      }
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32602, message: `Prompt not found: ${promptName}` },
+      };
+    }
 
     case 'tools/call': {
       const name = String(params.name ?? '');

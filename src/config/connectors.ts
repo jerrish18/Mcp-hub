@@ -250,3 +250,73 @@ export function parseMcpServersJsonConfig(rawJson: string): {
 
   return { configs, secretsById, errors };
 }
+
+export interface ParsedMcpDeepLink {
+  name: string;
+  url: string;
+  authType?: AuthType;
+}
+
+/**
+ * Parses `mcphub://add?url=https://...&name=...`, `web+mcphub://add?url=...`,
+ * or URL query string `?mcphub_add=https://...` / `?add_server=https://...`.
+ */
+export function parseMcpAddDeepLink(rawInput: string): ParsedMcpDeepLink | null {
+  const trimmed = rawInput.trim();
+  if (!trimmed) return null;
+
+  try {
+    let targetUrlParam = '';
+    let nameParam = '';
+    let authTypeParam = '';
+
+    if (
+      trimmed.startsWith('mcphub://') ||
+      trimmed.startsWith('web+mcphub://')
+    ) {
+      const normalized = trimmed.replace(/^web\+mcphub:\/\//, 'https://mcphub.local/').replace(/^mcphub:\/\//, 'https://mcphub.local/');
+      const parsed = new URL(normalized);
+      if (parsed.hostname === 'mcphub.local' && (parsed.pathname === '/add' || parsed.pathname === '/' || parsed.pathname === '')) {
+        targetUrlParam = parsed.searchParams.get('url') ?? '';
+        nameParam = parsed.searchParams.get('name') ?? '';
+        authTypeParam = parsed.searchParams.get('authType') ?? '';
+      }
+    } else if (trimmed.includes('mcphub_add=') || trimmed.includes('add_server=')) {
+      const parsed = new URL(trimmed, 'https://mcphub.local');
+      targetUrlParam =
+        parsed.searchParams.get('mcphub_add') ??
+        parsed.searchParams.get('add_server') ??
+        '';
+      nameParam = parsed.searchParams.get('name') ?? '';
+      authTypeParam = parsed.searchParams.get('authType') ?? '';
+    }
+
+    if (!targetUrlParam) return null;
+    if (targetUrlParam.startsWith('mcphub://') || targetUrlParam.startsWith('web+mcphub://')) {
+      return parseMcpAddDeepLink(targetUrlParam);
+    }
+
+    const validServerUrl = targetUrlParam.trim();
+    if (!validServerUrl.startsWith('https://') && !validServerUrl.startsWith('http://localhost')) {
+      return null;
+    }
+
+    const hostLabel = new URL(validServerUrl).hostname.replace(/^www\./, '');
+    const authType =
+      authTypeParam === 'bearer' ||
+      authTypeParam === 'oauth_pkce' ||
+      authTypeParam === 'none' ||
+      authTypeParam === 'custom_headers' ||
+      authTypeParam === 'basic'
+        ? authTypeParam
+        : undefined;
+
+    return {
+      url: validServerUrl,
+      name: nameParam.trim() || hostLabel,
+      authType,
+    };
+  } catch {
+    return null;
+  }
+}

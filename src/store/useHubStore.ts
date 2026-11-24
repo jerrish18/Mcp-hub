@@ -3,11 +3,22 @@ import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/mode
 import { logoutCurrentAccount, type AuthUser } from '../services/auth/appAuth';
 import {
   buildAgentToolCatalog,
+  durationToExpiresAt,
+  pruneExpiredAlwaysAllowRules,
   runAgentLoop,
 } from '../services/llm/agentLoop';
 import { getApiKeyForProvider, syncLiveProviderModels } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
-import { closeAllMcpConnections, connectAndInspectServer } from '../services/mcp/client';
+import type { ParsedMcpDeepLink } from '../config/connectors';
+import {
+  closeAllMcpConnections,
+  connectAndInspectServer,
+  disconnectMcpServer,
+  onMcpListChanged,
+  pingMcpServer,
+  reconnectWithBackoff,
+  sendMcpRpc,
+} from '../services/mcp/client';
 import { GITHUB_TOOLS, YOUTUBE_TOOLS } from '../services/mcp/virtualConnectors';
 import {
   deleteRemoteConversation,
@@ -21,10 +32,16 @@ import {
 import { historyDb } from '../services/storage/historyDb';
 import {
   deleteServerSecrets,
+  disablePassphraseVault,
+  enablePassphraseVault,
+  isPassphraseVaultEnabled,
+  isVaultUnlocked,
   loadProviderKeys,
   loadServerSecrets,
+  lockVault,
   saveProviderKeys,
   saveServerSecrets,
+  unlockVaultWithPassphrase,
 } from '../services/storage/secureStorage';
 import type {
   AgentProfile,
@@ -43,13 +60,17 @@ import type {
   PendingApproval,
   ProviderId,
   ProviderKeys,
+  RunTrace,
+  SavedPrompt,
   ServerSecretPayload,
   ToolCallRecord,
+  ToolPolicyRule,
 } from '../types';
 import type { SavedStudyNote } from '../utils/studyTools';
 import { safeErrorMessage } from '../utils/redact';
 import {
   BUILT_IN_AGENTS,
+  DEFAULT_SAVED_PROMPTS,
   DEFAULT_SERVERS,
   DEFAULT_SETTINGS,
   DEFAULT_STUDY_INSTRUCTIONS,
@@ -88,6 +109,7 @@ interface PersistedMeta {
   settings: AppSettings;
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
+  savedPrompts?: SavedPrompt[];
   updatedAt?: number;
 }
 
@@ -151,12 +173,28 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
         parsed.agents && parsed.agents.length > 0
           ? mergeBuiltInAgents(parsed.agents)
           : BUILT_IN_AGENTS;
+      const mergedSettings: AppSettings = { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) };
+      const rawRules = mergedSettings.alwaysAllowedRules ?? [];
+      const prunedRules = pruneExpiredAlwaysAllowRules(rawRules);
+      const expiredKeys = new Set(
+        rawRules
+          .filter((r) => !prunedRules.some((p) => p.qualifiedKey === r.qualifiedKey))
+          .map((r) => r.qualifiedKey)
+      );
       return {
         servers: mergedServers,
         agents: migratedAgents,
-        settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
+        settings: {
+          ...mergedSettings,
+          alwaysAllowedRules: prunedRules,
+          alwaysAllowedTools: mergedSettings.alwaysAllowedTools.filter((k) => !expiredKeys.has(k)),
+        },
         dynamicModels: parsed.dynamicModels ?? [],
         dismissedDefaultServerIds: dismissed,
+        savedPrompts:
+          parsed.savedPrompts && parsed.savedPrompts.length > 0
+            ? parsed.savedPrompts
+            : DEFAULT_SAVED_PROMPTS,
         updatedAt: Number(parsed.updatedAt) || 0,
       };
     }
@@ -169,6 +207,7 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
     settings: DEFAULT_SETTINGS,
     dynamicModels: [],
     dismissedDefaultServerIds: [],
+    savedPrompts: DEFAULT_SAVED_PROMPTS,
     updatedAt: 0,
   };
 }
@@ -234,9 +273,22 @@ export type HubTabId = 'dashboard' | 'chat' | 'servers' | 'agents' | 'settings';
 
 export type WorkspaceSyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
 
+export interface CompareResultItem {
+  modelId: string;
+  status: 'running' | 'done' | 'error';
+  content: string;
+  reasoning: string;
+  citations: GroundingCitation[];
+  durationMs: number;
+  runTrace?: RunTrace;
+  error?: string;
+}
+
 export interface HubState {
   initialized: boolean;
   isLocked: boolean;
+  passphraseVaultEnabled: boolean;
+  vaultLocked: boolean;
   authUser: AuthUser | null;
   authGuestMode: boolean;
   syncStatus: WorkspaceSyncStatus;
@@ -249,17 +301,24 @@ export interface HubState {
   providerKeys: ProviderKeys;
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
+  savedPrompts: SavedPrompt[];
   conversations: Conversation[];
   activeConversationId: string | null;
   savedStudyNotes: SavedStudyNote[];
   isRunning: boolean;
   abortController: AbortController | null;
   pendingApproval: PendingApproval | null;
+  pendingDeepLinkServer: ParsedMcpDeepLink | null;
 
   initializeApp: (autostartSkipOnboarding?: boolean) => Promise<void>;
   setActiveTab: (tab: HubTabId) => void;
+  setPendingDeepLinkServer: (link: ParsedMcpDeepLink | null) => void;
   unlockApp: () => void;
   lockApp: () => void;
+  unlockVault: (passphrase: string) => Promise<boolean>;
+  enableVaultPassphrase: (passphrase: string) => Promise<void>;
+  disableVaultPassphrase: () => Promise<void>;
+  lockVaultSession: () => void;
 
   // Auth & Database Sync
   setAuthUser: (user: AuthUser | null) => void;
@@ -273,6 +332,9 @@ export interface HubState {
   syncModels: (keysOverride?: ProviderKeys) => Promise<{ count: number; providers: string[] }>;
   addCustomModel: (provider: ProviderId, modelId: string, label?: string) => void;
   revokeAlwaysAllowedTool: (qualifiedKey: string) => void;
+  revokeAlwaysAllowedRule: (index: number) => void;
+  addToolPolicy: (rule: ToolPolicyRule) => void;
+  removeToolPolicy: (index: number) => void;
 
   // Servers
   addOrUpdateServer: (server: McpServerConfig, secrets?: ServerSecretPayload) => Promise<void>;
@@ -283,6 +345,8 @@ export interface HubState {
   ) => Promise<{ ok: boolean; error?: string }>;
   deleteServer: (serverId: string) => Promise<void>;
   connectServer: (serverId: string) => Promise<{ ok: boolean; error?: string }>;
+  pingServer: (serverId: string) => Promise<{ ok: boolean; latencyMs: number; error?: string }>;
+  disconnectServer: (serverId: string) => Promise<void>;
   toggleServerTool: (serverId: string, toolName: string) => void;
   disconnectAllForBackground: () => void;
 
@@ -311,6 +375,21 @@ export interface HubState {
   enableDemoSandbox: () => Promise<void>;
   saveStudyNote: (note: Omit<SavedStudyNote, 'id' | 'createdAt'>) => void;
   removeSavedStudyNote: (noteId: string) => void;
+  savePromptMacro: (macro: Omit<SavedPrompt, 'id' | 'updatedAt'> & { id?: string }) => SavedPrompt;
+  deletePromptMacro: (macroId: string) => void;
+  runCompareTurn: (
+    rawText: string,
+    modelIds: string[],
+    options?: {
+      attachments?: ChatAttachment[];
+      onModelUpdate?: (modelId: string, item: CompareResultItem) => void;
+    }
+  ) => Promise<CompareResultItem[]>;
+  acceptComparedReply: (
+    promptText: string,
+    item: CompareResultItem,
+    attachments?: ChatAttachment[]
+  ) => Promise<void>;
 }
 
 const initialMeta = readPersistedMeta('guest');
@@ -318,6 +397,7 @@ const initialMeta = readPersistedMeta('guest');
 export const useHubStore = create<HubState>((set, get) => {
   let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSyncRun = 0;
+  let listChangedSubscribed = false;
 
   const activeScope = () => getAccountScope(get().authUser);
 
@@ -327,6 +407,7 @@ export const useHubStore = create<HubState>((set, get) => {
     servers: state.servers,
     dynamicModels: state.dynamicModels,
     dismissedDefaultServerIds: state.dismissedDefaultServerIds,
+    savedPrompts: state.savedPrompts,
     conversations: state.conversations,
     savedStudyNotes: state.savedStudyNotes,
     updatedAt,
@@ -354,7 +435,7 @@ export const useHubStore = create<HubState>((set, get) => {
     syncDebounceTimer = setTimeout(() => {
       syncDebounceTimer = null;
       void pushCurrentStateToRemote();
-    }, 550);
+    }, 1200);
   };
 
   const persist = () => {
@@ -367,6 +448,7 @@ export const useHubStore = create<HubState>((set, get) => {
         settings: s.settings,
         dynamicModels: s.dynamicModels,
         dismissedDefaultServerIds: s.dismissedDefaultServerIds,
+        savedPrompts: s.savedPrompts,
         updatedAt: Date.now(),
       },
       scope
@@ -395,6 +477,7 @@ export const useHubStore = create<HubState>((set, get) => {
       settings: localMeta.settings,
       dynamicModels: localMeta.dynamicModels,
       dismissedDefaultServerIds: localMeta.dismissedDefaultServerIds,
+      savedPrompts: localMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
       conversations: localConvs,
       activeConversationId: localConvs[0]?.id ?? null,
       savedStudyNotes: localNotes,
@@ -413,6 +496,7 @@ export const useHubStore = create<HubState>((set, get) => {
           servers: initialServers,
           dynamicModels: localMeta.dynamicModels,
           dismissedDefaultServerIds: localMeta.dismissedDefaultServerIds,
+          savedPrompts: localMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
           conversations: localConvs,
           savedStudyNotes: localNotes,
           updatedAt: localMeta.updatedAt ?? 0,
@@ -448,6 +532,7 @@ export const useHubStore = create<HubState>((set, get) => {
           settings: finalSnapshot.settings,
           dynamicModels: finalSnapshot.dynamicModels,
           dismissedDefaultServerIds: finalSnapshot.dismissedDefaultServerIds,
+          savedPrompts: finalSnapshot.savedPrompts,
           updatedAt: finalSnapshot.updatedAt,
         },
         scope
@@ -469,6 +554,10 @@ export const useHubStore = create<HubState>((set, get) => {
         settings: finalSnapshot.settings,
         dynamicModels: finalSnapshot.dynamicModels,
         dismissedDefaultServerIds: finalSnapshot.dismissedDefaultServerIds,
+        savedPrompts:
+          finalSnapshot.savedPrompts && finalSnapshot.savedPrompts.length > 0
+            ? finalSnapshot.savedPrompts
+            : DEFAULT_SAVED_PROMPTS,
         conversations: finalSnapshot.conversations,
         activeConversationId: nextActiveId,
         savedStudyNotes: finalSnapshot.savedStudyNotes,
@@ -533,6 +622,7 @@ export const useHubStore = create<HubState>((set, get) => {
       settings: guestMeta.settings,
       dynamicModels: guestMeta.dynamicModels,
       dismissedDefaultServerIds: guestMeta.dismissedDefaultServerIds,
+      savedPrompts: guestMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
       conversations: guestConvs,
       activeConversationId: guestConvs[0]?.id ?? null,
       savedStudyNotes: guestNotes,
@@ -545,6 +635,8 @@ export const useHubStore = create<HubState>((set, get) => {
   return {
     initialized: false,
     isLocked: initialMeta.settings.biometricLockEnabled,
+    passphraseVaultEnabled: isPassphraseVaultEnabled(),
+    vaultLocked: isPassphraseVaultEnabled() && !isVaultUnlocked(),
     authUser: null,
     authGuestMode: false,
     syncStatus: 'idle',
@@ -557,14 +649,17 @@ export const useHubStore = create<HubState>((set, get) => {
     providerKeys: {},
     dynamicModels: initialMeta.dynamicModels,
     dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
+    savedPrompts: initialMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
     conversations: [],
     activeConversationId: null,
     savedStudyNotes: readSavedStudyNotes('guest'),
     isRunning: false,
     abortController: null,
     pendingApproval: null,
+    pendingDeepLinkServer: null,
 
     setActiveTab: (tab) => set({ activeTab: tab }),
+    setPendingDeepLinkServer: (link) => set({ pendingDeepLinkServer: link }),
 
     setAuthUser: (user) => {
       const prev = get().authUser;
@@ -660,6 +755,8 @@ export const useHubStore = create<HubState>((set, get) => {
 
       set({
         initialized: true,
+        passphraseVaultEnabled: isPassphraseVaultEnabled(),
+        vaultLocked: isPassphraseVaultEnabled() && !isVaultUnlocked(),
         providerKeys: keys,
         conversations: nextConvs,
         activeConversationId: activeConvId,
@@ -668,10 +765,97 @@ export const useHubStore = create<HubState>((set, get) => {
         authGuestMode: autostartSkipOnboarding ? true : state.authGuestMode,
       });
       persist();
+
+      if (!listChangedSubscribed) {
+        listChangedSubscribed = true;
+        onMcpListChanged((serverId, kind) => {
+          const target = get().servers.find((s) => s.id === serverId);
+          if (!target || target.status !== 'connected') return;
+          void (async () => {
+            try {
+              const secrets = await loadServerSecrets(serverId);
+              if (kind === 'tools') {
+                const res = await sendMcpRpc<{ tools?: McpServerConfig['tools'] }>({
+                  server: target,
+                  secrets,
+                  saveUpdatedSecrets: (u) => saveServerSecrets(serverId, u),
+                  method: 'tools/list',
+                });
+                set((s) => ({
+                  servers: s.servers.map((srv) =>
+                    srv.id === serverId ? { ...srv, tools: res.result?.tools ?? srv.tools } : srv
+                  ),
+                }));
+              } else if (kind === 'resources') {
+                const res = await sendMcpRpc<{ resources?: McpServerConfig['resources'] }>({
+                  server: target,
+                  secrets,
+                  saveUpdatedSecrets: (u) => saveServerSecrets(serverId, u),
+                  method: 'resources/list',
+                });
+                set((s) => ({
+                  servers: s.servers.map((srv) =>
+                    srv.id === serverId
+                      ? { ...srv, resources: res.result?.resources ?? srv.resources }
+                      : srv
+                  ),
+                }));
+              } else if (kind === 'prompts') {
+                const res = await sendMcpRpc<{ prompts?: McpServerConfig['prompts'] }>({
+                  server: target,
+                  secrets,
+                  saveUpdatedSecrets: (u) => saveServerSecrets(serverId, u),
+                  method: 'prompts/list',
+                });
+                set((s) => ({
+                  servers: s.servers.map((srv) =>
+                    srv.id === serverId ? { ...srv, prompts: res.result?.prompts ?? srv.prompts } : srv
+                  ),
+                }));
+              }
+              persist();
+            } catch {
+              // ignore background refresh error
+            }
+          })();
+        });
+      }
     },
 
     unlockApp: () => set({ isLocked: false }),
     lockApp: () => set({ isLocked: true }),
+    unlockVault: async (passphrase) => {
+      const ok = await unlockVaultWithPassphrase(passphrase);
+      if (!ok) return false;
+      const keys = await loadProviderKeys();
+      set({
+        vaultLocked: false,
+        passphraseVaultEnabled: isPassphraseVaultEnabled(),
+        providerKeys: keys,
+      });
+      return true;
+    },
+    enableVaultPassphrase: async (passphrase) => {
+      await enablePassphraseVault(passphrase);
+      set({
+        passphraseVaultEnabled: true,
+        vaultLocked: false,
+      });
+    },
+    disableVaultPassphrase: async () => {
+      await disablePassphraseVault();
+      set({
+        passphraseVaultEnabled: false,
+        vaultLocked: false,
+      });
+    },
+    lockVaultSession: () => {
+      lockVault();
+      set({
+        vaultLocked: isPassphraseVaultEnabled() && !isVaultUnlocked(),
+        providerKeys: {},
+      });
+    },
 
     updateSettings: (patch) => {
       set((s) => ({ settings: { ...s.settings, ...patch } }));
@@ -720,8 +904,67 @@ export const useHubStore = create<HubState>((set, get) => {
         settings: {
           ...s.settings,
           alwaysAllowedTools: s.settings.alwaysAllowedTools.filter((k) => k !== qualifiedKey),
+          alwaysAllowedRules: (s.settings.alwaysAllowedRules ?? []).filter(
+            (r) => r.qualifiedKey !== qualifiedKey
+          ),
         },
       }));
+      persist();
+    },
+
+    revokeAlwaysAllowedRule: (index) => {
+      set((s) => {
+        const rules = [...(s.settings.alwaysAllowedRules ?? [])];
+        const removed = rules[index];
+        rules.splice(index, 1);
+        const stillHasRule =
+          removed && rules.some((r) => r.qualifiedKey === removed.qualifiedKey);
+        return {
+          settings: {
+            ...s.settings,
+            alwaysAllowedRules: rules,
+            alwaysAllowedTools: stillHasRule || !removed
+              ? s.settings.alwaysAllowedTools
+              : s.settings.alwaysAllowedTools.filter((k) => k !== removed.qualifiedKey),
+          },
+        };
+      });
+      persist();
+    },
+
+    addToolPolicy: (rule) => {
+      const cleanedKey = rule.qualifiedKey.trim();
+      if (!cleanedKey) return;
+      const cleanedPattern = rule.argPattern?.trim() || undefined;
+      set((s) => {
+        const existing = s.settings.toolPolicies ?? [];
+        const filtered = existing.filter(
+          (r) => !(r.qualifiedKey === cleanedKey && (r.argPattern || undefined) === cleanedPattern)
+        );
+        return {
+          settings: {
+            ...s.settings,
+            toolPolicies: [
+              ...filtered,
+              { qualifiedKey: cleanedKey, policy: rule.policy, argPattern: cleanedPattern },
+            ],
+          },
+        };
+      });
+      persist();
+    },
+
+    removeToolPolicy: (index) => {
+      set((s) => {
+        const next = [...(s.settings.toolPolicies ?? [])];
+        next.splice(index, 1);
+        return {
+          settings: {
+            ...s.settings,
+            toolPolicies: next,
+          },
+        };
+      });
       persist();
     },
 
@@ -775,18 +1018,26 @@ export const useHubStore = create<HubState>((set, get) => {
 
       try {
         const secrets = await loadServerSecrets(serverId);
-        const res = await connectAndInspectServer({
-          server,
-          secrets,
-          saveUpdatedSecrets: (updated) => saveServerSecrets(serverId, updated),
-        });
+        const res = await reconnectWithBackoff(
+          () =>
+            connectAndInspectServer({
+              server,
+              secrets,
+              saveUpdatedSecrets: (updated) => saveServerSecrets(serverId, updated),
+            }),
+          { maxAttempts: 2, baseDelayMs: 350 }
+        );
+        const now = Date.now();
         set((s) => ({
           servers: s.servers.map((item) =>
             item.id === serverId
               ? {
                   ...item,
                   status: 'connected',
-                  lastConnectedAt: Date.now(),
+                  lastConnectedAt: now,
+                  lastPingAt: now,
+                  latencyMs: res.latencyMs,
+                  protocolVersion: res.protocolVersion,
                   lastError: undefined,
                   tools: res.tools,
                   resources: res.resources,
@@ -825,6 +1076,45 @@ export const useHubStore = create<HubState>((set, get) => {
         persist();
         return { ok: false, error: msg };
       }
+    },
+
+    pingServer: async (serverId) => {
+      const server = get().servers.find((s) => s.id === serverId);
+      if (!server) return { ok: false, latencyMs: 0, error: 'Server not found' };
+      const secrets = await loadServerSecrets(serverId);
+      const outcome = await pingMcpServer({
+        server,
+        secrets,
+        saveUpdatedSecrets: (updated) => saveServerSecrets(serverId, updated),
+      });
+      const now = Date.now();
+      set((s) => ({
+        servers: s.servers.map((item) =>
+          item.id === serverId
+            ? {
+                ...item,
+                status: outcome.ok ? 'connected' : 'error',
+                latencyMs: outcome.latencyMs,
+                lastPingAt: now,
+                lastError: outcome.ok ? undefined : outcome.error,
+              }
+            : item
+        ),
+      }));
+      persist();
+      return outcome;
+    },
+
+    disconnectServer: async (serverId) => {
+      await disconnectMcpServer(serverId);
+      set((s) => ({
+        servers: s.servers.map((item) =>
+          item.id === serverId
+            ? { ...item, status: 'disconnected', lastError: undefined }
+            : item
+        ),
+      }));
+      persist();
     },
 
     toggleServerTool: (serverId, toolName) => {
@@ -1116,6 +1406,222 @@ export const useHubStore = create<HubState>((set, get) => {
       scheduleRemoteSync();
     },
 
+    savePromptMacro: (macro) => {
+      const now = Date.now();
+      const entry: SavedPrompt = {
+        id: macro.id ?? `macro_${now}_${Math.random().toString(36).slice(2, 6)}`,
+        title: macro.title.trim() || 'Untitled Macro',
+        template: macro.template,
+        category: macro.category?.trim() || undefined,
+        updatedAt: now,
+      };
+      set((s) => {
+        const exists = s.savedPrompts.some((p) => p.id === entry.id);
+        return {
+          savedPrompts: exists
+            ? s.savedPrompts.map((p) => (p.id === entry.id ? entry : p))
+            : [entry, ...s.savedPrompts],
+        };
+      });
+      persist();
+      return entry;
+    },
+
+    deletePromptMacro: (macroId) => {
+      set((s) => ({
+        savedPrompts: s.savedPrompts.filter((p) => p.id !== macroId),
+      }));
+      persist();
+    },
+
+    runCompareTurn: async (rawText, modelIds, options) => {
+      const text = rawText.trim();
+      const uniqueIds = Array.from(new Set(modelIds)).slice(0, 3);
+      if (!text || uniqueIds.length === 0) return [];
+
+      const state = get();
+      const conv = state.conversations.find((c) => c.id === state.activeConversationId) ?? state.conversations[0];
+      const agent = state.agents.find((a) => a.id === conv?.agentId) ?? state.agents[0];
+      const attachments = options?.attachments ?? [];
+      const history: LlmConversationItem[] = [];
+      for (const m of conv?.messages ?? []) {
+        if (m.role === 'user') history.push({ role: 'user', text: m.content, attachments: m.attachments });
+        else if (m.role === 'assistant' && m.content) history.push({ role: 'assistant', text: m.content });
+      }
+      history.push({ role: 'user', text, attachments: attachments.length > 0 ? attachments : undefined });
+
+      const controller = new AbortController();
+      set({ isRunning: true, abortController: controller });
+
+      try {
+        const results = await Promise.all(
+          uniqueIds.map(async (targetModelId): Promise<CompareResultItem> => {
+            const started = Date.now();
+            const targetModel = getModelById(targetModelId, state.dynamicModels);
+            const apiKey = getApiKeyForProvider(targetModel.provider, state.providerKeys);
+            const item: CompareResultItem = {
+              modelId: targetModelId,
+              status: 'running',
+              content: '',
+              reasoning: '',
+              citations: [],
+              durationMs: 0,
+            };
+            options?.onModelUpdate?.(targetModelId, { ...item });
+
+            if (targetModel.provider !== 'demo' && !apiKey) {
+              const missing: CompareResultItem = {
+                ...item,
+                status: 'error',
+                durationMs: Date.now() - started,
+                error: `Missing API key for ${targetModel.label}. Add your key in Settings or pick Demo Sandbox.`,
+              };
+              options?.onModelUpdate?.(targetModelId, missing);
+              return missing;
+            }
+
+            try {
+              const loopRes = await runAgentLoop({
+                agent,
+                modelId: targetModelId,
+                effort: conv?.effort ?? agent.defaultEffort,
+                chatMode: conv?.chatMode ?? 'professional',
+                studyInstructions: conv?.studyInstructions ?? '',
+                knowledgeSource: conv?.knowledgeSource ?? 'auto',
+                a2uiEnabled: state.settings.a2uiEnabled,
+                keys: state.providerKeys,
+                dynamicModels: state.dynamicModels,
+                servers: state.servers,
+                history,
+                maxSteps: state.settings.maxAgentSteps,
+                confirmBeforeWrite: true,
+                alwaysAllowedTools: [],
+                alwaysAllowedRules: [],
+                toolPolicies: state.settings.toolPolicies ?? [],
+                toolOutputBudgetChars: state.settings.toolOutputBudgetChars ?? 8000,
+                signal: controller.signal,
+                callbacks: {
+                  onTextDelta: (fullText) => {
+                    item.content = fullText;
+                    item.durationMs = Date.now() - started;
+                    options?.onModelUpdate?.(targetModelId, { ...item });
+                  },
+                  onReasoningDelta: (fullReasoning) => {
+                    item.reasoning = fullReasoning;
+                    options?.onModelUpdate?.(targetModelId, { ...item });
+                  },
+                  onToolCallsUpdated: () => {},
+                  onCitationsUpdated: (citations) => {
+                    item.citations = citations;
+                  },
+                  onFallbackNotice: () => {},
+                  requestApproval: async () => ({
+                    decision: 'deny',
+                    denyReason: 'Write actions are disabled during side-by-side Compare mode.',
+                  }),
+                  onAlwaysAllowTool: () => {},
+                  getServerSecrets: (srvId) => loadServerSecrets(srvId),
+                  saveServerSecrets: async (srvId, updated) => {
+                    await saveServerSecrets(srvId, updated);
+                  },
+                },
+              });
+
+              const doneItem: CompareResultItem = {
+                modelId: loopRes.usedModelId || targetModelId,
+                status: 'done',
+                content: loopRes.finalText,
+                reasoning: loopRes.finalReasoning,
+                citations: loopRes.citations,
+                durationMs: loopRes.runTrace.durationMs,
+                runTrace: loopRes.runTrace,
+              };
+              options?.onModelUpdate?.(targetModelId, doneItem);
+              return doneItem;
+            } catch (err) {
+              const failed: CompareResultItem = {
+                ...item,
+                status: 'error',
+                durationMs: Date.now() - started,
+                error: safeErrorMessage(err, [
+                  state.providerKeys.gemini ?? '',
+                  state.providerKeys.groq ?? '',
+                  state.providerKeys.openrouter ?? '',
+                ]),
+              };
+              options?.onModelUpdate?.(targetModelId, failed);
+              return failed;
+            }
+          })
+        );
+        return results;
+      } finally {
+        set({ isRunning: false, abortController: null });
+      }
+    },
+
+    acceptComparedReply: async (promptText, item, attachments = []) => {
+      const scope = activeScope();
+      const state = get();
+      let conv = state.conversations.find((c) => c.id === state.activeConversationId);
+      if (!conv) {
+        state.startNewConversation();
+        conv = get().conversations.find((c) => c.id === get().activeConversationId);
+      }
+      if (!conv) return;
+
+      const now = Date.now();
+      const userMsg: ChatMessage = {
+        id: `msg_u_${now}`,
+        role: 'user',
+        content: promptText.trim(),
+        attachments: attachments.length > 0 ? attachments : undefined,
+        chatMode: conv.chatMode,
+        knowledgeSource: conv.knowledgeSource,
+        createdAt: now,
+      };
+      const assistantMsg: ChatMessage = {
+        id: `msg_a_${now + 1}`,
+        role: 'assistant',
+        content: item.content,
+        reasoning: item.reasoning || undefined,
+        citations: item.citations.length > 0 ? item.citations : undefined,
+        chatMode: conv.chatMode,
+        knowledgeSource: conv.knowledgeSource,
+        modelId: item.modelId,
+        agentId: conv.agentId,
+        effort: conv.effort,
+        runTrace: item.runTrace,
+        createdAt: now + 1,
+        isStreaming: false,
+      };
+
+      const isFirst = conv.messages.filter((m) => m.role === 'user').length === 0;
+      const derivedTitle = isFirst
+        ? promptText.trim().slice(0, 42) + (promptText.trim().length > 42 ? '…' : '')
+        : conv.title;
+
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv!.id) return c;
+          updated = {
+            ...c,
+            title: derivedTitle,
+            modelId: item.modelId,
+            updatedAt: Date.now(),
+            messages: [...c.messages, userMsg, assistantMsg],
+          };
+          return updated;
+        }),
+      }));
+
+      if (updated) {
+        await historyDb.saveConversation(updated, scope);
+        scheduleRemoteSync();
+      }
+    },
+
     sendMessage: async (rawText, options) => {
       const attachments = options?.attachments ?? [];
       const text = rawText.trim() || (attachments.length > 0 ? 'Analyze the attached file(s).' : '');
@@ -1294,6 +1800,9 @@ export const useHubStore = create<HubState>((set, get) => {
           maxSteps: get().settings.maxAgentSteps,
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
+          alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
+          toolPolicies: get().settings.toolPolicies ?? [],
+          toolOutputBudgetChars: get().settings.toolOutputBudgetChars ?? 8000,
           signal: abortController.signal,
           callbacks: {
             onTextDelta: (fullText) => {
@@ -1356,11 +1865,25 @@ export const useHubStore = create<HubState>((set, get) => {
                 });
               });
             },
-            onAlwaysAllowTool: (qualifiedKey) => {
-              const existing = get().settings.alwaysAllowedTools;
-              if (!existing.includes(qualifiedKey)) {
-                get().updateSettings({ alwaysAllowedTools: [...existing, qualifiedKey] });
-              }
+            onAlwaysAllowTool: (qualifiedKey, opts) => {
+              const existingTools = get().settings.alwaysAllowedTools;
+              const existingRules = pruneExpiredAlwaysAllowRules(
+                get().settings.alwaysAllowedRules ?? []
+              );
+              const nextRule = {
+                qualifiedKey,
+                expiresAt: durationToExpiresAt(opts?.duration),
+                argPattern: opts?.argPattern,
+              };
+              const filteredRules = existingRules.filter(
+                (r) => !(r.qualifiedKey === qualifiedKey && r.argPattern === opts?.argPattern)
+              );
+              get().updateSettings({
+                alwaysAllowedTools: existingTools.includes(qualifiedKey)
+                  ? existingTools
+                  : [...existingTools, qualifiedKey],
+                alwaysAllowedRules: [...filteredRules, nextRule],
+              });
             },
             getServerSecrets: (srvId) => loadServerSecrets(srvId),
             saveServerSecrets: async (srvId, updated) => {
@@ -1388,6 +1911,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   toolCalls: result.toolCalls,
                   citations: result.citations,
                   modelId: result.usedModelId,
+                  runTrace: result.runTrace,
                   isStreaming: false,
                 }
               : m

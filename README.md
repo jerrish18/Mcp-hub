@@ -9,37 +9,46 @@ Zero-cost, zero-backend **Model Context Protocol (MCP)** chat client for Android
 ```text
 ├── src/
 │   ├── config/models.ts                # Single source of truth for free-tier LLM model IDs
-│   ├── types/index.ts                  # Strict TypeScript domain models & Zod schemas
+│   ├── types/index.ts                  # Strict TypeScript domain models, RunTrace, ToolPolicies & Zod schemas
 │   ├── utils/
 │   │   ├── redact.ts                   # Secret scrubbing & HTTPS enforcement
+│   │   ├── localRag.ts                 # Zero-cost client-side chunking + BM25/3-gram RAG with citations
+│   │   ├── docExport.ts                # ExcelJS, DOCX, PPTX, PDF executive document export
 │   │   └── haptics.ts                  # Tactile feedback helpers
+│   ├── server/
+│   │   ├── authRouter.ts               # Async scrypt + refresh/revoked token auth
+│   │   ├── controlRouter.ts            # Admin-token gated REST + remote MCP control & persisted activity log
+│   │   └── workspaceRouter.ts          # Authenticated per-user workspace snapshot API
 │   ├── services/
 │   │   ├── auth/
 │   │   │   ├── oauth.ts                # OAuth 2.1 + PKCE, RFC 8414/9728 discovery, DCR, 6 auth modes
 │   │   │   └── oauth.test.ts           # Unit tests for auth, discovery & token refresh
 │   │   ├── mcp/
-│   │   │   ├── client.ts               # Streamable HTTP + SSE fallback JSON-RPC 2.0 client
+│   │   │   ├── client.ts               # MCP 2025-06-18 Streamable HTTP + SSE, @ resources, / prompts, ping
 │   │   │   ├── virtualSandbox.ts       # Built-in zero-network sandbox MCP server
 │   │   │   └── client.test.ts          # Unit tests for MCP transport & 401 retry
 │   │   ├── llm/
 │   │   │   ├── types.ts                # Provider-agnostic streaming & tool-calling types
 │   │   │   ├── gemini.ts               # Google Gemini streaming + thinkingLevel adapter
 │   │   │   ├── openaiCompatible.ts     # Groq & OpenRouter streaming + reasoning_effort adapter
-│   │   │   ├── demoProvider.ts         # Deterministic local simulator for zero-key testing
+│   │   │   ├── demoProvider.ts         # Deterministic local simulator with Always-On A2UI widgets
 │   │   │   ├── provider.ts             # Provider router, effort prompts & 429 auto-fallback
-│   │   │   ├── agentLoop.ts            # Multi-step tool loop, write-approval gate & abort
-│   │   │   └── agentLoop.test.ts       # Unit tests for agent loop, approvals & 429 fallback
+│   │   │   ├── agentLoop.ts            # Multi-step loop, parallel reads, prompt-injection guard, trace & policies
+│   │   │   └── agentLoop.test.ts       # Unit tests for agent loop, policies, compaction & A2UI
 │   │   └── storage/
-│   │       ├── secureStorage.ts        # AES-GCM encrypted vault (Web) & adapter interface
+│   │       ├── secureStorage.ts        # WebCrypto AES-GCM vault + optional PBKDF2 passphrase derivation
+│   │       ├── syncDiff.ts             # Dirty-only Firestore batch sync diffing
+│   │       ├── accountSync.ts          # Batched Firestore & REST account synchronization
 │   │       └── historyDb.ts            # Local IndexedDB / SQLite-compatible chat history
 │   ├── store/
-│   │   ├── defaults.ts                 # Built-in agents & starter server
-│   │   └── useHubStore.ts              # Zustand global state
-│   ├── features/                       # Chat, Servers, Agents, Settings & Onboarding screens
-│   └── ui/                             # MarkdownRenderer, ToolCallCard, WriteApprovalBanner, BottomSheet
+│   │   ├── defaults.ts                 # Built-in agents, starter servers & SavedPrompt macros
+│   │   └── useHubStore.ts              # Zustand global state + Compare Mode + Macros + RunTrace
+│   ├── features/                       # Chat (Study, Pro Canvas IDE, Compare, Trace, Macros), Servers, Agents, Settings
+│   └── ui/                             # MarkdownRenderer, A2UIWidgets, ToolCallCard, WriteApprovalBanner
 └── mobile/                             # Ready-to-build React Native + Expo Router app
-    ├── app/_layout.tsx                 # AppState background cleanup & biometric lock
-    ├── app/(tabs)/                     # Chat, Servers, Agents, Settings tabs
+    ├── app/_layout.tsx                 # AppState background cleanup, biometric lock, mcphub:// & share links
+    ├── app/(tabs)/                     # Chat (memory, voice cue, approvals), Servers, Agents, Settings tabs
+    ├── services/notifications.ts       # Background local notifications for approvals & completed runs
     ├── services/storage/               # expo-secure-store & expo-sqlite adapters
     ├── services/auth/expoOAuth.ts      # expo-auth-session deep-link PKCE flow (mcphub://)
     ├── app.json & eas.json             # Expo & EAS free-tier APK build config
@@ -67,14 +76,24 @@ Zero-cost, zero-backend **Model Context Protocol (MCP)** chat client for Android
 
 ---
 
+## Security & Secret Vault
+
+- **Mobile (`mobile/`)**: Provider API keys and MCP server tokens are stored in native OS Keychain (iOS) / Android Keystore via `expo-secure-store`, with cold-start and background-timeout biometric lock.
+- **Web (`src/`)**: Uses WebCrypto AES-GCM encryption. By default, for zero-friction local usage, a device-local key is stored in `localStorage` alongside ciphertext (this deters casual plain-text inspection, not a determined XSS script). For stronger protection in shared or browser-persisted sessions, enable the optional **Passphrase-Derived Vault Key** in **Settings** (PBKDF2-SHA256, 250,000 iterations), which derives the AES-GCM key exclusively in memory and locks on reload.
+- **Prompt-Injection Guard & Tool Policies**: External tool results are wrapped in `<untrusted_tool_output>` tags, scanned for override/exfiltration patterns, and forced through interactive write approval even if `Always allow` was previously granted. Per-tool `allow | ask | deny` rules and expiring `1h / 24h / 7d` allowances are configurable per agent or globally in Settings.
+- **Control & Auth Server (`server.ts`)**: When `MCP_HUB_ADMIN_TOKEN` is set, `/api/control/keys` and `/api/control/bridge/*` always require `Authorization: Bearer <token>`. In `NODE_ENV=production`, both `AUTH_SESSION_SECRET` and `MCP_HUB_ADMIN_TOKEN` must be configured (otherwise control key routes are refused at startup). Control activity audit entries are persisted to `.data/control-activity.json` with secret redaction.
+
+---
+
 ## Running & Testing Locally
 
 ```bash
 # Install dependencies
 npm install
 
-# Run unit tests (OAuth/PKCE, MCP client, Agent loop)
-npx --yes tsx --test src/services/auth/oauth.test.ts src/services/mcp/client.test.ts src/services/llm/agentLoop.test.ts
+# Run full lint (tsc + eslint) and all unit tests
+npm run lint
+npm test
 
 # Run web preview on http://localhost:3000
 npm run dev

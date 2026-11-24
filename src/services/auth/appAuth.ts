@@ -8,11 +8,37 @@ export interface AuthUser {
   provider: 'google' | 'app';
 }
 
-// Keep app session Bearer token strictly in memory (never localStorage/sessionStorage)
+// Keep app session Bearer & refresh tokens strictly in memory (never localStorage/sessionStorage)
 let appSessionToken = '';
+let appRefreshToken = '';
 
 export function getAppSessionToken(): string {
   return appSessionToken;
+}
+
+export async function refreshAppSession(): Promise<boolean> {
+  if (!appRefreshToken) return false;
+  try {
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-MCPHub-UI': '1',
+      },
+      body: JSON.stringify({ refreshToken: appRefreshToken }),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json().catch(() => ({}))) as {
+      token?: string;
+      refreshToken?: string;
+    };
+    if (!body.token) return false;
+    appSessionToken = body.token;
+    if (body.refreshToken) appRefreshToken = body.refreshToken;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function registerAppAccount(params: {
@@ -30,6 +56,7 @@ export async function registerAppAccount(params: {
   });
   const body = (await res.json().catch(() => ({}))) as {
     token?: string;
+    refreshToken?: string;
     user?: { id: string; email: string; displayName: string };
     error?: string;
   };
@@ -37,6 +64,7 @@ export async function registerAppAccount(params: {
     throw new Error(body.error ?? `Registration failed (${res.status})`);
   }
   appSessionToken = body.token;
+  appRefreshToken = body.refreshToken ?? '';
   return {
     id: body.user.id,
     email: body.user.email,
@@ -59,6 +87,7 @@ export async function loginAppAccount(params: {
   });
   const body = (await res.json().catch(() => ({}))) as {
     token?: string;
+    refreshToken?: string;
     user?: { id: string; email: string; displayName: string };
     error?: string;
   };
@@ -66,6 +95,7 @@ export async function loginAppAccount(params: {
     throw new Error(body.error ?? `Sign in failed (${res.status})`);
   }
   appSessionToken = body.token;
+  appRefreshToken = body.refreshToken ?? '';
   return {
     id: body.user.id,
     email: body.user.email,
@@ -86,15 +116,19 @@ export async function loginWithGoogleAccount(): Promise<AuthUser> {
 }
 
 export async function logoutCurrentAccount(): Promise<void> {
-  if (appSessionToken) {
+  if (appSessionToken || appRefreshToken) {
     const token = appSessionToken;
+    const refreshToken = appRefreshToken;
     appSessionToken = '';
+    appRefreshToken = '';
     await fetch('/api/auth/logout', {
       method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'X-MCPHub-UI': '1',
-        Authorization: `Bearer ${token}`,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
+      body: JSON.stringify({ refreshToken }),
     }).catch(() => {});
   }
   await signOutFirebaseUser().catch(() => {});

@@ -12,10 +12,10 @@ import {
   TextRun,
   WidthType,
 } from 'docx';
+import ExcelJS from 'exceljs';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import PptxGenJS from 'pptxgenjs';
-import * as XLSX from 'xlsx';
 import { parseMarkdownBlocks } from './markdownParser';
 
 export type DocFormat = 'pptx' | 'docx' | 'xlsx' | 'pdf';
@@ -1002,36 +1002,41 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
 }
 
 /**
- * Generates a multi-sheet Microsoft Excel .xlsx workbook with auto-sized column widths.
+ * Generates a multi-sheet Microsoft Excel .xlsx workbook using ExcelJS with styled headers & auto-sized widths.
  */
-export function buildXlsxBlob(spec: XlsxSpec): Blob {
-  const wb = XLSX.utils.book_new();
-  wb.Props = {
-    Title: spec.title,
-    Author: 'MCP Hub Pro Studio',
-    CreatedDate: new Date(),
-  };
+export async function buildXlsxBlob(spec: XlsxSpec): Promise<Blob> {
+  const wb = new ExcelJS.Workbook();
+  wb.title = spec.title;
+  wb.creator = 'MCP Hub Pro Studio';
+  wb.created = new Date();
 
   spec.sheets.forEach((sheetSpec, idx) => {
-    const aoa: Array<Array<string | number | boolean>> = [
-      sheetSpec.headers,
-      ...sheetSpec.rows,
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = sheetSpec.headers.map((h, ci) => {
+    const safeName =
+      sheetSpec.name.replace(/[\\/?*[\]:]/g, '').slice(0, 31) || `Sheet ${idx + 1}`;
+    const ws = wb.addWorksheet(safeName);
+
+    const headerRow = ws.addRow(sheetSpec.headers);
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0B57D0' },
+    };
+
+    for (const row of sheetSpec.rows) {
+      ws.addRow(row);
+    }
+
+    ws.columns = sheetSpec.headers.map((h, ci) => {
       const maxLen = Math.max(
         h.length,
         ...sheetSpec.rows.map((r) => String(r[ci] ?? '').length)
       );
-      return { wch: Math.min(48, Math.max(12, maxLen + 3)) };
+      return { width: Math.min(48, Math.max(12, maxLen + 3)) };
     });
-
-    const safeName =
-      sheetSpec.name.replace(/[\\/?*[\]:]/g, '').slice(0, 31) || `Sheet ${idx + 1}`;
-    XLSX.utils.book_append_sheet(wb, ws, safeName);
   });
 
-  const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
+  const buffer = await wb.xlsx.writeBuffer();
   return new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });

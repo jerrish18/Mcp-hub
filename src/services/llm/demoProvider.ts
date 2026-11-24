@@ -360,16 +360,56 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
     const summaryLines = recentTools.map((t) => {
       if (t.role !== 'tool') return '';
       const displayName = t.toolName.includes('__') ? t.toolName.split('__').slice(1).join('__') : t.toolName;
+      const cleanOutput = t.content
+        .replace(/<untrusted_tool_output[^>]*>\s*/gi, '')
+        .replace(/\s*<\/untrusted_tool_output>/gi, '')
+        .trim();
       return t.isError
-        ? `**${displayName}** notice: ${t.content}`
-        : `**${displayName}** completed:\n\n\`\`\`json\n${t.content}\n\`\`\``;
+        ? `\`${displayName}\` notice: ${cleanOutput}`
+        : `\`${displayName}\` completed:\n\n\`\`\`text\n${cleanOutput}\n\`\`\``;
     });
     const hasDenial = recentTools.some((t) => t.role === 'tool' && t.content.includes('denied'));
-    const reply = hasDenial
-      ? `Understood — I respected your approval decision and paused that write step:\n\n${summaryLines.join('\n')}\n\nTell me how you would like to adjust parameters or proceed safely.`
-      : effort === 'high'
-        ? `Verified connected MCP tool output against your request:\n\n${summaryLines.join('\n')}\n\nEverything is synced. You can also export this summary as PDF, DOCX, XLSX, or PPTX below.`
-        : `Completed via connected MCP tools:\n\n${summaryLines.join('\n')}`;
+    const toolA2uiBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: hasDenial ? 'Approval Gate Paused' : 'MCP Execution Follow-Up',
+            badge: 'Pro A2UI',
+            widgets: [
+              {
+                type: 'callout',
+                tone: hasDenial ? 'warning' : 'success',
+                title: hasDenial ? 'Write Gate Respected' : 'Tool Execution Verified',
+                text: hasDenial
+                  ? 'No external state was modified. Review or adjust parameters below.'
+                  : `Completed ${recentTools.length} MCP tool call(s) cleanly.`,
+              },
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Export Summary (.PDF)',
+                    prompt: 'Generate a concise PDF briefing summarizing the recent MCP tool results.',
+                    style: 'primary',
+                  },
+                  {
+                    label: 'List Sandbox Notes',
+                    prompt: 'Search and list all workspace notes via MCP.',
+                    style: 'secondary',
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )}\n\`\`\``
+      : '';
+    const reply =
+      (hasDenial
+        ? `Understood — I respected your approval decision and paused that write step:\n\n${summaryLines.join('\n')}\n\nTell me how you would like to adjust parameters or proceed safely.`
+        : effort === 'high'
+          ? `Verified connected MCP tool output against your request:\n\n${summaryLines.join('\n')}\n\nEverything is synced. You can also export this summary as PDF, DOCX, XLSX, or PPTX below.`
+          : `Completed via connected MCP tools:\n\n${summaryLines.join('\n')}`) + toolA2uiBlock;
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
     return;
@@ -432,11 +472,49 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
       signal
     );
 
+    const xlsxA2uiBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: 'Spreadsheet Studio Controls',
+            subtitle: `${xlsxSpec.sheets.length} worksheet tabs ready`,
+            badge: 'Pro A2UI',
+            widgets: [
+              {
+                type: 'kpi_grid',
+                items: xlsxSpec.sheets.slice(0, 3).map((s) => ({
+                  label: s.name,
+                  value: `${s.rows.length} rows`,
+                  hint: `${s.headers.length} columns`,
+                })),
+              },
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Generate Executive .PPTX',
+                    prompt: `Create a PowerPoint presentation summarizing "${xlsxSpec.title}".`,
+                    style: 'primary',
+                  },
+                  {
+                    label: 'Generate Executive .PDF',
+                    prompt: `Generate a PDF financial briefing covering "${xlsxSpec.title}".`,
+                    style: 'secondary',
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )}\n\`\`\``
+      : '';
+
     const reply =
       `## ${xlsxSpec.title} Ready\n\n` +
       `I compiled a ${xlsxSpec.sheets.length}-tab Excel workbook (**${xlsxSpec.sheets.map((s) => s.name).join('** and **')}**).\n\n` +
       `\`\`\`artifact-xlsx\n${JSON.stringify(xlsxSpec, null, 2)}\n\`\`\`\n\n` +
-      `Open **Preview in Canvas** to inspect all tabs or click **Download .XLSX** to open directly in Excel / Google Sheets.`;
+      `Open **Preview in Canvas** to inspect all tabs or click **Download .XLSX** to open directly in Excel / Google Sheets.` +
+      xlsxA2uiBlock;
 
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -643,11 +721,50 @@ render();`,
       ],
     };
 
+    const appA2uiBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: 'IDE App Delivery Controls',
+            subtitle: '4 modular files ready for Canvas & GitHub',
+            badge: 'Pro A2UI',
+            widgets: [
+              {
+                type: 'checklist',
+                title: 'App Architecture Checklist',
+                items: [
+                  { id: 'app1', label: 'Semantic HTML shell (index.html)', checked: true },
+                  { id: 'app2', label: 'Responsive CSS variables (styles.css)', checked: true },
+                  { id: 'app3', label: 'Interactive JS state & GitHub sync ready (app.js)', checked: true },
+                ],
+              },
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Sync to GitHub Repo',
+                    prompt: 'Push the Sprint Taskboard Pro application files to a new GitHub repository via GitHub MCP.',
+                    style: 'primary',
+                  },
+                  {
+                    label: 'Add Unit Tests Spec',
+                    prompt: 'Add a lightweight test suite and architecture overview PDF for Sprint Taskboard Pro.',
+                    style: 'secondary',
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )}\n\`\`\``
+      : '';
+
     const reply =
       `## Multi-File App Engineered: Sprint Taskboard Pro\n\n` +
       `I created a **4-file application** (\`index.html\`, \`styles.css\`, \`app.js\`, \`README.md\`) with live interactive task state and responsive styling.\n\n` +
       `\`\`\`artifact-app\n${JSON.stringify(appSpec, null, 2)}\n\`\`\`\n\n` +
-      `Tap **Open IDE Canvas** below to test the live app across Desktop/Tablet/Mobile viewports, inspect or edit every file, and **Sync to GitHub**.`;
+      `Tap **Open IDE Canvas** below to test the live app across Desktop/Tablet/Mobile viewports, inspect or edit every file, and **Sync to GitHub**.` +
+      appA2uiBlock;
 
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -721,10 +838,39 @@ render();`,
 </body>
 </html>`;
 
+    const htmlA2uiBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: 'ROI Widget Quick Tweaks',
+            badge: 'Pro A2UI',
+            widgets: [
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Upgrade to Multi-File App',
+                    prompt: 'Build a multi-file web app version of the Team ROI Calculator with CSV export.',
+                    style: 'primary',
+                  },
+                  {
+                    label: 'Export ROI Model (.XLSX)',
+                    prompt: 'Generate an Excel workbook (.xlsx) for Team Workflow Automation ROI projections.',
+                    style: 'secondary',
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )}\n\`\`\``
+      : '';
+
     const reply =
       `## Interactive ROI Calculator Built\n\n` +
       `Click **Open in Canvas** below to run and tweak this interactive widget live.\n\n` +
-      `\`\`\`html\n${htmlCode}\n\`\`\``;
+      `\`\`\`html\n${htmlCode}\n\`\`\`` +
+      htmlA2uiBlock;
 
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -787,6 +933,40 @@ render();`,
   }
 
   const toolCount = tools.length;
+  const fallbackA2uiBlock = a2uiEnabled
+    ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+        {
+          title: 'Pro Studio Quick Launch',
+          subtitle: `${toolCount} active MCP tool${toolCount === 1 ? '' : 's'} ready`,
+          badge: 'Pro A2UI',
+          widgets: [
+            {
+              type: 'actions',
+              buttons: [
+                {
+                  label: 'Generate .PPTX Deck',
+                  prompt: 'Build a Q3 executive presentation deck (.pptx)',
+                  style: 'primary',
+                },
+                {
+                  label: 'Build Multi-File App',
+                  prompt: 'Build a multi-file web app taskboard',
+                  style: 'secondary',
+                },
+                {
+                  label: 'Run 24 * 7 Calc',
+                  prompt: 'Calculate 24 * 7 using MCP',
+                  style: 'secondary',
+                },
+              ],
+            },
+          ],
+        },
+        null,
+        2
+      )}\n\`\`\``
+    : '';
+
   const fallbackReply =
     `I am running in **Pro Studio Simulator** mode with **${toolCount}** active MCP tool${toolCount === 1 ? '' : 's'} (${effort} effort).\n\n` +
     `Try asking me to:\n` +
@@ -795,7 +975,8 @@ render();`,
     `- **"Write an enterprise PDF report"** (formatted PDF & DOCX)\n` +
     `- **"Build an interactive HTML ROI calculator for Canvas"** (live Coding Canvas preview)\n` +
     `- **"Create a note titled \\"Release Plan\\""** (interactive write-action approval)\n\n` +
-    `For live Gemini, Groq, or OpenRouter inference, add your free API key in **Settings**.`;
+    `For live Gemini, Groq, or OpenRouter inference, add your free API key in **Settings**.` +
+    fallbackA2uiBlock;
 
   await streamText(fallbackReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
   onEvent({ type: 'done' });

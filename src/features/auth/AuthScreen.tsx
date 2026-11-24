@@ -259,10 +259,10 @@ export function AuthScreen({ onAuthenticated, onContinueGuest }: AuthScreenProps
                 id="auth-password"
                 type={showPassword ? 'text' : 'password'}
                 required
-                minLength={6}
+                minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={mode === 'register' ? 'At least 6 characters' : 'Enter password'}
+                placeholder={mode === 'register' ? 'At least 8 characters' : 'Enter password'}
                 style={{
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',

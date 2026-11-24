@@ -219,8 +219,46 @@ export const DEFAULT_SETTINGS: AppSettings = {
   a2uiEnabled: true,
   confirmBeforeWrite: true,
   maxAgentSteps: 10,
+  toolOutputBudgetChars: 8000,
   alwaysAllowedTools: [],
+  alwaysAllowedRules: [],
+  toolPolicies: [],
   biometricLockEnabled: false,
   hapticsEnabled: true,
   onboardingCompleted: false,
 };
+
+export const DEFAULT_SAVED_PROMPTS = [
+  {
+    id: 'macro_study_deep_dive',
+    title: 'Study Deep Dive',
+    category: 'Study',
+    template:
+      'Teach me {{topic}} at a {{level}} level. Include a visual Mermaid flowchart, core formulas, and 3 self-check questions.',
+    updatedAt: 1700000000000,
+  },
+  {
+    id: 'macro_exec_brief',
+    title: 'Executive Brief (.PDF)',
+    category: 'Pro',
+    template:
+      'Create a structured executive PDF report on {{subject}} tailored for {{audience}} including KPI metrics and rollout milestones.',
+    updatedAt: 1700000000000,
+  },
+  {
+    id: 'macro_bug_triage',
+    title: 'Bug Triage',
+    category: 'Engineering',
+    template:
+      'Diagnose this issue in {{component}}: {{symptom}}. List root causes, verification steps, and a minimal fix.',
+    updatedAt: 1700000000000,
+  },
+  {
+    id: 'macro_code_review',
+    title: 'Security & Code Review',
+    category: 'Engineering',
+    template:
+      'Review the {{language}} implementation for {{target}}. Check security boundaries, edge cases, concurrency, and test coverage.',
+    updatedAt: 1700000000000,
+  },
+];

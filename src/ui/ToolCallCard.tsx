@@ -12,7 +12,7 @@ import {
   Slash,
   Wrench,
 } from 'lucide-react';
-import type { ToolCallRecord } from '../types';
+import type { ToolCallRecord, ToolMediaBlock } from '../types';
 import { M3_EMPHASIZED_EASE, M3_FAST_EASE } from '../utils/motion';
 
 interface ToolCallCardProps {
@@ -65,8 +65,25 @@ function summarizeArgs(args: Record<string, unknown>): string {
   return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact;
 }
 
+function resolveSafeMediaSrc(block: ToolMediaBlock): string | null {
+  if (block.data) {
+    const safeMime = /^[a-z]+\/[a-z0-9.+-]+$/i.test(block.mimeType)
+      ? block.mimeType
+      : block.type === 'image'
+        ? 'image/png'
+        : 'audio/mpeg';
+    return `data:${safeMime};base64,${block.data}`;
+  }
+  if (block.uri && /^https?:\/\//i.test(block.uri)) {
+    return block.uri;
+  }
+  return null;
+}
+
 export function ToolCallCard({ record }: ToolCallCardProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(
+    Boolean(record.mediaBlocks && record.mediaBlocks.length > 0)
+  );
   const [copiedResult, setCopiedResult] = useState(false);
   const meta = STATUS_META[record.status];
   const StatusIcon = meta.Icon;
@@ -81,6 +98,11 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
       // ignore
     }
   };
+
+  const progressPct =
+    typeof record.progress === 'number' && typeof record.progressTotal === 'number' && record.progressTotal > 0
+      ? Math.max(0, Math.min(100, Math.round((record.progress / record.progressTotal) * 100)))
+      : null;
 
   return (
     <motion.div
@@ -116,11 +138,24 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
               <span className="hidden md:inline text-[11px] text-slate-500 dark:text-slate-400 truncate max-w-[220px] font-mono">
                 ({summarizeArgs(record.arguments)})
               </span>
+              {record.truncated && (
+                <span className="px-1.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[10px] font-semibold shrink-0">
+                  Truncated
+                </span>
+              )}
             </div>
             <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 truncate">
               <span className="truncate">{record.serverName}</span>
               <span aria-hidden="true">·</span>
               <span className="whitespace-nowrap">{record.isReadOnly ? 'Read' : 'Write'}</span>
+              {record.status === 'running' && record.progressMessage && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="truncate text-blue-600 dark:text-blue-400">
+                    {record.progressMessage}
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -134,7 +169,11 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
           )}
           <span className={`inline-flex items-center gap-1 text-xs font-medium whitespace-nowrap ${meta.colorClass}`}>
             <StatusIcon className={`w-3.5 h-3.5 ${meta.spin ? 'animate-spin' : ''}`} />
-            <span>{meta.label}</span>
+            <span>
+              {record.status === 'running' && progressPct !== null
+                ? `${progressPct}%`
+                : meta.label}
+            </span>
           </span>
           <motion.span
             initial={false}
@@ -146,6 +185,18 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
           </motion.span>
         </div>
       </button>
+
+      {record.status === 'running' && typeof record.progress === 'number' && (
+        <div className="h-1 w-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+          <div
+            style={{
+              width: `${progressPct ?? 55}%`,
+              backgroundColor: 'var(--m3-primary)',
+            }}
+            className="h-full transition-all duration-200"
+          />
+        </div>
+      )}
 
       <AnimatePresence initial={false}>
         {expanded && (
@@ -167,6 +218,40 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
                 {JSON.stringify(record.arguments, null, 2)}
               </pre>
             </div>
+
+            {record.mediaBlocks && record.mediaBlocks.length > 0 && (
+              <div className="space-y-2">
+                <div className="font-medium text-slate-600 dark:text-slate-400">Media Output</div>
+                <div className="space-y-2">
+                  {record.mediaBlocks.map((mb, idx) => {
+                    const src = resolveSafeMediaSrc(mb);
+                    if (!src) return null;
+                    return mb.type === 'image' ? (
+                      <img
+                        key={idx}
+                        src={src}
+                        alt={`${record.toolName} output ${idx + 1}`}
+                        className="max-h-72 rounded-xl border border-slate-200 dark:border-slate-700 object-contain bg-slate-50 dark:bg-slate-950"
+                      />
+                    ) : (
+                      <audio key={idx} controls src={src} className="w-full" />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {record.structuredContent !== undefined && (
+              <div>
+                <div className="font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Structured Output
+                </div>
+                <pre className="p-2.5 rounded-xl bg-slate-900 text-emerald-200 font-mono overflow-x-auto leading-relaxed max-h-56">
+                  {JSON.stringify(record.structuredContent, null, 2)}
+                </pre>
+              </div>
+            )}
+
             {record.result !== undefined && (
               <div>
                 <div className="flex items-center justify-between font-medium text-slate-600 dark:text-slate-400 mb-1">
@@ -175,6 +260,11 @@ export function ToolCallCard({ record }: ToolCallCardProps) {
                     {typeof record.durationMs === 'number' && (
                       <span className="tabular-nums font-mono text-[11px] opacity-75">
                         {record.durationMs}ms
+                      </span>
+                    )}
+                    {record.truncated && (
+                      <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                        (Budgeted for LLM context)
                       </span>
                     )}
                   </div>

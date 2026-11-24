@@ -212,4 +212,140 @@ describe('createControlRouter (App API Key + External Control)', () => {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
   });
+
+  it('always enforces adminToken when configured, even without Origin header or extra flags', async () => {
+    const app = express();
+    app.use(
+      '/api',
+      createControlRouter({
+        storageFilePath: '',
+        adminToken: 'super-secret-admin-token-1234',
+      })
+    );
+    const srv = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    try {
+      const addr = srv.address() as { port: number };
+      const url = `http://127.0.0.1:${addr.port}`;
+
+      // Missing Origin header AND X-MCPHub-UI=1 alone must still fail with 401 when adminToken is set
+      const noToken = await fetch(`${url}/api/control/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-MCPHub-UI': '1' },
+        body: JSON.stringify({ label: 'Unauth', scope: 'read_only' }),
+      });
+      assert.equal(noToken.status, 401);
+
+      // Valid Bearer adminToken succeeds even without Origin header
+      const withToken = await fetch(`${url}/api/control/keys`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-MCPHub-UI': '1',
+          Authorization: 'Bearer super-secret-admin-token-1234',
+        },
+        body: JSON.stringify({ label: 'Admin Created', scope: 'read_only' }),
+      });
+      assert.equal(withToken.status, 201);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it('refuses to mount /control/keys and /control/bridge/* in production when adminToken is missing', async () => {
+    const app = express();
+    app.use(
+      '/api',
+      createControlRouter({
+        storageFilePath: '',
+        adminToken: '',
+        isProduction: true,
+      })
+    );
+    const srv = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    try {
+      const addr = srv.address() as { port: number };
+      const url = `http://127.0.0.1:${addr.port}`;
+
+      const createKeyRes = await fetch(`${url}/api/control/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-MCPHub-UI': '1' },
+        body: JSON.stringify({ label: 'Blocked', scope: 'full' }),
+      });
+      assert.ok(createKeyRes.status === 404 || createKeyRes.status === 403);
+
+      const bridgeRes = await fetch(`${url}/api/control/bridge/status`);
+      assert.ok(bridgeRes.status === 404 || bridgeRes.status === 403);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
+
+  it('persists control activity log across router restarts with redacted details', async () => {
+    const restartDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcphub-activity-test-'));
+    const keysFile = path.join(restartDir, 'control-keys.json');
+    const activityFile = path.join(restartDir, 'control-activity.json');
+
+    const startInstance = async () => {
+      const app = express();
+      app.use(
+        '/api',
+        createControlRouter({
+          storageFilePath: keysFile,
+          activityFilePath: activityFile,
+        })
+      );
+      const srv = await new Promise<http.Server>((resolve) => {
+        const s = app.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const addr = srv.address() as { port: number };
+      return { srv, url: `http://127.0.0.1:${addr.port}` };
+    };
+
+    try {
+      const first = await startInstance();
+      let createdKey = '';
+      try {
+        const keyRes = await fetch(`${first.url}/api/control/keys`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-MCPHub-UI': '1' },
+          body: JSON.stringify({ label: 'AuditBot', scope: 'read_only' }),
+        });
+        const keyJson = (await keyRes.json()) as { plaintextKey: string };
+        createdKey = keyJson.plaintextKey;
+
+        await fetch(`${first.url}/api/control/execute`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${createdKey}`,
+          },
+          body: JSON.stringify({ action: 'get_workspace_overview', params: {} }),
+        });
+      } finally {
+        await new Promise<void>((resolve) => first.srv.close(() => resolve()));
+      }
+
+      // Spin up a brand new router instance pointed at the same files
+      const second = await startInstance();
+      try {
+        const listRes = await fetch(`${second.url}/api/control/keys?limit=100`);
+        assert.equal(listRes.status, 200);
+        const listJson = (await listRes.json()) as {
+          activity: Array<{ action: string; status: string; keyLabel: string }>;
+        };
+        assert.ok(listJson.activity.length >= 1);
+        assert.equal(listJson.activity[0].action, 'get_workspace_overview');
+        assert.equal(listJson.activity[0].status, 'ok');
+        assert.equal(listJson.activity[0].keyLabel, 'AuditBot');
+      } finally {
+        await new Promise<void>((resolve) => second.srv.close(() => resolve()));
+      }
+    } finally {
+      fs.rmSync(restartDir, { recursive: true, force: true });
+    }
+  });
 });

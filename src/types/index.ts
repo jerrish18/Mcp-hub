@@ -146,6 +146,9 @@ export const McpServerConfigSchema = z.object({
   status: z.enum(['connected', 'disconnected', 'auth_expired', 'error', 'connecting']).default('disconnected'),
   lastError: z.string().optional(),
   lastConnectedAt: z.number().optional(),
+  protocolVersion: z.string().optional(),
+  latencyMs: z.number().optional(),
+  lastPingAt: z.number().optional(),
   tools: z.array(z.custom<McpTool>()).default([]),
   resources: z.array(z.custom<McpResource>()).default([]),
   prompts: z.array(z.custom<McpPrompt>()).default([]),
@@ -169,6 +172,23 @@ export const McpServerConfigSchema = z.object({
 
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 
+export const ToolPermissionPolicySchema = z.enum(['allow', 'ask', 'deny']);
+export type ToolPermissionPolicy = z.infer<typeof ToolPermissionPolicySchema>;
+
+export type AlwaysAllowDuration = '1h' | '24h' | '7d' | 'never';
+
+export interface AlwaysAllowRule {
+  qualifiedKey: string;
+  expiresAt?: number | null; // epoch ms, null/undefined = never expires
+  argPattern?: string;
+}
+
+export interface ToolPolicyRule {
+  qualifiedKey: string;
+  policy: ToolPermissionPolicy;
+  argPattern?: string;
+}
+
 export const AgentProfileSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1, 'Agent name is required').max(60),
@@ -181,6 +201,7 @@ export const AgentProfileSchema = z.object({
   studyInstructions: z.string().max(4000).default(''),
   allowedServerIds: z.array(z.string()).nullable(), // null = all connected servers
   allowedToolNames: z.array(z.string()).nullable(), // null = all enabled tools on allowed servers
+  toolPolicies: z.record(z.string(), ToolPermissionPolicySchema).optional(),
   isBuiltIn: z.boolean().default(false),
   createdAt: z.number(),
   updatedAt: z.number(),
@@ -196,6 +217,13 @@ export type ToolCallStatus =
   | 'denied'
   | 'cancelled';
 
+export interface ToolMediaBlock {
+  type: 'image' | 'audio';
+  data?: string;
+  uri?: string;
+  mimeType: string;
+}
+
 export interface ToolCallRecord {
   id: string;
   toolName: string;
@@ -203,11 +231,57 @@ export interface ToolCallRecord {
   serverName: string;
   arguments: Record<string, unknown>;
   result?: string;
+  mediaBlocks?: ToolMediaBlock[];
+  structuredContent?: unknown;
+  truncated?: boolean;
+  progress?: number;
+  progressTotal?: number;
+  progressMessage?: string;
   isError?: boolean;
   durationMs?: number;
   status: ToolCallStatus;
   isReadOnly: boolean;
   startedAt: number;
+}
+
+export interface RunTraceFallback {
+  from: string;
+  to: string;
+  reason: string;
+  at: number;
+}
+
+export interface RunTraceToolCall {
+  id: string;
+  toolName: string;
+  serverName: string;
+  status: ToolCallStatus;
+  durationMs: number;
+  truncated?: boolean;
+}
+
+export interface RunTrace {
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  primaryModelId: string;
+  usedModelId: string;
+  fallbacks: RunTraceFallback[];
+  toolCalls: RunTraceToolCall[];
+  estimatedPromptTokens: number;
+  stepsExecuted: number;
+  ragUsed?: boolean;
+  ragChunksCount?: number;
+  stoppedByUser: boolean;
+  error?: string;
+}
+
+export interface SavedPrompt {
+  id: string;
+  title: string;
+  template: string;
+  category?: string;
+  updatedAt: number;
 }
 
 export interface ChatMessage {
@@ -225,6 +299,7 @@ export interface ChatMessage {
   modelId?: string;
   agentId?: string;
   effort?: EffortLevel;
+  runTrace?: RunTrace;
   createdAt: number;
   isStreaming?: boolean;
   error?: string;
@@ -256,6 +331,8 @@ export interface ApprovalResolution {
   decision: ApprovalDecision;
   editedArguments?: Record<string, unknown>;
   denyReason?: string;
+  alwaysAllowDuration?: AlwaysAllowDuration;
+  argPattern?: string;
 }
 
 export interface PendingApproval {
@@ -267,6 +344,7 @@ export interface PendingApproval {
   arguments: Record<string, unknown>;
   description?: string;
   isDestructive?: boolean;
+  injectionWarning?: string;
   resolve: (result: ApprovalDecision | ApprovalResolution) => void;
 }
 
@@ -279,7 +357,10 @@ export interface AppSettings {
   a2uiEnabled: boolean;
   confirmBeforeWrite: boolean;
   maxAgentSteps: number;
-  alwaysAllowedTools: string[]; // `${serverId}:${toolName}`
+  toolOutputBudgetChars?: number;
+  alwaysAllowedTools: string[]; // `${serverId}:${toolName}` (legacy & active key cache)
+  alwaysAllowedRules?: AlwaysAllowRule[];
+  toolPolicies?: ToolPolicyRule[];
   biometricLockEnabled: boolean;
   hapticsEnabled: boolean;
   onboardingCompleted: boolean;

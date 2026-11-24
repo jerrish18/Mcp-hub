@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { callMcpTool, connectAndInspectServer, parseSseJsonRpcMessage, sendMcpRpc } from './client';
+import {
+  callMcpTool,
+  connectAndInspectServer,
+  disconnectMcpServer,
+  getMcpPrompt,
+  onMcpListChanged,
+  parseSseJsonRpcMessage,
+  pingMcpServer,
+  readMcpResource,
+  reconnectWithBackoff,
+  sendMcpRpc,
+} from './client';
+import { parseMcpAddDeepLink } from '../../config/connectors';
 import type { McpServerConfig, ServerSecretPayload } from '../../types';
 
 test('parseSseJsonRpcMessage extracts matching JSON-RPC frame from SSE payload', () => {
@@ -492,5 +504,291 @@ test('GitHub virtual MCP supports repo creation, UTF-8 read, file push with SHA 
   assert.equal(pushEmpty.isError, false);
   assert.ok(pushEmpty.text.includes('boot_sha_1'));
 });
+
+test('Phase 2: protocol negotiation falls back 2025-06-18 -> 2025-03-26 and sends MCP-Protocol-Version header', async () => {
+  const srv: McpServerConfig = {
+    id: 'srv_proto_fallback',
+    name: 'Legacy Proto',
+    url: 'https://mcp.legacy.test/mcp',
+    authType: 'none',
+    enabled: true,
+    transportPreference: 'streamable_http',
+    status: 'disconnected',
+    tools: [],
+    resources: [],
+    prompts: [],
+    disabledTools: [],
+  };
+
+  const seenHeaders: Array<{ method: string; protocolHeader?: string }> = [];
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as {
+      id?: number;
+      method: string;
+      params?: { protocolVersion?: string };
+    };
+    const hdrs = init?.headers as Record<string, string>;
+    seenHeaders.push({ method: body.method, protocolHeader: hdrs['MCP-Protocol-Version'] });
+
+    if (body.method === 'initialize') {
+      if (body.params?.protocolVersion === '2025-06-18') {
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: -32602, message: 'Unsupported protocolVersion' } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-03-26' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'sid_proto_1' } }
+      );
+    }
+
+    if (body.method === 'tools/list') {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { tools: [] } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (body.method === 'resources/list') {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { resources: [] } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (body.method === 'prompts/list') {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { prompts: [] } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 202 });
+  }) as typeof fetch;
+
+  const res = await connectAndInspectServer({ server: srv, secrets: {}, fetchFn: mockFetch });
+  assert.equal(res.protocolVersion, '2025-03-26');
+  const toolsCallHeader = seenHeaders.find((h) => h.method === 'tools/list');
+  assert.equal(toolsCallHeader?.protocolHeader, '2025-03-26');
+});
+
+test('Phase 2: virtual sandbox reads resources and formats prompts', async () => {
+  const virtualServer: McpServerConfig = {
+    id: 'srv_virtual_res_prompt',
+    name: 'Sandbox',
+    url: 'virtual://mcp-hub-sandbox',
+    authType: 'none',
+    enabled: true,
+    transportPreference: 'auto',
+    status: 'connected',
+    tools: [],
+    resources: [],
+    prompts: [],
+    disabledTools: [],
+  };
+
+  const inspected = await connectAndInspectServer({ server: virtualServer, secrets: {} });
+  assert.ok(inspected.resources.length >= 1);
+  assert.ok(inspected.prompts.length >= 1);
+
+  const resource = await readMcpResource({
+    server: virtualServer,
+    secrets: {},
+    uri: inspected.resources[0].uri,
+  });
+  assert.ok(resource.textSummary.length > 0);
+
+  const prompt = await getMcpPrompt({
+    server: virtualServer,
+    secrets: {},
+    name: inspected.prompts[0].name,
+    arguments: { topic: 'MCP Streams', audience: 'engineers' },
+  });
+  assert.ok(prompt.composedText.length > 0);
+});
+
+test('Phase 2: callMcpTool streams SSE notifications/progress, list_changed, mediaBlocks and structuredContent', async () => {
+  const srv: McpServerConfig = {
+    id: 'srv_sse_media',
+    name: 'Media MCP',
+    url: 'https://mcp.media.test/mcp',
+    authType: 'none',
+    enabled: true,
+    transportPreference: 'streamable_http',
+    protocolVersion: '2025-06-18',
+    status: 'connected',
+    tools: [],
+    resources: [],
+    prompts: [],
+    disabledTools: [],
+  };
+
+  const listChangedEvents: string[] = [];
+  const unsub = onMcpListChanged((serverId, kind) => {
+    if (serverId === srv.id) listChangedEvents.push(kind);
+  });
+
+  const progressUpdates: Array<{ progress: number; total?: number; message?: string }> = [];
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const req = JSON.parse(String(init?.body ?? '{}')) as {
+      id: number;
+      params?: { _meta?: { progressToken?: string } };
+    };
+    const token = req.params?._meta?.progressToken ?? 'tok';
+    const ssePayload = [
+      `event: message\ndata: ${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'notifications/progress',
+        params: { progressToken: token, progress: 50, total: 100, message: 'Rendering' },
+      })}\n\n`,
+      `event: message\ndata: ${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'notifications/tools/list_changed',
+        params: {},
+      })}\n\n`,
+      `event: message\ndata: ${JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        result: {
+          content: [
+            { type: 'text', text: 'Chart generated.' },
+            { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+            { type: 'audio', uri: 'https://cdn.media.test/out.mp3', mimeType: 'audio/mpeg' },
+          ],
+          structuredContent: { rows: 12, status: 'ok' },
+          isError: false,
+        },
+      })}\n\n`,
+    ];
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const chunk of ssePayload) controller.enqueue(enc.encode(chunk));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Mcp-Session-Id': 'sid_media_99' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const res = await callMcpTool({
+      server: srv,
+      secrets: {},
+      toolName: 'render_chart',
+      args: { metric: 'revenue' },
+      onProgress: (u) => progressUpdates.push({ progress: u.progress, total: u.total, message: u.message }),
+      fetchFn: mockFetch,
+    });
+
+    assert.equal(res.isError, false);
+    assert.ok(res.text.includes('Chart generated.'));
+    assert.equal(res.mediaBlocks.length, 2);
+    assert.equal(res.mediaBlocks[0].type, 'image');
+    assert.equal(res.mediaBlocks[1].type, 'audio');
+    assert.deepEqual(res.structuredContent, { rows: 12, status: 'ok' });
+    assert.equal(progressUpdates.length, 1);
+    assert.equal(progressUpdates[0].progress, 50);
+    assert.deepEqual(listChangedEvents, ['tools']);
+  } finally {
+    unsub();
+  }
+});
+
+test('Phase 2: disconnectMcpServer sends DELETE with Mcp-Session-Id and abort sends notifications/cancelled', async () => {
+  const srv: McpServerConfig = {
+    id: 'srv_cancel_delete',
+    name: 'Cancel Delete',
+    url: 'https://mcp.cancel.test/mcp',
+    authType: 'none',
+    enabled: true,
+    transportPreference: 'streamable_http',
+    protocolVersion: '2025-06-18',
+    status: 'connected',
+    tools: [],
+    resources: [],
+    prompts: [],
+    disabledTools: [],
+  };
+
+  const calls: Array<{ method: string; sid?: string | null; rpcMethod?: string }> = [];
+  const mockFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    if (method === 'DELETE') {
+      calls.push({ method: 'DELETE', sid: headers['Mcp-Session-Id'] });
+      return new Response('', { status: 204 });
+    }
+    const body = JSON.parse(String(init?.body ?? '{}')) as { id?: number; method: string };
+    calls.push({ method, sid: headers['Mcp-Session-Id'], rpcMethod: body.method });
+    if (body.method === 'ping') {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'sid_del_7' },
+      });
+    }
+    if (body.method === 'notifications/cancelled') {
+      return new Response('', { status: 202 });
+    }
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('Aborted', 'AbortError'));
+      });
+    });
+  }) as typeof fetch;
+
+  const ping = await pingMcpServer({ server: srv, secrets: {}, fetchFn: mockFetch });
+  assert.equal(ping.ok, true);
+
+  const ac = new AbortController();
+  const slowPromise = sendMcpRpc({
+    server: srv,
+    secrets: {},
+    method: 'tools/call',
+    signal: ac.signal,
+    fetchFn: mockFetch,
+  });
+  setTimeout(() => ac.abort(), 15);
+  await assert.rejects(() => slowPromise);
+  await new Promise((r) => setTimeout(r, 10));
+
+  await disconnectMcpServer(srv.id, mockFetch);
+
+  assert.ok(calls.some((c) => c.rpcMethod === 'notifications/cancelled'));
+  assert.ok(calls.some((c) => c.method === 'DELETE' && c.sid === 'sid_del_7'));
+});
+
+test('Phase 2: reconnectWithBackoff retries transient failures and parseMcpAddDeepLink parses deep links', async () => {
+  let attempts = 0;
+  const val = await reconnectWithBackoff(
+    async () => {
+      attempts++;
+      if (attempts < 2) throw new Error('Network glitch');
+      return 'connected';
+    },
+    { maxAttempts: 3, baseDelayMs: 50 }
+  );
+  assert.equal(val, 'connected');
+  assert.equal(attempts, 2);
+
+  const d1 = parseMcpAddDeepLink('mcphub://add?url=https%3A%2F%2Fmcp.linear.app%2Fmcp&name=Linear&authType=oauth_pkce');
+  assert.deepEqual(d1, {
+    url: 'https://mcp.linear.app/mcp',
+    name: 'Linear',
+    authType: 'oauth_pkce',
+  });
+
+  const d2 = parseMcpAddDeepLink('https://app.mcphub.dev/?mcphub_add=https://mcp.notion.com/mcp&name=Notion');
+  assert.deepEqual(d2, {
+    url: 'https://mcp.notion.com/mcp',
+    name: 'Notion',
+    authType: undefined,
+  });
+
+  const rejected = parseMcpAddDeepLink('mcphub://add?url=http://insecure.example.com/mcp');
+  assert.equal(rejected, null);
+});
+
 
 

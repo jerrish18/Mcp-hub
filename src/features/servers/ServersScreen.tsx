@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import {
+  Activity,
   AlertCircle,
   Check,
   CheckCircle2,
@@ -15,6 +16,7 @@ import {
   Loader2,
   MessageSquare,
   Pencil,
+  PlugZap,
   Plus,
   RefreshCw,
   Server,
@@ -95,10 +97,21 @@ function ServerStatusLabel({ status }: { status: McpServerConfig['status'] }) {
 }
 
 export function ServersScreen() {
-  const { servers, settings, addOrUpdateServer, deleteServer, connectServer, toggleServerTool } =
-    useHubStore();
+  const {
+    servers,
+    settings,
+    pendingDeepLinkServer,
+    setPendingDeepLinkServer,
+    addOrUpdateServer,
+    deleteServer,
+    connectServer,
+    pingServer,
+    disconnectServer,
+    toggleServerTool,
+  } = useHubStore();
 
   const [expandedId, setExpandedId] = useState<string | null>(servers[0]?.id ?? null);
+  const [pingingId, setPingingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
   const [editingPresetId, setEditingPresetId] = useState<McpServerConfig['presetId']>(undefined);
@@ -155,6 +168,47 @@ export function ServersScreen() {
     setFormError('');
     setEditorOpen(true);
   };
+
+  useEffect(() => {
+    if (!pendingDeepLinkServer) return;
+    setEditingServerId(null);
+    setEditingPresetId(undefined);
+    setName(pendingDeepLinkServer.name);
+    setUrl(pendingDeepLinkServer.url);
+    setAuthType(pendingDeepLinkServer.authType ?? 'bearer');
+    setTransport('auto');
+    setBearerToken('');
+    setBasicUser('');
+    setBasicPass('');
+    setHeaderRows([{ key: 'X-API-Key', value: '' }]);
+    setOauthClientId('');
+    setOauthClientSecret('');
+    setOauthScopes('mcp:tools');
+    setOauthAuthEp('');
+    setOauthTokenEp('');
+    setOauthRegEp('');
+    setOauthAccessToken('');
+    setOauthRefreshToken('');
+    setPendingPkce(null);
+    setAuthCodeInput('');
+    setFormError('');
+    setEditorOpen(true);
+    setPendingDeepLinkServer(null);
+  }, [pendingDeepLinkServer, setPendingDeepLinkServer]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const activeRemote = useHubStore
+        .getState()
+        .servers.filter(
+          (s) => s.status === 'connected' && !s.url.startsWith('virtual://')
+        );
+      for (const srv of activeRemote) {
+        void pingServer(srv.id);
+      }
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, [pingServer]);
 
   const openProTemplateEditor = (tpl: ProWorkMcpTemplate) => {
     const existing = servers.find((s) => s.presetId === tpl.presetId);
@@ -572,6 +626,18 @@ export function ServersScreen() {
                           <span className="tabular-nums">
                             {enabledToolCount}/{srv.tools.length} tools
                           </span>
+                          {srv.protocolVersion && (
+                            <>
+                              <span aria-hidden="true"> · </span>
+                              <span className="font-mono">{srv.protocolVersion}</span>
+                            </>
+                          )}
+                          {typeof srv.latencyMs === 'number' && srv.status === 'connected' && (
+                            <>
+                              <span aria-hidden="true"> · </span>
+                              <span className="font-mono tabular-nums">{srv.latencyMs}ms</span>
+                            </>
+                          )}
                         </div>
                       </div>
                       {isExpanded ? (
@@ -581,7 +647,7 @@ export function ServersScreen() {
                       )}
                     </button>
 
-                    <div className="flex items-center justify-end gap-1.5 shrink-0 pt-2 sm:pt-0 border-t border-slate-100 dark:border-slate-800 sm:border-t-0">
+                    <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0 pt-2 sm:pt-0 border-t border-slate-100 dark:border-slate-800 sm:border-t-0">
                       {presetKey && (
                         <button
                           type="button"
@@ -596,6 +662,38 @@ export function ServersScreen() {
                           <KeyRound className="w-3.5 h-3.5" />
                           <span>{srv.status === 'connected' ? 'Credentials' : 'Connect'}</span>
                         </button>
+                      )}
+                      {srv.status === 'connected' && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={pingingId === srv.id}
+                            onClick={async () => {
+                              setPingingId(srv.id);
+                              try {
+                                await pingServer(srv.id);
+                              } finally {
+                                setPingingId(null);
+                              }
+                            }}
+                            aria-label={`Ping ${srv.name}`}
+                            className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 disabled:opacity-60"
+                          >
+                            <Activity
+                              className={`w-3.5 h-3.5 ${pingingId === srv.id ? 'animate-pulse' : ''}`}
+                            />
+                            <span>Ping</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void disconnectServer(srv.id)}
+                            aria-label={`Disconnect ${srv.name}`}
+                            className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+                          >
+                            <PlugZap className="w-3.5 h-3.5" />
+                            <span>Disconnect</span>
+                          </button>
+                        </>
                       )}
                       <button
                         type="button"
@@ -1027,9 +1125,12 @@ export function ServersScreen() {
         open={jsonImportOpen}
         onClose={() => setJsonImportOpen(false)}
         title="Import MCP JSON Config"
-        subtitle='Paste standard Claude Desktop / Cursor { "mcpServers": { ... } } JSON'
+        subtitle='Paste standard Claude Desktop / Cursor { "mcpServers": { ... } } or single-server JSON'
       >
         <form onSubmit={handleImportJsonSubmit} className="space-y-4">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+            Remote <span className="font-mono">https://</span> Streamable HTTP and SSE entries import with Bearer &amp; custom headers automatically. Deep-link installs (<span className="font-mono">?mcphub_add=https://...</span>) are also supported.
+          </div>
           {jsonImportError && (
             <div className="rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
               {jsonImportError}
