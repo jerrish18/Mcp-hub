@@ -115,12 +115,57 @@ function safeEvalArithmetic(expr: string): number {
   if (!/^[0-9+\-*/().]+$/.test(cleaned) || cleaned.length > 120) {
     throw new Error('Only basic arithmetic (+, -, *, /, parentheses) is permitted.');
   }
-  const fn = new Function(`"use strict"; return (${cleaned});`) as () => unknown;
-  const val = fn();
-  if (typeof val !== 'number' || !Number.isFinite(val)) {
-    throw new Error('Expression did not evaluate to a finite number.');
+  let position = 0;
+  const consume = (token: string) => {
+    if (!cleaned.startsWith(token, position)) return false;
+    position += token.length;
+    return true;
+  };
+  const invalid = () => new Error('Invalid arithmetic expression.');
+
+  function primary(): number {
+    if (consume('(')) {
+      const value = sum();
+      if (!consume(')')) throw invalid();
+      return value;
+    }
+    const number = /^(?:\d+(?:\.\d*)?|\.\d+)/.exec(cleaned.slice(position));
+    if (!number) throw invalid();
+    position += number[0].length;
+    return Number(number[0]);
   }
-  return val;
+
+  function factor(): number {
+    if (consume('+')) return factor();
+    if (consume('-')) return -factor();
+    const value = primary();
+    return consume('**') ? value ** factor() : value;
+  }
+
+  function product(): number {
+    let value = factor();
+    while (position < cleaned.length) {
+      if (consume('*')) value *= factor();
+      else if (consume('/')) value /= factor();
+      else break;
+    }
+    return value;
+  }
+
+  function sum(): number {
+    let value = product();
+    while (position < cleaned.length) {
+      if (consume('+')) value += product();
+      else if (consume('-')) value -= product();
+      else break;
+    }
+    return value;
+  }
+
+  const result = sum();
+  if (position !== cleaned.length) throw invalid();
+  if (!Number.isFinite(result)) throw new Error('Expression did not evaluate to a finite number.');
+  return result;
 }
 
 export async function handleVirtualMcpRequest(payload: {
