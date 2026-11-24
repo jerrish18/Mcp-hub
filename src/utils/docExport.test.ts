@@ -189,12 +189,16 @@ test('binary document builders produce genuine PPTX, DOCX, XLSX, and PDF file si
     JSON.stringify({
       title: 'Executive Report',
       subtitle: 'Q4 Summary',
+      author: 'MCP Hub Pro Studio',
+      dateLabel: '2026-11-23',
+      themeColor: '0B57D0',
+      metrics: [{ label: 'Revenue Growth', value: '+28%', note: 'YoY' }],
       sections: [
         {
           heading: 'KPIs',
-          callout: 'Target exceeded by 14%.',
-          paragraphs: ['Revenue grew across every region.'],
-          bullets: ['North America +18%'],
+          callout: 'Target exceeded by **14%** across priority accounts.',
+          paragraphs: ['Revenue grew across **every region** in Q4.'],
+          bullets: ['**North America:** +18% net new ARR'],
           table: { headers: ['KPI', 'Actual'], rows: [['Margin', '64%']] },
         },
       ],
@@ -202,7 +206,7 @@ test('binary document builders produce genuine PPTX, DOCX, XLSX, and PDF file si
   );
   assert.ok(pdfSpec && pdfSpec.format === 'pdf');
   const pdfBlob = buildPdfBlob(pdfSpec);
-  assert.ok(pdfBlob.size > 1000);
+  assert.ok(pdfBlob.size > 1200);
   const pdfHeader = await pdfBlob.slice(0, 5).text();
   assert.equal(pdfHeader, '%PDF-');
 

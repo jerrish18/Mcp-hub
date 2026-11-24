@@ -9,6 +9,15 @@ import { getApiKeyForProvider, syncLiveProviderModels } from '../services/llm/pr
 import type { LlmConversationItem } from '../services/llm/types';
 import { closeAllMcpConnections, connectAndInspectServer } from '../services/mcp/client';
 import { GITHUB_TOOLS, YOUTUBE_TOOLS } from '../services/mcp/virtualConnectors';
+import {
+  deleteRemoteConversation,
+  deleteRemoteStudyNote,
+  fetchRemoteWorkspace,
+  getAccountScope,
+  mergeWorkspaceSnapshots,
+  pushRemoteWorkspace,
+  type WorkspaceSnapshot,
+} from '../services/storage/accountSync';
 import { historyDb } from '../services/storage/historyDb';
 import {
   deleteServerSecrets,
@@ -46,12 +55,17 @@ import {
   DEFAULT_STUDY_INSTRUCTIONS,
 } from './defaults';
 
-const STATE_KEY = 'mcphub_app_state_v1';
-const SAVED_NOTES_KEY = 'mcphub_saved_study_notes_v1';
+const LEGACY_STATE_KEY = 'mcphub_app_state_v1';
+const LEGACY_SAVED_NOTES_KEY = 'mcphub_saved_study_notes_v1';
+const STATE_KEY_PREFIX = 'mcphub_app_state_v2::';
+const SAVED_NOTES_KEY_PREFIX = 'mcphub_saved_study_notes_v2::';
 
-function readSavedStudyNotes(): SavedStudyNote[] {
+function readSavedStudyNotes(scope = 'guest'): SavedStudyNote[] {
   try {
-    const raw = globalThis.localStorage?.getItem(SAVED_NOTES_KEY);
+    let raw = globalThis.localStorage?.getItem(`${SAVED_NOTES_KEY_PREFIX}${scope}`);
+    if (!raw && scope === 'guest') {
+      raw = globalThis.localStorage?.getItem(LEGACY_SAVED_NOTES_KEY) ?? null;
+    }
     if (!raw) return [];
     const parsed = JSON.parse(raw) as SavedStudyNote[];
     return Array.isArray(parsed) ? parsed : [];
@@ -60,9 +74,9 @@ function readSavedStudyNotes(): SavedStudyNote[] {
   }
 }
 
-function writeSavedStudyNotes(notes: SavedStudyNote[]): void {
+function writeSavedStudyNotes(notes: SavedStudyNote[], scope = 'guest'): void {
   try {
-    globalThis.localStorage?.setItem(SAVED_NOTES_KEY, JSON.stringify(notes));
+    globalThis.localStorage?.setItem(`${SAVED_NOTES_KEY_PREFIX}${scope}`, JSON.stringify(notes));
   } catch {
     // ignore storage quota errors
   }
@@ -74,6 +88,7 @@ interface PersistedMeta {
   settings: AppSettings;
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
+  updatedAt?: number;
 }
 
 function mergeDefaultServers(saved: McpServerConfig[], dismissedIds: string[]): McpServerConfig[] {
@@ -120,9 +135,12 @@ function migrateConversation(c: Conversation): Conversation {
   };
 }
 
-function readPersistedMeta(): PersistedMeta {
+function readPersistedMeta(scope = 'guest'): PersistedMeta {
   try {
-    const raw = globalThis.localStorage?.getItem(STATE_KEY);
+    let raw = globalThis.localStorage?.getItem(`${STATE_KEY_PREFIX}${scope}`);
+    if (!raw && scope === 'guest') {
+      raw = globalThis.localStorage?.getItem(LEGACY_STATE_KEY) ?? null;
+    }
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<PersistedMeta>;
       const dismissed = parsed.dismissedDefaultServerIds ?? [];
@@ -139,6 +157,7 @@ function readPersistedMeta(): PersistedMeta {
         settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
         dynamicModels: parsed.dynamicModels ?? [],
         dismissedDefaultServerIds: dismissed,
+        updatedAt: Number(parsed.updatedAt) || 0,
       };
     }
   } catch {
@@ -150,15 +169,47 @@ function readPersistedMeta(): PersistedMeta {
     settings: DEFAULT_SETTINGS,
     dynamicModels: [],
     dismissedDefaultServerIds: [],
+    updatedAt: 0,
   };
 }
 
-function writePersistedMeta(meta: PersistedMeta): void {
+function writePersistedMeta(meta: PersistedMeta, scope = 'guest'): void {
   try {
-    globalThis.localStorage?.setItem(STATE_KEY, JSON.stringify(meta));
+    globalThis.localStorage?.setItem(
+      `${STATE_KEY_PREFIX}${scope}`,
+      JSON.stringify({ ...meta, updatedAt: meta.updatedAt ?? Date.now() })
+    );
   } catch {
     // ignore storage errors
   }
+}
+
+async function ensureSandboxConnected(servers: McpServerConfig[]): Promise<McpServerConfig[]> {
+  const updatedServers = [...servers];
+  const sandboxIdx = updatedServers.findIndex((srv) => srv.url === 'virtual://mcp-hub-sandbox');
+  if (
+    sandboxIdx !== -1 &&
+    (updatedServers[sandboxIdx].tools.length === 0 ||
+      updatedServers[sandboxIdx].status !== 'connected')
+  ) {
+    try {
+      const inspected = await connectAndInspectServer({
+        server: updatedServers[sandboxIdx],
+        secrets: {},
+      });
+      updatedServers[sandboxIdx] = {
+        ...updatedServers[sandboxIdx],
+        status: 'connected',
+        lastConnectedAt: Date.now(),
+        tools: inspected.tools,
+        resources: inspected.resources,
+        prompts: inspected.prompts,
+      };
+    } catch {
+      // ignore
+    }
+  }
+  return updatedServers;
 }
 
 function createNewConversation(agent: AgentProfile, modelIdOverride?: string): Conversation {
@@ -181,11 +232,16 @@ function createNewConversation(agent: AgentProfile, modelIdOverride?: string): C
 
 export type HubTabId = 'dashboard' | 'chat' | 'servers' | 'agents' | 'settings';
 
+export type WorkspaceSyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
+
 export interface HubState {
   initialized: boolean;
   isLocked: boolean;
   authUser: AuthUser | null;
   authGuestMode: boolean;
+  syncStatus: WorkspaceSyncStatus;
+  lastSyncedAt: number | null;
+  syncError: string | null;
   activeTab: HubTabId;
   servers: McpServerConfig[];
   agents: AgentProfile[];
@@ -205,10 +261,11 @@ export interface HubState {
   unlockApp: () => void;
   lockApp: () => void;
 
-  // Auth
+  // Auth & Database Sync
   setAuthUser: (user: AuthUser | null) => void;
   continueAsGuest: () => void;
   signOutAccount: () => Promise<void>;
+  syncWorkspaceNow: () => Promise<void>;
 
   // Settings & Keys & Models
   updateSettings: (patch: Partial<AppSettings>) => void;
@@ -256,17 +313,232 @@ export interface HubState {
   removeSavedStudyNote: (noteId: string) => void;
 }
 
-const initialMeta = readPersistedMeta();
+const initialMeta = readPersistedMeta('guest');
 
 export const useHubStore = create<HubState>((set, get) => {
+  let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let activeSyncRun = 0;
+
+  const activeScope = () => getAccountScope(get().authUser);
+
+  const buildSnapshotFromState = (state: HubState, updatedAt = Date.now()): WorkspaceSnapshot => ({
+    settings: state.settings,
+    agents: state.agents,
+    servers: state.servers,
+    dynamicModels: state.dynamicModels,
+    dismissedDefaultServerIds: state.dismissedDefaultServerIds,
+    conversations: state.conversations,
+    savedStudyNotes: state.savedStudyNotes,
+    updatedAt,
+  });
+
+  const pushCurrentStateToRemote = async () => {
+    const user = get().authUser;
+    if (!user) return;
+    set({ syncStatus: 'syncing', syncError: null });
+    try {
+      const syncedAt = await pushRemoteWorkspace(user, buildSnapshotFromState(get()));
+      if (get().authUser?.id !== user.id) return;
+      set({ syncStatus: 'synced', lastSyncedAt: syncedAt, syncError: null });
+    } catch (err) {
+      if (get().authUser?.id !== user.id) return;
+      set({ syncStatus: 'error', syncError: safeErrorMessage(err) });
+    }
+  };
+
+  const scheduleRemoteSync = () => {
+    if (!get().authUser) return;
+    if (syncDebounceTimer !== null) {
+      clearTimeout(syncDebounceTimer);
+    }
+    syncDebounceTimer = setTimeout(() => {
+      syncDebounceTimer = null;
+      void pushCurrentStateToRemote();
+    }, 550);
+  };
+
   const persist = () => {
     const s = get();
-    writePersistedMeta({
-      servers: s.servers,
-      agents: s.agents,
-      settings: s.settings,
-      dynamicModels: s.dynamicModels,
-      dismissedDefaultServerIds: s.dismissedDefaultServerIds,
+    const scope = getAccountScope(s.authUser);
+    writePersistedMeta(
+      {
+        servers: s.servers,
+        agents: s.agents,
+        settings: s.settings,
+        dynamicModels: s.dynamicModels,
+        dismissedDefaultServerIds: s.dismissedDefaultServerIds,
+        updatedAt: Date.now(),
+      },
+      scope
+    );
+    scheduleRemoteSync();
+  };
+
+  const hydrateAccountWorkspace = async (user: AuthUser) => {
+    const runId = ++activeSyncRun;
+    const scope = getAccountScope(user);
+
+    // Immediately show scoped local cache for this user so prior accounts never leak
+    const localMeta = readPersistedMeta(scope);
+    const localNotes = readSavedStudyNotes(scope);
+    const localConvsRaw = await historyDb.listConversations(scope);
+    const localConvs = localConvsRaw.map(migrateConversation);
+
+    if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
+
+    const initialServers = await ensureSandboxConnected(localMeta.servers);
+    if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
+
+    set({
+      servers: initialServers,
+      agents: localMeta.agents,
+      settings: localMeta.settings,
+      dynamicModels: localMeta.dynamicModels,
+      dismissedDefaultServerIds: localMeta.dismissedDefaultServerIds,
+      conversations: localConvs,
+      activeConversationId: localConvs[0]?.id ?? null,
+      savedStudyNotes: localNotes,
+      syncStatus: 'syncing',
+      syncError: null,
+    });
+
+    try {
+      const remote = await fetchRemoteWorkspace(user);
+      if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
+
+      const merged = mergeWorkspaceSnapshots(
+        {
+          settings: localMeta.settings,
+          agents: localMeta.agents,
+          servers: initialServers,
+          dynamicModels: localMeta.dynamicModels,
+          dismissedDefaultServerIds: localMeta.dismissedDefaultServerIds,
+          conversations: localConvs,
+          savedStudyNotes: localNotes,
+          updatedAt: localMeta.updatedAt ?? 0,
+        },
+        remote
+      );
+
+      let mergedConvs = merged.conversations.map(migrateConversation);
+      if (mergedConvs.length === 0) {
+        const keys = get().providerKeys;
+        const defaultAgent = merged.agents[0] ?? BUILT_IN_AGENTS[0];
+        const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+        const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+        mergedConvs = [createNewConversation(defaultAgent, firstModel)];
+      }
+
+      const hydratedServers = await ensureSandboxConnected(
+        mergeDefaultServers(merged.servers, merged.dismissedDefaultServerIds)
+      );
+      if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
+
+      const finalSnapshot: WorkspaceSnapshot = {
+        ...merged,
+        servers: hydratedServers,
+        agents: mergeBuiltInAgents(merged.agents),
+        conversations: mergedConvs,
+      };
+
+      writePersistedMeta(
+        {
+          servers: finalSnapshot.servers,
+          agents: finalSnapshot.agents,
+          settings: finalSnapshot.settings,
+          dynamicModels: finalSnapshot.dynamicModels,
+          dismissedDefaultServerIds: finalSnapshot.dismissedDefaultServerIds,
+          updatedAt: finalSnapshot.updatedAt,
+        },
+        scope
+      );
+      writeSavedStudyNotes(finalSnapshot.savedStudyNotes, scope);
+      await historyDb.replaceScopeConversations(finalSnapshot.conversations, scope);
+
+      if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
+
+      const currentActiveId = get().activeConversationId;
+      const nextActiveId =
+        finalSnapshot.conversations.find((c) => c.id === currentActiveId)?.id ??
+        finalSnapshot.conversations[0]?.id ??
+        null;
+
+      set({
+        servers: finalSnapshot.servers,
+        agents: finalSnapshot.agents,
+        settings: finalSnapshot.settings,
+        dynamicModels: finalSnapshot.dynamicModels,
+        dismissedDefaultServerIds: finalSnapshot.dismissedDefaultServerIds,
+        conversations: finalSnapshot.conversations,
+        activeConversationId: nextActiveId,
+        savedStudyNotes: finalSnapshot.savedStudyNotes,
+      });
+
+      // Push back if remote didn't exist yet or local had newer entries
+      if (!remote || (localMeta.updatedAt ?? 0) > (remote.updatedAt ?? 0)) {
+        const syncedAt = await pushRemoteWorkspace(user, finalSnapshot);
+        if (runId === activeSyncRun && get().authUser?.id === user.id) {
+          set({ syncStatus: 'synced', lastSyncedAt: syncedAt, syncError: null });
+        }
+      } else {
+        set({
+          syncStatus: 'synced',
+          lastSyncedAt: remote.updatedAt || Date.now(),
+          syncError: null,
+        });
+      }
+    } catch (err) {
+      if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
+      // Ensure at least one conversation exists locally even if remote sync errored
+      if (get().conversations.length === 0) {
+        const keys = get().providerKeys;
+        const defaultAgent = get().agents[0] ?? BUILT_IN_AGENTS[0];
+        const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+        const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+        const fresh = createNewConversation(defaultAgent, firstModel);
+        await historyDb.saveConversation(fresh, scope);
+        set({ conversations: [fresh], activeConversationId: fresh.id });
+      }
+      set({
+        syncStatus: 'error',
+        syncError: safeErrorMessage(err),
+      });
+    }
+  };
+
+  const restoreGuestWorkspace = async () => {
+    const runId = ++activeSyncRun;
+    const guestMeta = readPersistedMeta('guest');
+    const guestNotes = readSavedStudyNotes('guest');
+    const guestConvsRaw = await historyDb.listConversations('guest');
+    if (runId !== activeSyncRun) return;
+
+    let guestConvs = guestConvsRaw.map(migrateConversation);
+    const updatedServers = await ensureSandboxConnected(guestMeta.servers);
+    if (runId !== activeSyncRun) return;
+
+    if (guestConvs.length === 0) {
+      const keys = get().providerKeys;
+      const defaultAgent = guestMeta.agents[0] ?? BUILT_IN_AGENTS[0];
+      const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+      const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+      const fresh = createNewConversation(defaultAgent, firstModel);
+      guestConvs = [fresh];
+      await historyDb.saveConversation(fresh, 'guest');
+    }
+
+    set({
+      servers: updatedServers,
+      agents: guestMeta.agents,
+      settings: guestMeta.settings,
+      dynamicModels: guestMeta.dynamicModels,
+      dismissedDefaultServerIds: guestMeta.dismissedDefaultServerIds,
+      conversations: guestConvs,
+      activeConversationId: guestConvs[0]?.id ?? null,
+      savedStudyNotes: guestNotes,
+      syncStatus: 'idle',
+      lastSyncedAt: null,
+      syncError: null,
     });
   };
 
@@ -275,6 +547,9 @@ export const useHubStore = create<HubState>((set, get) => {
     isLocked: initialMeta.settings.biometricLockEnabled,
     authUser: null,
     authGuestMode: false,
+    syncStatus: 'idle',
+    lastSyncedAt: null,
+    syncError: null,
     activeTab: 'dashboard',
     servers: initialMeta.servers,
     agents: initialMeta.agents,
@@ -284,30 +559,83 @@ export const useHubStore = create<HubState>((set, get) => {
     dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
     conversations: [],
     activeConversationId: null,
-    savedStudyNotes: readSavedStudyNotes(),
+    savedStudyNotes: readSavedStudyNotes('guest'),
     isRunning: false,
     abortController: null,
     pendingApproval: null,
 
     setActiveTab: (tab) => set({ activeTab: tab }),
 
-    setAuthUser: (user) =>
-      set((s) => ({
-        authUser: user,
-        authGuestMode: user ? false : s.authGuestMode,
-      })),
+    setAuthUser: (user) => {
+      const prev = get().authUser;
+      if (user && prev && prev.id === user.id && prev.provider === user.provider) {
+        return;
+      }
+      if (!user && !prev) {
+        return;
+      }
 
-    continueAsGuest: () => set({ authGuestMode: true }),
+      if (syncDebounceTimer !== null) {
+        clearTimeout(syncDebounceTimer);
+        syncDebounceTimer = null;
+      }
+
+      if (user) {
+        set({
+          authUser: user,
+          authGuestMode: false,
+          syncStatus: 'syncing',
+          syncError: null,
+        });
+        void hydrateAccountWorkspace(user);
+      } else {
+        set({
+          authUser: null,
+          syncStatus: 'idle',
+          lastSyncedAt: null,
+          syncError: null,
+        });
+        void restoreGuestWorkspace();
+      }
+    },
+
+    continueAsGuest: () => {
+      set({ authGuestMode: true });
+      void restoreGuestWorkspace();
+    },
 
     signOutAccount: async () => {
+      if (syncDebounceTimer !== null) {
+        clearTimeout(syncDebounceTimer);
+        syncDebounceTimer = null;
+      }
       await logoutCurrentAccount();
-      set({ authUser: null, authGuestMode: false });
+      set({
+        authUser: null,
+        authGuestMode: false,
+        activeTab: 'chat',
+        syncStatus: 'idle',
+        lastSyncedAt: null,
+        syncError: null,
+      });
+      await restoreGuestWorkspace();
+    },
+
+    syncWorkspaceNow: async () => {
+      const user = get().authUser;
+      if (!user) return;
+      if (syncDebounceTimer !== null) {
+        clearTimeout(syncDebounceTimer);
+        syncDebounceTimer = null;
+      }
+      await hydrateAccountWorkspace(user);
     },
 
     initializeApp: async (autostartSkipOnboarding = false) => {
+      const scope = getAccountScope(get().authUser);
       const [keys, rawConvs] = await Promise.all([
         loadProviderKeys(),
-        historyDb.listConversations(),
+        historyDb.listConversations(scope),
       ]);
 
       const convs = rawConvs.map(migrateConversation);
@@ -316,33 +644,7 @@ export const useHubStore = create<HubState>((set, get) => {
         ? { ...state.settings, onboardingCompleted: true }
         : state.settings;
 
-      // Auto-connect local sandbox virtual server so tools are immediately inspectable
-      const updatedServers = [...state.servers];
-      const sandboxIdx = updatedServers.findIndex(
-        (srv) => srv.url === 'virtual://mcp-hub-sandbox'
-      );
-      if (
-        sandboxIdx !== -1 &&
-        (updatedServers[sandboxIdx].tools.length === 0 ||
-          updatedServers[sandboxIdx].status !== 'connected')
-      ) {
-        try {
-          const inspected = await connectAndInspectServer({
-            server: updatedServers[sandboxIdx],
-            secrets: {},
-          });
-          updatedServers[sandboxIdx] = {
-            ...updatedServers[sandboxIdx],
-            status: 'connected',
-            lastConnectedAt: Date.now(),
-            tools: inspected.tools,
-            resources: inspected.resources,
-            prompts: inspected.prompts,
-          };
-        } catch {
-          // ignore
-        }
-      }
+      const updatedServers = await ensureSandboxConnected(state.servers);
 
       let activeConvId = convs[0]?.id ?? null;
       let nextConvs = convs;
@@ -353,7 +655,7 @@ export const useHubStore = create<HubState>((set, get) => {
         const fresh = createNewConversation(defaultAgent, firstModel);
         nextConvs = [fresh];
         activeConvId = fresh.id;
-        await historyDb.saveConversation(fresh);
+        await historyDb.saveConversation(fresh, scope);
       }
 
       set({
@@ -596,7 +898,8 @@ export const useHubStore = create<HubState>((set, get) => {
         conversations: [conv, ...s.conversations],
         activeConversationId: conv.id,
       }));
-      void historyDb.saveConversation(conv);
+      void historyDb.saveConversation(conv, activeScope());
+      scheduleRemoteSync();
     },
 
     selectConversation: (conversationId) => {
@@ -614,11 +917,19 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) await historyDb.saveConversation(updated);
+      if (updated) {
+        await historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     deleteConversation: async (conversationId) => {
-      await historyDb.deleteConversation(conversationId);
+      const scope = activeScope();
+      const user = get().authUser;
+      await historyDb.deleteConversation(conversationId, scope);
+      if (user) {
+        void deleteRemoteConversation(user, conversationId);
+      }
       set((s) => {
         const remaining = s.conversations.filter((c) => c.id !== conversationId);
         let nextActive = s.activeConversationId;
@@ -629,6 +940,8 @@ export const useHubStore = create<HubState>((set, get) => {
       });
       if (!get().activeConversationId) {
         get().startNewConversation();
+      } else {
+        scheduleRemoteSync();
       }
     },
 
@@ -654,7 +967,10 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) void historyDb.saveConversation(updated);
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     setActiveModel: (modelId) => {
@@ -668,7 +984,10 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) void historyDb.saveConversation(updated);
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     setActiveEffort: (effort) => {
@@ -682,7 +1001,10 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) void historyDb.saveConversation(updated);
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     setChatMode: (chatMode) => {
@@ -696,7 +1018,10 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) void historyDb.saveConversation(updated);
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     setKnowledgeSource: (knowledgeSource) => {
@@ -710,7 +1035,10 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) void historyDb.saveConversation(updated);
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     setStudyInstructions: (studyInstructions) => {
@@ -724,7 +1052,10 @@ export const useHubStore = create<HubState>((set, get) => {
           return updated;
         }),
       }));
-      if (updated) void historyDb.saveConversation(updated);
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
     },
 
     stopRun: () => {
@@ -754,6 +1085,7 @@ export const useHubStore = create<HubState>((set, get) => {
     },
 
     saveStudyNote: (note) => {
+      const scope = activeScope();
       const entry: SavedStudyNote = {
         ...note,
         id: `snote_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -763,18 +1095,25 @@ export const useHubStore = create<HubState>((set, get) => {
         const filtered = note.messageId
           ? s.savedStudyNotes.filter((n) => n.messageId !== note.messageId)
           : s.savedStudyNotes;
-        const next = [entry, ...filtered].slice(0, 50);
-        writeSavedStudyNotes(next);
+        const next = [entry, ...filtered].slice(0, 80);
+        writeSavedStudyNotes(next, scope);
         return { savedStudyNotes: next };
       });
+      scheduleRemoteSync();
     },
 
     removeSavedStudyNote: (noteId) => {
+      const scope = activeScope();
+      const user = get().authUser;
+      if (user) {
+        void deleteRemoteStudyNote(user, noteId);
+      }
       set((s) => {
         const next = s.savedStudyNotes.filter((n) => n.id !== noteId);
-        writeSavedStudyNotes(next);
+        writeSavedStudyNotes(next, scope);
         return { savedStudyNotes: next };
       });
+      scheduleRemoteSync();
     },
 
     sendMessage: async (rawText, options) => {
@@ -782,6 +1121,7 @@ export const useHubStore = create<HubState>((set, get) => {
       const text = rawText.trim() || (attachments.length > 0 ? 'Analyze the attached file(s).' : '');
       if (!text || get().isRunning) return;
 
+      const scope = activeScope();
       const state = get();
       let conv = state.conversations.find((c) => c.id === state.activeConversationId);
       if (!conv) {
@@ -858,7 +1198,10 @@ export const useHubStore = create<HubState>((set, get) => {
           updatedAt: Date.now(),
           messages: [...c.messages, userMsg, errorAssistant],
         }));
-        if (saved) void historyDb.saveConversation(saved);
+        if (saved) {
+          void historyDb.saveConversation(saved, scope);
+          scheduleRemoteSync();
+        }
         return;
       }
 
@@ -943,6 +1286,7 @@ export const useHubStore = create<HubState>((set, get) => {
           chatMode,
           studyInstructions,
           knowledgeSource,
+          a2uiEnabled: get().settings.a2uiEnabled,
           keys: get().providerKeys,
           dynamicModels: get().dynamicModels,
           servers: get().servers,
@@ -1049,7 +1393,10 @@ export const useHubStore = create<HubState>((set, get) => {
               : m
           ),
         }));
-        if (finalConv) await historyDb.saveConversation(finalConv);
+        if (finalConv) {
+          await historyDb.saveConversation(finalConv, scope);
+          scheduleRemoteSync();
+        }
       } catch (err) {
         flushPendingDeltas();
         const keys = get().providerKeys;
@@ -1067,7 +1414,10 @@ export const useHubStore = create<HubState>((set, get) => {
               : m
           ),
         }));
-        if (finalConv) await historyDb.saveConversation(finalConv);
+        if (finalConv) {
+          await historyDb.saveConversation(finalConv, scope);
+          scheduleRemoteSync();
+        }
       } finally {
         if (flushTimer !== null) clearTimeout(flushTimer);
         set({ isRunning: false, abortController: null, pendingApproval: null });

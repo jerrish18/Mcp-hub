@@ -61,7 +61,12 @@ function toPublicUser(u: StoredAppUser): PublicAppUser {
   };
 }
 
-export function createAuthRouter(options: CreateAuthRouterOptions = {}): Router {
+export interface AuthService {
+  router: Router;
+  verifyBearerToken: (authHeader?: string) => PublicAppUser | null;
+}
+
+export function createAuthService(options: CreateAuthRouterOptions = {}): AuthService {
   const router = express.Router();
   router.use(express.json({ limit: '64kb' }));
 
@@ -146,6 +151,12 @@ export function createAuthRouter(options: CreateAuthRouterOptions = {}): Router 
     }
   };
 
+  const verifyBearerToken = (authHeader?: string): PublicAppUser | null => {
+    const token = (authHeader ?? '').match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? '';
+    const verified = token ? verifySessionToken(token) : null;
+    return verified ? toPublicUser(verified.user) : null;
+  };
+
   const requireSameOriginUi = (req: Request, res: Response, next: NextFunction) => {
     const originHeader = req.get('origin');
     const hostHeader = (req.get('x-forwarded-host') ?? req.get('host') ?? '').split(',')[0].trim();
@@ -217,14 +228,12 @@ export function createAuthRouter(options: CreateAuthRouterOptions = {}): Router 
   });
 
   router.get('/auth/me', requireSameOriginUi, (req, res) => {
-    const authHeader = req.get('authorization') ?? '';
-    const token = authHeader.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? '';
-    const verified = token ? verifySessionToken(token) : null;
-    if (!verified) {
+    const user = verifyBearerToken(req.get('authorization'));
+    if (!user) {
       res.status(401).json({ error: 'Not signed in.' });
       return;
     }
-    res.json({ user: toPublicUser(verified.user) });
+    res.json({ user });
   });
 
   router.post('/auth/logout', requireSameOriginUi, (req, res) => {
@@ -237,5 +246,9 @@ export function createAuthRouter(options: CreateAuthRouterOptions = {}): Router 
     res.json({ ok: true });
   });
 
-  return router;
+  return { router, verifyBearerToken };
+}
+
+export function createAuthRouter(options: CreateAuthRouterOptions = {}): Router {
+  return createAuthService(options).router;
 }

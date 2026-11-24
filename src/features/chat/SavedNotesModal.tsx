@@ -5,6 +5,7 @@ import { BottomSheet } from '../../ui/BottomSheet';
 
 interface SavedNotesModalProps {
   open: boolean;
+  isSynced?: boolean;
   notes: SavedStudyNote[];
   onClose: () => void;
   onOpenReader: (note: SavedStudyNote) => void;
@@ -14,6 +15,7 @@ interface SavedNotesModalProps {
 
 export function SavedNotesModal({
   open,
+  isSynced,
   notes,
   onClose,
   onOpenReader,
@@ -35,7 +37,9 @@ export function SavedNotesModal({
       open={open}
       onClose={onClose}
       title="Saved Study Vault"
-      subtitle={`${notes.length} pinned study note${notes.length === 1 ? '' : 's'} stored locally on this device`}
+      subtitle={`${notes.length} pinned study note${notes.length === 1 ? '' : 's'} ${
+        isSynced ? 'synced to your account' : 'stored locally on this device'
+      }`}
     >
       <div className="space-y-4">
         {notes.length > 0 && (

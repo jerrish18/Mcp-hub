@@ -21,6 +21,7 @@ import {
   History,
   Info,
   Layers,
+  LayoutGrid,
   Maximize2,
   MessageCircle,
   MessageSquarePlus,
@@ -199,6 +200,7 @@ function formatPomodoroTime(seconds: number): string {
 
 export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const {
+    authUser,
     agents,
     servers,
     conversations,
@@ -224,6 +226,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setStudyInstructions,
     saveStudyNote,
     removeSavedStudyNote,
+    updateSettings,
   } = useHubStore();
 
   const [input, setInput] = useState('');
@@ -629,7 +632,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             Conversations
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Local history · {conversations.length} saved
+            {authUser ? 'Account synced' : 'Local history'} · {conversations.length} saved
           </p>
         </div>
         <div className="flex-1 min-h-0">
@@ -892,6 +895,39 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   <span>Canvas</span>
                 </button>
               )}
+
+              {/* Live A2UI Interactive Widgets Toggle across General / Pro / Study */}
+              <button
+                type="button"
+                data-testid="a2ui-toggle-btn"
+                aria-pressed={settings.a2uiEnabled}
+                aria-label={
+                  settings.a2uiEnabled
+                    ? 'A2UI interactive widgets enabled, tap to disable'
+                    : 'A2UI interactive widgets disabled, tap to enable'
+                }
+                title={settings.a2uiEnabled ? 'Interactive A2UI widgets: On' : 'Interactive A2UI widgets: Off'}
+                onClick={() => {
+                  triggerHaptic(settings.hapticsEnabled, 'light');
+                  updateSettings({ a2uiEnabled: !settings.a2uiEnabled });
+                }}
+                style={
+                  settings.a2uiEnabled
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                        borderColor: 'var(--m3-primary)',
+                      }
+                    : {
+                        backgroundColor: 'var(--m3-surface-container-high)',
+                        borderColor: 'var(--m3-outline)',
+                      }
+                }
+                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>A2UI</span>
+              </button>
 
               {/* Effort Cycle Chip */}
               <button
@@ -1231,6 +1267,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     >
                       <MarkdownRenderer
                         content={msg.content}
+                        a2uiEnabled={settings.a2uiEnabled}
+                        onToggleA2ui={() => updateSettings({ a2uiEnabled: !settings.a2uiEnabled })}
+                        onA2UIAction={(promptText, displayLabel) => {
+                          void handleQuickPrompt(promptText, displayLabel);
+                        }}
                         onOpenInteractiveFlashcards={() =>
                           openFlashcardsFromText(activeConv?.title || 'Flashcards', msg.content)
                         }
@@ -1398,7 +1439,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         </button>
 
                         {(msg.chatMode ?? activeChatMode) === 'professional' && (
-                          <div className="flex items-center gap-1 flex-wrap pl-1 border-l border-slate-200 dark:border-slate-800 ml-1">
+                          <div className="ml-1 flex items-center gap-1 flex-wrap">
                             {(
                               [
                                 { fmt: 'pdf', label: 'PDF', Icon: FileText },
@@ -1868,6 +1909,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
       <HistorySheet
         open={historyOpen}
+        isSynced={Boolean(authUser)}
         onClose={() => setHistoryOpen(false)}
         conversations={conversations}
         activeConversationId={activeConv?.id ?? null}
@@ -1879,6 +1921,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
       <SavedNotesModal
         open={vaultOpen}
+        isSynced={Boolean(authUser)}
         notes={savedStudyNotes}
         onClose={() => setVaultOpen(false)}
         onOpenReader={(note) =>

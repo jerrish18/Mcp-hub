@@ -11,12 +11,14 @@ import {
   FileText,
   HelpCircle,
   Layers,
+  LayoutGrid,
   Lightbulb,
   PanelRight,
   Presentation,
   Sigma,
   Sparkles,
 } from 'lucide-react';
+import { parseA2uiBlock } from '../utils/a2ui';
 import {
   downloadAppBundle,
   parseAppArtifactBlock,
@@ -35,6 +37,7 @@ import {
   type InlineToken,
   type MarkdownBlock,
 } from '../utils/markdownParser';
+import { A2UIRenderer } from './A2UIRenderer';
 import { KatexMath } from './KatexMath';
 import { MermaidDiagramCard } from './MermaidDiagramCard';
 import { StudyImageCard } from './StudyImageCard';
@@ -46,6 +49,9 @@ export type MarkdownCanvasRequest =
 
 interface MarkdownRendererProps {
   content: string;
+  a2uiEnabled?: boolean;
+  onToggleA2ui?: () => void;
+  onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
   onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
@@ -437,6 +443,9 @@ function CodeBlock({
   language,
   code,
   isUnclosed,
+  a2uiEnabled = true,
+  onToggleA2ui,
+  onA2UIAction,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
   onOpenInCanvas,
@@ -444,6 +453,9 @@ function CodeBlock({
   language: string;
   code: string;
   isUnclosed?: boolean;
+  a2uiEnabled?: boolean;
+  onToggleA2ui?: () => void;
+  onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
   onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
@@ -451,6 +463,34 @@ function CodeBlock({
   const [copied, setCopied] = useState(false);
 
   const normalizedLang = language.toLowerCase().trim();
+
+  if (normalizedLang === 'a2ui' || normalizedLang === 'artifact-a2ui') {
+    const parsedUi = isUnclosed ? null : parseA2uiBlock(normalizedLang, code);
+    if (parsedUi) {
+      return (
+        <A2UIRenderer
+          spec={parsedUi}
+          enabled={a2uiEnabled}
+          onToggleEnabled={onToggleA2ui}
+          onAction={onA2UIAction}
+        />
+      );
+    }
+    if (isUnclosed) {
+      return (
+        <div
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="my-3 rounded-2xl border p-4 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300"
+        >
+          <LayoutGrid style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
+          <span>Rendering interactive A2UI interface…</span>
+        </div>
+      );
+    }
+  }
 
   if (normalizedLang === 'mermaid') {
     return (
@@ -752,6 +792,9 @@ function renderInline(text: string): React.ReactNode[] {
 function renderBlock(
   block: MarkdownBlock,
   key: number,
+  a2uiEnabled?: boolean,
+  onToggleA2ui?: () => void,
+  onA2UIAction?: (prompt: string, displayLabel?: string) => void,
   onOpenInteractiveFlashcards?: () => void,
   onOpenInteractiveQuiz?: () => void,
   onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void
@@ -764,6 +807,9 @@ function renderBlock(
           language={block.language}
           code={block.code}
           isUnclosed={block.isUnclosed}
+          a2uiEnabled={a2uiEnabled}
+          onToggleA2ui={onToggleA2ui}
+          onA2UIAction={onA2UIAction}
           onOpenInteractiveFlashcards={onOpenInteractiveFlashcards}
           onOpenInteractiveQuiz={onOpenInteractiveQuiz}
           onOpenInCanvas={onOpenInCanvas}
@@ -930,6 +976,9 @@ function renderBlock(
 
 export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
+  a2uiEnabled = true,
+  onToggleA2ui,
+  onA2UIAction,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
   onOpenInCanvas,
@@ -943,6 +992,9 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
         renderBlock(
           block,
           i,
+          a2uiEnabled,
+          onToggleA2ui,
+          onA2UIAction,
           onOpenInteractiveFlashcards,
           onOpenInteractiveQuiz,
           onOpenInCanvas

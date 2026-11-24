@@ -32,6 +32,8 @@ import { AppApiKeySection } from './AppApiKeySection';
 export function SettingsScreen() {
   const {
     authUser,
+    syncStatus,
+    syncError,
     providerKeys,
     dynamicModels,
     settings,
@@ -42,6 +44,7 @@ export function SettingsScreen() {
     revokeAlwaysAllowedTool,
     lockApp,
     signOutAccount,
+    syncWorkspaceNow,
   } = useHubStore();
 
   const allModels = mergeModelCatalog(dynamicModels);
@@ -221,30 +224,60 @@ export function SettingsScreen() {
                   ? authUser.email
                   : 'Sign in with Google or an App account to personalize your hub'}
               </p>
+              {authUser && (
+                <p
+                  data-testid="account-sync-status"
+                  className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5 truncate"
+                >
+                  {syncStatus === 'syncing'
+                    ? 'Syncing account database…'
+                    : syncStatus === 'error'
+                      ? `Sync notice: ${syncError || 'Offline or pending retry'}`
+                      : 'Cloud & account workspace synced across sessions'}
+                </p>
+              )}
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => void signOutAccount()}
-            style={{
-              backgroundColor: 'var(--m3-surface-container-high)',
-              borderColor: 'var(--m3-outline)',
-            }}
-            className="min-h-[42px] px-4 rounded-full border text-xs font-semibold text-slate-900 dark:text-white inline-flex items-center justify-center gap-1.5 shrink-0 hover:opacity-90"
-          >
-            {authUser ? (
-              <>
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
-              </>
-            ) : (
-              <>
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Sign In / Google</span>
-              </>
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            {authUser && (
+              <button
+                type="button"
+                data-testid="account-sync-now-btn"
+                disabled={syncStatus === 'syncing'}
+                onClick={() => void syncWorkspaceNow()}
+                style={{
+                  backgroundColor: 'var(--m3-primary-container)',
+                  color: 'var(--m3-on-primary-container)',
+                }}
+                className="min-h-[42px] px-3.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-60 hover:opacity-90"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+                <span>{syncStatus === 'syncing' ? 'Syncing…' : 'Sync now'}</span>
+              </button>
             )}
-          </button>
+            <button
+              type="button"
+              onClick={() => void signOutAccount()}
+              style={{
+                backgroundColor: 'var(--m3-surface-container-high)',
+                borderColor: 'var(--m3-outline)',
+              }}
+              className="min-h-[42px] px-4 rounded-full border text-xs font-semibold text-slate-900 dark:text-white inline-flex items-center justify-center gap-1.5 shrink-0 hover:opacity-90"
+            >
+              {authUser ? (
+                <>
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sign Out</span>
+                </>
+              ) : (
+                <>
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Sign In / Google</span>
+                </>
+              )}
+            </button>
+          </div>
         </motion.section>
 
         {/* Pixel Material You & Appearance Studio */}
@@ -685,6 +718,22 @@ export function SettingsScreen() {
               checked={settings.confirmBeforeWrite}
               ariaLabel="Confirm before write actions"
               onChange={() => updateSettings({ confirmBeforeWrite: !settings.confirmBeforeWrite })}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 min-h-[44px] pt-2 border-t border-slate-200/60 dark:border-slate-800">
+            <div>
+              <div className="text-sm font-medium text-slate-900 dark:text-white">
+                Interactive A2UI Widgets across chat
+              </div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                Render interactive cards, checklists, KPIs, timelines & forms in replies
+              </div>
+            </div>
+            <M3Switch
+              checked={settings.a2uiEnabled}
+              ariaLabel="Interactive A2UI Widgets across chat"
+              onChange={() => updateSettings({ a2uiEnabled: !settings.a2uiEnabled })}
             />
           </div>
 

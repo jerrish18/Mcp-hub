@@ -183,6 +183,7 @@ export function HistoryListContent({
 
 interface HistorySheetProps {
   open: boolean;
+  isSynced?: boolean;
   onClose: () => void;
   conversations: Conversation[];
   activeConversationId: string | null;
@@ -194,7 +195,12 @@ interface HistorySheetProps {
 
 export function HistorySheet(props: HistorySheetProps) {
   return (
-    <BottomSheet open={props.open} onClose={props.onClose} title="Chat History" subtitle="Stored locally on device">
+    <BottomSheet
+      open={props.open}
+      onClose={props.onClose}
+      title="Chat History"
+      subtitle={props.isSynced ? 'Synced to your signed-in account' : 'Stored locally on device'}
+    >
       <div className="h-[60vh]">
         <HistoryListContent
           conversations={props.conversations}

@@ -79,6 +79,226 @@
         }
       },
       "required": ["ownerId", "title", "instructions", "createdAt", "updatedAt"]
+    },
+    "WorkspaceState": {
+      "title": "WorkspaceState",
+      "description": "Owner-scoped workspace configuration including settings, custom agents, MCP server metadata (no secrets), and synced model catalog.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "settings": {
+          "type": "object",
+          "description": "Sanitized application settings map"
+        },
+        "agents": {
+          "type": "array",
+          "description": "User agents list (max 50)"
+        },
+        "servers": {
+          "type": "array",
+          "description": "MCP server metadata list without secrets (max 50)"
+        },
+        "dynamicModels": {
+          "type": "array",
+          "description": "Synced/custom model catalog entries (max 100)"
+        },
+        "dismissedDefaultServerIds": {
+          "type": "array",
+          "description": "Default server IDs dismissed by user (max 50)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": [
+        "ownerId",
+        "settings",
+        "agents",
+        "servers",
+        "dynamicModels",
+        "dismissedDefaultServerIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ConversationDoc": {
+      "title": "ConversationDoc",
+      "description": "Saved user chat conversation synced across sessions and devices.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "description": "Conversation ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Conversation title",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "agentId": {
+          "type": "string",
+          "description": "Selected agent ID",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelId": {
+          "type": "string",
+          "description": "Selected model ID",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "effort": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Reasoning effort level"
+        },
+        "chatMode": {
+          "type": "string",
+          "enum": ["general", "professional", "study"],
+          "description": "Active chat mode"
+        },
+        "knowledgeSource": {
+          "type": "string",
+          "enum": ["auto", "uploaded", "web", "general"],
+          "description": "Selected knowledge source mode"
+        },
+        "studyInstructions": {
+          "type": "string",
+          "description": "Study mode response layout instructions",
+          "minLength": 0,
+          "maxLength": 4000
+        },
+        "messages": {
+          "type": "array",
+          "description": "Bounded message history (max 300 messages, attachments stripped of large base64 blobs)"
+        },
+        "clientCreatedAt": {
+          "type": "number",
+          "description": "Client creation epoch ms"
+        },
+        "clientUpdatedAt": {
+          "type": "number",
+          "description": "Client update epoch ms"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "title",
+        "agentId",
+        "modelId",
+        "effort",
+        "chatMode",
+        "knowledgeSource",
+        "studyInstructions",
+        "messages",
+        "clientCreatedAt",
+        "clientUpdatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudyNoteDoc": {
+      "title": "StudyNoteDoc",
+      "description": "Saved study note stored in the user's Study Vault.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "description": "Study note ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Study note title",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "content": {
+          "type": "string",
+          "description": "Markdown study content",
+          "minLength": 1,
+          "maxLength": 120000
+        },
+        "modelLabel": {
+          "type": "string",
+          "description": "Optional model label",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "messageId": {
+          "type": "string",
+          "description": "Optional source message ID",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "clientCreatedAt": {
+          "type": "number",
+          "description": "Client creation epoch ms"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp"
+        }
+      },
+      "required": [
+        "ownerId",
+        "id",
+        "title",
+        "content",
+        "clientCreatedAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -89,6 +309,18 @@
     "/users/{userId}/studyTemplates/{templateId}": {
       "schema": { "$ref": "#/entities/StudyTemplate" },
       "description": "User-owned reusable Study Session response structure templates."
+    },
+    "/users/{userId}/workspace/{docId}": {
+      "schema": { "$ref": "#/entities/WorkspaceState" },
+      "description": "Owner-scoped workspace state document (docId = state) storing settings, custom agents, MCP configs, and dynamic models."
+    },
+    "/users/{userId}/conversations/{convId}": {
+      "schema": { "$ref": "#/entities/ConversationDoc" },
+      "description": "Owner-scoped saved chat conversations and message histories."
+    },
+    "/users/{userId}/studyNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/StudyNoteDoc" },
+      "description": "Owner-scoped saved Study Vault notes."
     }
   }
 }

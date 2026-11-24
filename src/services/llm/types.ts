@@ -56,6 +56,7 @@ export interface StreamCompletionRequest {
   effort: EffortLevel;
   chatMode?: ChatMode;
   knowledgeSource?: KnowledgeSourceMode;
+  a2uiEnabled?: boolean;
   messages: LlmConversationItem[];
   tools: LlmToolDefinition[];
   signal?: AbortSignal;

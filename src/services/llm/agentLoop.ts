@@ -72,6 +72,7 @@ export function composeEffectiveSystemPrompt(params: {
   chatMode: ChatMode;
   studyInstructions?: string;
   knowledgeSource?: KnowledgeSourceMode;
+  a2uiEnabled?: boolean;
 }): string {
   const parts: string[] = [params.basePrompt.trim()];
 
@@ -97,17 +98,32 @@ export function composeEffectiveSystemPrompt(params: {
   } else {
     parts.push(
       '[PRO WORKSPACE MODE — MCP TOOLS + APP BUILDER + DOCUMENT STUDIO + CODING CANVAS]\n' +
-        'CRITICAL ROUTING RULE:\n' +
+        'CRITICAL ROUTING & DOCUMENT FIDELITY RULES:\n' +
         '- NEVER call `workspace_create_note` (or save-note tools) when the user asks to generate a PDF, Word/DOCX, Excel/XLSX, PowerPoint/PPTX, software application, website, or coding artifact. Only invoke `workspace_create_note` when the user explicitly asks to save/create a note.\n' +
+        '- STRICT CONTENT FIDELITY FOR GENERATED DOCUMENTS: Every PDF, DOCX, XLSX, or PPTX artifact MUST faithfully contain the exact topic, sections, points, numbers, metrics, entities, and uploaded source excerpts requested by the user. Never insert generic placeholders or unrelated boilerplate.\n' +
         '- Document Studio Formats (ALWAYS emit the exact fenced JSON block below so the UI renders a Canvas preview & real downloadable file):\n' +
-        '  * PDF Report: ```artifact-pdf with {"title","subtitle","sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
-        '  * Word Document: ```artifact-docx with {"title","subtitle","sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
+        '  * PDF Report: ```artifact-pdf with {"title","subtitle","author","dateLabel","themeColor":"0B57D0","metrics":[{"label","value","note"}],"sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
+        '  * Word Document: ```artifact-docx with {"title","subtitle","author","dateLabel","themeColor":"0B57D0","metrics":[{"label","value","note"}],"sections":[{"heading","callout","paragraphs":[],"bullets":[],"table":{"headers":[],"rows":[[]]}}]}\n' +
         '  * Excel Workbook: ```artifact-xlsx with {"title","sheets":[{"name","headers":[],"rows":[[]]}]}\n' +
         '  * PowerPoint Deck: ```artifact-pptx with {"title","subtitle","themeColor":"0B57D0","slides":[{"layout":"title"|"metrics"|"two_col"|"table"|"bullets","title","subtitle","bullets","metrics":[{"label","value","note"}],"leftTitle","leftBullets","rightTitle","rightBullets","table":{"headers":[],"rows":[[]]},"speakerNotes"}]}\n' +
         '- Multi-File Web App & Software Engineering (Claude Artifacts / ChatGPT Canvas IDE):\n' +
         '  * When building a complete multi-file web app, dashboard, or project, emit a ```artifact-app JSON block: {"title","description","framework","entryFile":"index.html","files":[{"path":"index.html","language":"html","content":"..."},{"path":"styles.css","language":"css","content":"..."},{"path":"app.js","language":"javascript","content":"..."}]}. Use clean relative paths like "./styles.css" and "./app.js" inside index.html so the live sandboxed preview bundles and runs every file seamlessly.\n' +
         '  * For quick single-file widgets or diagrams, emit ```html, ```tsx, ```svg, ```mermaid, or ```python.\n' +
         '- GitHub Sync & Repo Engineering: When connected GitHub MCP tools (`github_list_repos`, `github_create_repo`, `github_list_repo_files`, `github_read_file`, `github_create_branch`, `github_push_file`, `github_push_files_batch`) are available and the user asks to inspect, push, or create a GitHub repository, call the appropriate GitHub MCP tools directly with clean commit messages and verified file contents.'
+    );
+  }
+
+  if (params.a2uiEnabled !== false) {
+    parts.push(
+      '[A2UI INTERACTIVE WIDGETS ENABLED]\n' +
+        'When an interactive dashboard, checklist, comparison, parameter form, bar chart, timeline, or quick next-action panel improves clarity (across General, Pro, or Study modes), you may emit a ```a2ui JSON fence using this schema:\n' +
+        '{"title":"...","subtitle":"...","badge":"...","widgets":[{"type":"kpi_grid","items":[{"label","value","delta","hint"}]},{"type":"comparison_cards","cards":[{"title","subtitle","badge","points":[],"actionLabel","actionPrompt"}]},{"type":"checklist","title":"...","items":[{"id","label","note","checked":false}]},{"type":"form","title":"...","submitLabel":"Apply","promptTemplate":"Update with {{fieldId}}","fields":[{"id","label","kind":"text"|"number"|"select"|"toggle","defaultValue":"","options":[]}]},{"type":"timeline","title":"...","steps":[{"title","detail","status":"done"|"active"|"upcoming"}]},{"type":"bar_chart","title":"...","unit":"...","bars":[{"label","value":42,"max":100,"note"}]},{"type":"callout","tone":"info"|"success"|"warning","title":"...","text":"..."},{"type":"actions","buttons":[{"label","prompt","style":"primary"|"secondary"}]}]}\n' +
+        'Keep A2UI JSON concise, valid, and strictly tailored to the user’s question.'
+    );
+  } else {
+    parts.push(
+      '[A2UI INTERACTIVE WIDGETS DISABLED]\n' +
+        'Do NOT emit ```a2ui fenced blocks in your response. Respond cleanly using standard Markdown prose, tables, or requested document/code blocks only.'
     );
   }
 
@@ -155,6 +171,7 @@ export interface RunAgentLoopParams {
   chatMode?: ChatMode;
   studyInstructions?: string;
   knowledgeSource?: KnowledgeSourceMode;
+  a2uiEnabled?: boolean;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
   servers: McpServerConfig[];
@@ -186,6 +203,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     chatMode = 'professional',
     studyInstructions,
     knowledgeSource = 'auto',
+    a2uiEnabled = true,
     keys,
     dynamicModels,
     servers,
@@ -206,6 +224,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     chatMode,
     studyInstructions,
     knowledgeSource,
+    a2uiEnabled,
   });
 
   const workingMessages: LlmConversationItem[] = [...params.history];
@@ -284,6 +303,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         effort,
         chatMode,
         knowledgeSource,
+        a2uiEnabled,
         messages: workingMessages,
         tools,
         signal,

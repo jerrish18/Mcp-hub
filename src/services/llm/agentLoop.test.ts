@@ -835,6 +835,88 @@ test('Pro mode system prompt enforces strict PDF/app routing and demoProvider ge
   assert.ok(appRes.finalText.includes('Sprint Taskboard Pro'));
 });
 
+test('A2UI toggle controls system prompt instructions and demoProvider output across chat modes', async () => {
+  const enabledPrompt = composeEffectiveSystemPrompt({
+    basePrompt: 'Helpful assistant',
+    chatMode: 'general',
+    a2uiEnabled: true,
+  });
+  assert.ok(enabledPrompt.includes('[A2UI INTERACTIVE WIDGETS ENABLED]'));
 
+  const disabledPrompt = composeEffectiveSystemPrompt({
+    basePrompt: 'Helpful assistant',
+    chatMode: 'general',
+    a2uiEnabled: false,
+  });
+  assert.ok(disabledPrompt.includes('[A2UI INTERACTIVE WIDGETS DISABLED]'));
 
+  const makeCallbacks = () => ({
+    onTextDelta: () => {},
+    onReasoningDelta: () => {},
+    onToolCallsUpdated: () => {},
+    onFallbackNotice: () => {},
+    requestApproval: async () => 'approve' as const,
+    onAlwaysAllowTool: () => {},
+    getServerSecrets: async () => ({}),
+    saveServerSecrets: async () => {},
+  });
 
+  const a2uiOnRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'demo-sandbox',
+    effort: 'medium',
+    chatMode: 'general',
+    a2uiEnabled: true,
+    keys: {},
+    servers: [],
+    history: [{ role: 'user', text: 'Plan my weekly study schedule' }],
+    maxSteps: 3,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    callbacks: makeCallbacks(),
+  });
+  assert.ok(a2uiOnRes.finalText.includes('```a2ui'));
+
+  const a2uiOffRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'demo-sandbox',
+    effort: 'medium',
+    chatMode: 'general',
+    a2uiEnabled: false,
+    keys: {},
+    servers: [],
+    history: [{ role: 'user', text: 'Plan my weekly study schedule' }],
+    maxSteps: 3,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    callbacks: makeCallbacks(),
+  });
+  assert.equal(a2uiOffRes.finalText.includes('```a2ui'), false);
+
+  const solarPdfRes = await runAgentLoop({
+    agent: baseAgent,
+    modelId: 'demo-sandbox',
+    effort: 'medium',
+    chatMode: 'professional',
+    a2uiEnabled: true,
+    keys: {},
+    servers: [virtualServer],
+    history: [
+      {
+        role: 'user',
+        text: 'Generate a detailed PDF about solar energy covering photovoltaic cells, grid storage, and efficiency comparison table',
+      },
+    ],
+    maxSteps: 3,
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: new AbortController().signal,
+    callbacks: makeCallbacks(),
+  });
+  assert.ok(solarPdfRes.finalText.includes('```artifact-pdf'));
+  assert.ok(solarPdfRes.finalText.includes('Photovoltaic Cells'));
+  assert.ok(solarPdfRes.finalText.includes('Grid Storage'));
+  assert.ok(solarPdfRes.finalText.includes('```a2ui'));
+});

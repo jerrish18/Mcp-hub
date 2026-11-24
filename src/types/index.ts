@@ -276,6 +276,7 @@ export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   accentTheme: PixelAccentTheme;
   oledDark: boolean;
+  a2uiEnabled: boolean;
   confirmBeforeWrite: boolean;
   maxAgentSteps: number;
   alwaysAllowedTools: string[]; // `${serverId}:${toolName}`

@@ -1,3 +1,8 @@
+import {
+  buildContentFaithfulDocumentSpec,
+  buildContentFaithfulPptxSpec,
+  buildContentFaithfulXlsxSpec,
+} from '../../utils/proDocBuilder';
 import type { LlmToolCall, StreamCompletionRequest } from './types';
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -34,7 +39,17 @@ async function streamText(text: string, onDelta: (d: string) => void, signal?: A
  * and Professional Mode (PPTX/DOCX/XLSX/PDF generation, HTML Canvas, MCP tool loops).
  */
 export async function streamDemoCompletion(req: StreamCompletionRequest): Promise<void> {
-  const { effort, chatMode = 'professional', knowledgeSource = 'auto', systemPrompt, messages, tools, signal, onEvent } = req;
+  const {
+    effort,
+    chatMode = 'professional',
+    knowledgeSource = 'auto',
+    a2uiEnabled = true,
+    systemPrompt,
+    messages,
+    tools,
+    signal,
+    onEvent,
+  } = req;
 
   const lastMessage = messages[messages.length - 1];
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
@@ -199,6 +214,50 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
       ? `\n### Web Images & Visual Reference\n\n${extractedImageMarkdown}\n`
       : '';
 
+    const studyA2uiBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: isHeartQuery ? 'Cardiovascular Mastery Tracker' : 'Study Recall & Practice Hub',
+            subtitle: 'Interactive self-check & next study actions',
+            badge: 'Study A2UI',
+            widgets: [
+              {
+                type: 'checklist',
+                title: 'Concept Mastery Checklist',
+                items: isHeartQuery
+                  ? [
+                      { id: 'c1', label: 'Trace blood flow from Vena Cava to Aorta', checked: false },
+                      { id: 'c2', label: 'Apply Cardiac Output = HR × SV formula', checked: false },
+                      { id: 'c3', label: 'Distinguish right vs left ventricular wall thickness', checked: false },
+                    ]
+                  : [
+                      { id: 'c1', label: 'Understand the core mechanism & key variables', checked: false },
+                      { id: 'c2', label: 'Walk through the visual flowchart step by step', checked: false },
+                      { id: 'c3', label: 'Solve the self-check recall question without peeking', checked: false },
+                    ],
+              },
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Generate 4-Question Quiz',
+                    prompt: `Create a 4-question multiple-choice practice quiz on ${cleanTopic}`,
+                    variant: 'primary',
+                  },
+                  {
+                    label: 'Build Flashcard Deck',
+                    prompt: `Generate high-yield study flashcards for ${cleanTopic}`,
+                    variant: 'secondary',
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )}\n\`\`\``
+      : '';
+
     const studyReply = isHeartQuery
       ? `## ${instructionPreview}: Human Heart Anatomy\n\n` +
         `> [!DEFINITION] Four-Chamber Pump\n> The human heart is a muscular four-chambered organ that circulates blood through the **pulmonary** (lung) and **systemic** (body) loops in a continuous double circuit.\n` +
@@ -212,7 +271,8 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
         `| **Right Ventricle** | Deoxygenated | Lungs via pulmonary artery |\n` +
         `| **Left Ventricle** | Oxygenated | Body via aorta |\n\n` +
         `> [!HINT]- Tap to reveal self-check\n> The **left ventricle** has the thickest myocardium because it pumps blood against high systemic arterial resistance.` +
-        attachmentSummary
+        attachmentSummary +
+        studyA2uiBlock
       : `## ${instructionPreview}: ${cleanTopic.slice(0, 56)}${cleanTopic.length > 56 ? '…' : ''}\n\n` +
         `> [!DEFINITION] Core Principle\n> **${cleanTopic}** links incoming signals to contextual relevance dynamically in parallel, rather than processing inputs strictly one token at a time.\n` +
         imagesSection +
@@ -231,7 +291,8 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
         `### Self-Check Question\n\n` +
         `What happens to gradient flow during backpropagation if $d_k$ becomes very large and scaling is omitted?\n\n` +
         `> [!HINT]- Tap to reveal answer\n> Raw dot products grow in variance proportional to $d_k$, pushing softmax into flat regions where gradients approach zero.\n` +
-        attachmentSummary;
+        attachmentSummary +
+        studyA2uiBlock;
 
     await streamText(studyReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -244,10 +305,49 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
       userAttachments.length > 0
         ? `\n\nI received your attachment${userAttachments.length > 1 ? 's' : ''}: **${userAttachments.map((a) => a.name).join(', ')}**.`
         : '';
+    const generalA2uiBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: 'Interactive Focus Planner',
+            subtitle: 'Check off priorities or ask a follow-up',
+            badge: 'General A2UI',
+            widgets: [
+              {
+                type: 'checklist',
+                title: 'Quick Action Steps',
+                items: [
+                  { id: 'g1', label: 'Block 90-minute deep-work morning slot', checked: true },
+                  { id: 'g2', label: 'Batch messages & reviews after lunch', checked: false },
+                  { id: 'g3', label: 'Wind down 45 min before sleep', checked: false },
+                ],
+              },
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Customize Schedule',
+                    prompt: `Tailor this plan further for: ${userText.slice(0, 60)}`,
+                    variant: 'primary',
+                  },
+                  {
+                    label: 'Summarize Shorter',
+                    prompt: 'Condense your previous response into 3 concise bullet points.',
+                    variant: 'secondary',
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )}\n\`\`\``
+      : '';
+
     const generalReply =
       `Here is a direct **General Chat** response (${effort} effort, MCP tools paused):${fileLine}\n\n` +
       `You asked: *"${userText}"*\n\n` +
-      `Switch to **Pro** mode anytime for Document Generation (PPTX, DOCX, XLSX, PDF), Coding Canvas, and MCP servers — or **Study** for flowcharts, KaTeX math, flashcards, and Study Reader.`;
+      `Switch to **Pro** mode anytime for Document Generation (PPTX, DOCX, XLSX, PDF), Coding Canvas, and MCP servers — or **Study** for flowcharts, KaTeX math, flashcards, and Study Reader.` +
+      generalA2uiBlock;
 
     await streamText(generalReply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -277,73 +377,47 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   // Pro Document Studio triggers: PPTX, XLSX, DOCX, PDF, and HTML Canvas
   if (lower.includes('pptx') || lower.includes('powerpoint') || lower.includes('presentation') || lower.includes('slide') || lower.includes('deck')) {
+    const pptxSpec = buildContentFaithfulPptxSpec(userText, userAttachments);
     await streamText(
-      'Designing a 4-slide executive presentation (Title hero, KPI metrics, Two-column comparison, Roadmap table) with speaker notes for native OOXML .pptx export.',
+      `Designing a ${pptxSpec.slides.length}-slide executive presentation for "${pptxSpec.title}" using native slide layouts and speaker notes.`,
       (delta) => onEvent({ type: 'reasoning_delta', delta }),
       signal
     );
-    const pptxSpec = {
-      title: 'Q3 AI Workspace Rollout',
-      subtitle: 'Executive Strategy & Operational Readiness Deck',
-      themeColor: '0B57D0',
-      slides: [
-        {
-          layout: 'title',
-          title: 'Q3 AI Workspace Rollout',
-          subtitle: 'Unified MCP Orchestration, Document Studio & Live Coding Canvas',
-          speakerNotes: 'Open with the core thesis: consolidating disconnected workflows into one secure mobile-first workspace.',
-        },
-        {
-          layout: 'metrics',
-          title: 'Key Performance Indicators',
-          subtitle: 'Measured across pilot engineering & ops teams',
-          metrics: [
-            { label: 'Time Saved / Week', value: '6.4 hrs', note: '+38% vs baseline' },
-            { label: 'MCP Tool Success', value: '99.2%', note: 'Zero unapproved writes' },
-            { label: 'Export Adoption', value: '84%', note: 'PPTX, XLSX & PDF' },
-            { label: 'Mean Latency', value: '420 ms', note: 'Streamed edge inference' },
-          ],
-          speakerNotes: 'Highlight that write-action confirmation preserves trust while boosting throughput.',
-        },
-        {
-          layout: 'two_col',
-          title: 'Before vs. After Deployment',
-          leftTitle: 'Legacy Fragmented Workflow',
-          leftBullets: [
-            'Manual copy-paste between chat and slides',
-            'Unverified tool calls without parameter review',
-            'Separate tabs for docs, spreadsheets, and code',
-          ],
-          rightTitle: 'MCP Hub Pro Studio',
-          rightBullets: [
-            '1-click native .PPTX, .XLSX, .DOCX & .PDF export',
-            'Inline argument editing before every MCP write',
-            'Live side-by-side HTML & code preview Canvas',
-          ],
-          speakerNotes: 'Emphasize zero friction when shipping executive artifacts directly from conversation.',
-        },
-        {
-          layout: 'table',
-          title: '90-Day Rollout Milestones',
-          table: {
-            headers: ['Phase', 'Owner', 'Deliverable', 'Target'],
-            rows: [
-              ['Phase 1', 'Platform', 'Connect GitHub, Notion & Linear MCPs', 'Week 2'],
-              ['Phase 2', 'Product', 'Standardize weekly PPTX & XLSX reporting', 'Week 5'],
-              ['Phase 3', 'Security', 'Audit OAuth PKCE & write-approval logs', 'Week 8'],
-              ['Phase 4', 'All Teams', 'Full org availability on web & mobile', 'Week 12'],
+
+    const a2uiDocBlock = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: 'Deck Quick Refine',
+            badge: 'Pro A2UI',
+            widgets: [
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: 'Add Executive Risk Slide',
+                    prompt: `Expand "${pptxSpec.title}" (.pptx) with a Risks & Mitigations slide.`,
+                    variant: 'primary',
+                  },
+                  {
+                    label: 'Convert Deck to PDF Brief',
+                    prompt: `Generate a PDF briefing covering the exact contents of "${pptxSpec.title}".`,
+                    variant: 'secondary',
+                  },
+                ],
+              },
             ],
           },
-          speakerNotes: 'Close on concrete ownership and Week 12 launch readiness.',
-        },
-      ],
-    };
+          null,
+          2
+        )}\n\`\`\``
+      : '';
 
     const reply =
-      `## Executive Presentation Deck Ready\n\n` +
-      `I built a **4-slide PowerPoint presentation** using native slide layouts (hero title, KPI cards, two-column comparison, milestone table, and speaker notes).\n\n` +
+      `## ${pptxSpec.title} Ready\n\n` +
+      `I built a **${pptxSpec.slides.length}-slide PowerPoint presentation** tailored to your request (${pptxSpec.subtitle || 'native layouts & speaker notes'}).\n\n` +
       `\`\`\`artifact-pptx\n${JSON.stringify(pptxSpec, null, 2)}\n\`\`\`\n\n` +
-      `Tap **Preview in Canvas** to step through every slide interactively, or **Download .PPTX** to open it in PowerPoint or Google Slides.`;
+      `Tap **Preview in Canvas** to step through every slide interactively, or **Download .PPTX** to open it in PowerPoint or Google Slides.` +
+      a2uiDocBlock;
 
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });
@@ -351,41 +425,16 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
   }
 
   if (lower.includes('xlsx') || lower.includes('excel') || lower.includes('spreadsheet') || lower.includes('workbook') || lower.includes('budget')) {
+    const xlsxSpec = buildContentFaithfulXlsxSpec(userText, userAttachments);
     await streamText(
-      'Structuring multi-sheet Excel workbook with revenue projections, operating costs, and net margin rows.',
+      `Structuring multi-sheet Excel workbook "${xlsxSpec.title}" (${xlsxSpec.sheets.map((s) => s.name).join(', ')}).`,
       (delta) => onEvent({ type: 'reasoning_delta', delta }),
       signal
     );
-    const xlsxSpec = {
-      title: 'Q3 Financial Forecast Model',
-      sheets: [
-        {
-          name: 'Quarterly P&L',
-          headers: ['Line Item', 'Q1 Actual', 'Q2 Actual', 'Q3 Forecast', 'YoY Change'],
-          rows: [
-            ['Enterprise ARR ($K)', 420, 515, 640, '+52%'],
-            ['Self-Serve SaaS ($K)', 145, 178, 215, '+48%'],
-            ['Total Revenue ($K)', 565, 693, 855, '+51%'],
-            ['Cloud & Inference COGS ($K)', 92, 108, 126, '+37%'],
-            ['Gross Profit ($K)', 473, 585, 729, '+54%'],
-            ['Gross Margin (%)', '83.7%', '84.4%', '85.3%', '+1.6 pts'],
-          ],
-        },
-        {
-          name: 'Department Budget',
-          headers: ['Team', 'Headcount', 'Quarterly Spend ($K)', 'Priority Focus'],
-          rows: [
-            ['Engineering', 8, 290, 'MCP connectors & Canvas reliability'],
-            ['Product & Design', 3, 95, 'Mobile UX & document fidelity'],
-            ['Go-To-Market', 4, 130, 'Enterprise pilots & case studies'],
-          ],
-        },
-      ],
-    };
 
     const reply =
-      `## Multi-Sheet Excel Workbook Ready\n\n` +
-      `I compiled a 2-tab Excel workbook (**Quarterly P&L** and **Department Budget**).\n\n` +
+      `## ${xlsxSpec.title} Ready\n\n` +
+      `I compiled a ${xlsxSpec.sheets.length}-tab Excel workbook (**${xlsxSpec.sheets.map((s) => s.name).join('** and **')}**).\n\n` +
       `\`\`\`artifact-xlsx\n${JSON.stringify(xlsxSpec, null, 2)}\n\`\`\`\n\n` +
       `Open **Preview in Canvas** to inspect all tabs or click **Download .XLSX** to open directly in Excel / Google Sheets.`;
 
@@ -396,58 +445,66 @@ export async function streamDemoCompletion(req: StreamCompletionRequest): Promis
 
   if (lower.includes('docx') || lower.includes('word doc') || lower.includes('pdf') || lower.includes('proposal') || lower.includes('report')) {
     const fmt = lower.includes('docx') || lower.includes('word') ? 'docx' : 'pdf';
-    const topicMatch = userText.match(/(?:about|on|for)\s+([a-z0-9\s-]{2,48})/i);
-    const customTopic = topicMatch ? topicMatch[1].trim().replace(/[.?!]+$/, '') : '';
-    const docTitle = customTopic
-      ? `${customTopic.charAt(0).toUpperCase() + customTopic.slice(1)} Briefing`
-      : 'Enterprise MCP Implementation Brief';
+    const docSpec = buildContentFaithfulDocumentSpec({
+      format: fmt,
+      userText,
+      attachments: userAttachments,
+    });
+    const sectionNames = docSpec.sections.map((s) => s.heading).join(', ');
     await streamText(
-      `Organizing structured sections, executive callout, and data table for native .${fmt} generation.`,
+      `Organizing content-faithful ${fmt.toUpperCase()} document "${docSpec.title}" covering ${sectionNames}.`,
       (delta) => onEvent({ type: 'reasoning_delta', delta }),
       signal
     );
-    const docSpec = {
-      title: docTitle,
-      subtitle: customTopic
-        ? `Structured Overview, Key Facts & Visual Reference Table on ${customTopic}`
-        : 'Architecture, Governance & Deployment Roadmap',
-      sections: [
-        {
-          heading: 'Executive Summary',
-          callout: customTopic
-            ? `Key Takeaway: Concise, publication-ready ${fmt.toUpperCase()} overview compiled for "${customTopic}".`
-            : 'Key Outcome: Consolidate internal tools under OAuth 2.1 PKCE and explicit write-action approval in under 2 weeks.',
-          paragraphs: [
-            customTopic
-              ? `This formatted ${fmt.toUpperCase()} document summarizes the defining characteristics, background context, and structured breakdown of ${customTopic}.`
-              : 'Modern engineering and operations teams rely on fragmented workflows spanning documentation, issue tracking, and analytics. Adopting Model Context Protocol (MCP) standardizes tool discovery behind auditable permissions.',
-          ],
-          bullets: [
-            'Clean executive layout rendered with automatic page margins & typography',
-            'Structured callout boxes and high-contrast comparison tables',
-            'Ready for immediate Canvas inspection and native offline download',
-          ],
-        },
-        {
-          heading: customTopic ? `${customTopic} Reference Summary` : 'Recommended MCP Stack & Milestones',
-          table: {
-            headers: ['Category', 'Highlight', 'Details', 'Priority'],
-            rows: [
-              ['Core Overview', 'Primary Definition', 'Key traits & structural context', 'High'],
-              ['Key Metrics', 'Quantitative Facts', 'Benchmarks and measurable traits', 'High'],
-              ['Comparison', 'Contrast Points', 'Distinctive features & trade-offs', 'Medium'],
-              ['Next Steps', 'Action Items', 'Follow-up research & sharing', 'Standard'],
+
+    const a2uiDocControls = a2uiEnabled
+      ? `\n\n\`\`\`a2ui\n${JSON.stringify(
+          {
+            title: 'Document Studio Controls',
+            subtitle: 'Tailor sections or export in another format',
+            badge: 'Pro A2UI',
+            widgets: [
+              ...(docSpec.metrics && docSpec.metrics.length > 0
+                ? [
+                    {
+                      type: 'kpi_grid',
+                      items: docSpec.metrics.map((m) => ({
+                        label: m.label,
+                        value: m.value,
+                        delta: m.note,
+                        tone: 'positive',
+                      })),
+                    },
+                  ]
+                : []),
+              {
+                type: 'actions',
+                buttons: [
+                  {
+                    label: `Expand "${docSpec.title}"`,
+                    prompt: `Expand "${docSpec.title}" (.${fmt}) with deeper technical benchmarks and implementation steps.`,
+                    variant: 'primary',
+                  },
+                  {
+                    label: fmt === 'pdf' ? 'Also Generate .DOCX' : 'Also Generate .PDF',
+                    prompt: `Generate a ${fmt === 'pdf' ? 'DOCX' : 'PDF'} version of "${docSpec.title}" keeping every section.`,
+                    variant: 'secondary',
+                  },
+                ],
+              },
             ],
           },
-        },
-      ],
-    };
+          null,
+          2
+        )}\n\`\`\``
+      : '';
 
     const reply =
-      `## ${docTitle} (.${fmt.toUpperCase()}) Ready\n\n` +
-      `Your formatted **${fmt.toUpperCase()}** document is ready with executive callouts, structured bullets, and styled tables.\n\n` +
+      `## ${docSpec.title} (.${fmt.toUpperCase()}) Ready\n\n` +
+      `Your formatted **${fmt.toUpperCase()}** document is ready covering **${sectionNames}** with structured metrics, callouts, and styled tables.\n\n` +
       `\`\`\`artifact-${fmt}\n${JSON.stringify(docSpec, null, 2)}\n\`\`\`\n\n` +
-      `You can preview the page layout in **Canvas** or download the ready-to-share **.${fmt.toUpperCase()}** file.`;
+      `You can preview the page layout in **Canvas** or download the ready-to-share **.${fmt.toUpperCase()}** file.` +
+      a2uiDocControls;
 
     await streamText(reply, (delta) => onEvent({ type: 'text_delta', delta }), signal);
     onEvent({ type: 'done' });

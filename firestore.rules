@@ -33,7 +33,6 @@ service cloud.firestore {
     function isValidUserProfile(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'email', 'provider', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['uid', 'displayName', 'email', 'provider', 'createdAt', 'updatedAt'])
-        && data.uid is string
         && isValidId(data.uid)
         && data.uid == userId
         && data.uid == request.auth.uid
@@ -44,6 +43,7 @@ service cloud.firestore {
         && data.email.size() >= 3
         && data.email.size() <= 254
         && data.provider is string
+        && data.provider.size() <= 32
         && data.provider in ['google.com', 'password']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -52,7 +52,6 @@ service cloud.firestore {
     function isValidStudyTemplate(data, userId) {
       return data.keys().hasAll(['ownerId', 'title', 'instructions', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['ownerId', 'title', 'instructions', 'createdAt', 'updatedAt'])
-        && data.ownerId is string
         && isValidId(data.ownerId)
         && data.ownerId == userId
         && data.ownerId == request.auth.uid
@@ -62,6 +61,169 @@ service cloud.firestore {
         && data.instructions is string
         && data.instructions.size() >= 1
         && data.instructions.size() <= 4000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceSettings(settings) {
+      return settings is map
+        && settings.keys().hasOnly([
+          'theme',
+          'accentTheme',
+          'oledDark',
+          'a2uiEnabled',
+          'confirmBeforeWrite',
+          'maxAgentSteps',
+          'alwaysAllowedTools',
+          'biometricLockEnabled',
+          'hapticsEnabled',
+          'onboardingCompleted'
+        ]);
+    }
+
+    function isValidWorkspaceState(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'settings',
+          'agents',
+          'servers',
+          'dynamicModels',
+          'dismissedDefaultServerIds',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'settings',
+          'agents',
+          'servers',
+          'dynamicModels',
+          'dismissedDefaultServerIds',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidWorkspaceSettings(data.settings)
+        && data.agents is list
+        && data.agents.size() <= 50
+        && (data.agents.size() == 0 || data.agents[0] is map)
+        && data.servers is list
+        && data.servers.size() <= 50
+        && (data.servers.size() == 0 || data.servers[0] is map)
+        && data.dynamicModels is list
+        && data.dynamicModels.size() <= 100
+        && (data.dynamicModels.size() == 0 || data.dynamicModels[0] is map)
+        && data.dismissedDefaultServerIds is list
+        && data.dismissedDefaultServerIds.size() <= 50
+        && (data.dismissedDefaultServerIds.size() == 0 || data.dismissedDefaultServerIds[0] is string)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidConversationDoc(data, userId, convId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'id',
+          'title',
+          'agentId',
+          'modelId',
+          'effort',
+          'chatMode',
+          'knowledgeSource',
+          'studyInstructions',
+          'messages',
+          'clientCreatedAt',
+          'clientUpdatedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'id',
+          'title',
+          'agentId',
+          'modelId',
+          'effort',
+          'chatMode',
+          'knowledgeSource',
+          'studyInstructions',
+          'messages',
+          'clientCreatedAt',
+          'clientUpdatedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.id)
+        && data.id == convId
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 200
+        && data.agentId is string
+        && data.agentId.size() >= 1
+        && data.agentId.size() <= 128
+        && data.modelId is string
+        && data.modelId.size() >= 1
+        && data.modelId.size() <= 160
+        && data.effort is string
+        && data.effort.size() <= 16
+        && data.effort in ['low', 'medium', 'high']
+        && data.chatMode is string
+        && data.chatMode.size() <= 32
+        && data.chatMode in ['general', 'professional', 'study']
+        && data.knowledgeSource is string
+        && data.knowledgeSource.size() <= 32
+        && data.knowledgeSource in ['auto', 'uploaded', 'web', 'general']
+        && data.studyInstructions is string
+        && data.studyInstructions.size() <= 4000
+        && data.messages is list
+        && data.messages.size() <= 300
+        && (data.messages.size() == 0 || data.messages[0] is map)
+        && data.clientCreatedAt is number
+        && data.clientUpdatedAt is number
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStudyNoteDoc(data, userId, noteId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'id',
+          'title',
+          'content',
+          'clientCreatedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'id',
+          'title',
+          'content',
+          'modelLabel',
+          'messageId',
+          'clientCreatedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.id)
+        && data.id == noteId
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 200
+        && data.content is string
+        && data.content.size() >= 1
+        && data.content.size() <= 120000
+        && (!('modelLabel' in data) || (data.modelLabel is string && data.modelLabel.size() <= 120))
+        && (!('messageId' in data) || (data.messageId is string && data.messageId.size() <= 128))
+        && data.clientCreatedAt is number
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -107,6 +269,99 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time;
       allow delete: if isOwner(userId) && isValidId(userId) && isValidId(templateId);
+    }
+
+    match /users/{userId}/workspace/{docId} {
+      allow get: if isOwner(userId) && isValidId(userId) && docId == 'state';
+      allow create: if isOwner(userId)
+        && isVerifiedEmail()
+        && isValidId(userId)
+        && docId == 'state'
+        && isValidWorkspaceState(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isVerifiedEmail()
+        && isValidId(userId)
+        && docId == 'state'
+        && isValidWorkspaceState(incoming(), userId)
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'settings',
+          'agents',
+          'servers',
+          'dynamicModels',
+          'dismissedDefaultServerIds',
+          'updatedAt'
+        ])
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isOwner(userId) && isValidId(userId) && docId == 'state';
+    }
+
+    match /users/{userId}/conversations/{convId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(convId);
+      allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+      allow create: if isOwner(userId)
+        && isVerifiedEmail()
+        && isValidId(userId)
+        && isValidId(convId)
+        && isValidConversationDoc(incoming(), userId, convId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isVerifiedEmail()
+        && isValidId(userId)
+        && isValidId(convId)
+        && isValidConversationDoc(incoming(), userId, convId)
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'agentId',
+          'modelId',
+          'effort',
+          'chatMode',
+          'knowledgeSource',
+          'studyInstructions',
+          'messages',
+          'clientUpdatedAt',
+          'updatedAt'
+        ])
+        && incoming().ownerId == existing().ownerId
+        && incoming().id == existing().id
+        && incoming().clientCreatedAt == existing().clientCreatedAt
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(convId);
+    }
+
+    match /users/{userId}/studyNotes/{noteId} {
+      allow get: if isOwner(userId) && isValidId(userId) && isValidId(noteId);
+      allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+      allow create: if isOwner(userId)
+        && isVerifiedEmail()
+        && isValidId(userId)
+        && isValidId(noteId)
+        && isValidStudyNoteDoc(incoming(), userId, noteId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isVerifiedEmail()
+        && isValidId(userId)
+        && isValidId(noteId)
+        && isValidStudyNoteDoc(incoming(), userId, noteId)
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'content',
+          'modelLabel',
+          'messageId',
+          'updatedAt'
+        ])
+        && incoming().ownerId == existing().ownerId
+        && incoming().id == existing().id
+        && incoming().clientCreatedAt == existing().clientCreatedAt
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isOwner(userId) && isValidId(userId) && isValidId(noteId);
     }
   }
 }

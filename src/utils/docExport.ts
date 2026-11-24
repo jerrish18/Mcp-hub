@@ -54,6 +54,12 @@ export interface PptxSpec {
   slides: PptxSlideSpec[];
 }
 
+export interface DocMetricItem {
+  label: string;
+  value: string;
+  note?: string;
+}
+
 export interface DocxSectionSpec {
   heading: string;
   paragraphs?: string[];
@@ -66,6 +72,10 @@ export interface DocxSpec {
   format: 'docx';
   title: string;
   subtitle?: string;
+  author?: string;
+  dateLabel?: string;
+  themeColor?: string;
+  metrics?: DocMetricItem[];
   sections: DocxSectionSpec[];
 }
 
@@ -73,6 +83,10 @@ export interface PdfSpec {
   format: 'pdf';
   title: string;
   subtitle?: string;
+  author?: string;
+  dateLabel?: string;
+  themeColor?: string;
+  metrics?: DocMetricItem[];
   sections: DocxSectionSpec[];
 }
 
@@ -259,9 +273,27 @@ export function parseArtifactBlock(language: string, code: string): DocumentSpec
     sections.push({ heading: title, paragraphs: subtitle ? [subtitle] : [] });
   }
 
+  const author = typeof raw.author === 'string' && raw.author.trim() ? raw.author.trim() : undefined;
+  const dateLabel =
+    typeof raw.dateLabel === 'string' && raw.dateLabel.trim() ? raw.dateLabel.trim() : undefined;
+  const themeColor =
+    typeof raw.themeColor === 'string'
+      ? normalizeHexColor(raw.themeColor)
+      : undefined;
+  const metrics: DocMetricItem[] | undefined = Array.isArray(raw.metrics)
+    ? raw.metrics
+        .filter((m): m is Record<string, unknown> => Boolean(m && typeof m === 'object'))
+        .slice(0, 4)
+        .map((m) => ({
+          label: String(m.label ?? 'Metric'),
+          value: String(m.value ?? '—'),
+          note: typeof m.note === 'string' ? m.note : undefined,
+        }))
+    : undefined;
+
   return format === 'docx'
-    ? { format: 'docx', title, subtitle, sections }
-    : { format: 'pdf', title, subtitle, sections };
+    ? { format: 'docx', title, subtitle, author, dateLabel, themeColor, metrics, sections }
+    : { format: 'pdf', title, subtitle, author, dateLabel, themeColor, metrics, sections };
 }
 
 /**
@@ -782,24 +814,92 @@ export async function buildPptxBlob(spec: PptxSpec): Promise<Blob> {
   });
 }
 
+function parseBoldSegments(text: string): Array<{ text: string; bold: boolean }> {
+  const segments: Array<{ text: string; bold: boolean }> = [];
+  const regex = /\*\*([^*]+)\*\*/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ text: text.slice(lastIndex, match.index), bold: false });
+    }
+    segments.push({ text: match[1], bold: true });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    segments.push({ text: text.slice(lastIndex), bold: false });
+  }
+  return segments.length > 0 ? segments : [{ text, bold: false }];
+}
+
+function buildDocxRuns(text: string, size = 22, color?: string): TextRun[] {
+  return parseBoldSegments(text).map(
+    (seg) =>
+      new TextRun({
+        text: seg.text,
+        bold: seg.bold,
+        size,
+        ...(color ? { color } : {}),
+      })
+  );
+}
+
 /**
  * Generates a real Microsoft Word .docx binary with styled headings, callouts,
- * bullet lists, and formatted tables.
+ * inline bold runs, KPI summary strips, bullet lists, and formatted tables.
  */
 export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
+  const accent = normalizeHexColor(spec.themeColor, '0B57D0');
   const children: Array<Paragraph | Table> = [
     new Paragraph({
       text: spec.title,
       heading: HeadingLevel.TITLE,
-      spacing: { after: 120 },
+      spacing: { after: 100 },
     }),
   ];
 
-  if (spec.subtitle) {
+  if (spec.subtitle || spec.author || spec.dateLabel) {
+    const metaParts = [spec.subtitle, spec.author, spec.dateLabel].filter(Boolean).join(' · ');
     children.push(
       new Paragraph({
-        children: [new TextRun({ text: spec.subtitle, color: '475569', italics: true, size: 22 })],
-        spacing: { after: 240 },
+        children: [new TextRun({ text: metaParts, color: '475569', italics: true, size: 22 })],
+        spacing: { after: 220 },
+      })
+    );
+  }
+
+  if (spec.metrics && spec.metrics.length > 0) {
+    children.push(
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: {
+          top: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+          bottom: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+          left: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+          right: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+          insideVertical: { style: BorderStyle.SINGLE, size: 4, color: 'E2E8F0' },
+        },
+        rows: [
+          new TableRow({
+            children: spec.metrics.slice(0, 4).map(
+              (m) =>
+                new TableCell({
+                  shading: { type: ShadingType.CLEAR, color: 'auto', fill: 'EFF6FF' },
+                  children: [
+                    new Paragraph({
+                      children: [
+                        new TextRun({ text: `${m.label.toUpperCase()}\n`, bold: true, color: '475569', size: 16 }),
+                        new TextRun({ text: m.value, bold: true, color: accent, size: 28 }),
+                        ...(m.note
+                          ? [new TextRun({ text: `\n${m.note}`, color: '64748B', size: 16 })]
+                          : []),
+                      ],
+                    }),
+                  ],
+                })
+            ),
+          }),
+        ],
       })
     );
   }
@@ -816,7 +916,7 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
     if (sec.callout) {
       children.push(
         new Paragraph({
-          children: [new TextRun({ text: sec.callout, bold: true, color: '0B57D0', size: 22 })],
+          children: [new TextRun({ text: cleanText(sec.callout), bold: true, color: accent, size: 22 })],
           shading: { type: ShadingType.CLEAR, color: 'auto', fill: 'EFF6FF' },
           spacing: { before: 80, after: 140 },
         })
@@ -826,7 +926,7 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
     for (const para of sec.paragraphs ?? []) {
       children.push(
         new Paragraph({
-          children: [new TextRun({ text: para, size: 22 })],
+          children: buildDocxRuns(para, 22),
           spacing: { after: 120 },
         })
       );
@@ -835,7 +935,7 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
     for (const bullet of sec.bullets ?? []) {
       children.push(
         new Paragraph({
-          text: bullet,
+          children: buildDocxRuns(bullet, 22),
           bullet: { level: 0 },
           spacing: { after: 80 },
         })
@@ -848,10 +948,10 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
         children: sec.table.headers.map(
           (h) =>
             new TableCell({
-              shading: { type: ShadingType.CLEAR, color: 'auto', fill: '0B57D0' },
+              shading: { type: ShadingType.CLEAR, color: 'auto', fill: accent },
               children: [
                 new Paragraph({
-                  children: [new TextRun({ text: h, bold: true, color: 'FFFFFF', size: 20 })],
+                  children: [new TextRun({ text: cleanText(h), bold: true, color: 'FFFFFF', size: 20 })],
                   alignment: AlignmentType.LEFT,
                 }),
               ],
@@ -867,7 +967,7 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
                 new TableCell({
                   children: [
                     new Paragraph({
-                      children: [new TextRun({ text: row[colIdx] ?? '', size: 20 })],
+                      children: [new TextRun({ text: cleanText(row[colIdx] ?? ''), size: 20 })],
                     }),
                   ],
                 })
@@ -893,7 +993,7 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
   }
 
   const doc = new Document({
-    creator: 'MCP Hub Pro Studio',
+    creator: spec.author || 'MCP Hub Pro Studio',
     title: spec.title,
     sections: [{ children }],
   });
@@ -937,8 +1037,17 @@ export function buildXlsxBlob(spec: XlsxSpec): Blob {
   });
 }
 
+function hexToRgbTuple(hex?: string): [number, number, number] {
+  const norm = normalizeHexColor(hex, '0B57D0');
+  const r = parseInt(norm.slice(0, 2), 16);
+  const g = parseInt(norm.slice(2, 4), 16);
+  const b = parseInt(norm.slice(4, 6), 16);
+  return [r, g, b];
+}
+
 /**
- * Generates a cleanly typeset PDF document using jsPDF + jspdf-autotable.
+ * Generates an executive-grade, cleanly typeset PDF document using jsPDF + jspdf-autotable,
+ * with KPI metric strips, bold lead-in rendering, callout cards, repeating table headers, and page footers.
  */
 export function buildPdfBlob(spec: PdfSpec): Blob {
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
@@ -946,102 +1055,204 @@ export function buildPdfBlob(spec: PdfSpec): Blob {
   const pageHeight = doc.internal.pageSize.getHeight();
   const marginX = 48;
   const maxWidth = pageWidth - marginX * 2;
+  const [accentR, accentG, accentB] = hexToRgbTuple(spec.themeColor);
   let cursorY = 56;
 
   const ensureSpace = (needed: number) => {
     if (cursorY + needed > pageHeight - 54) {
       doc.addPage();
-      cursorY = 52;
+      cursorY = 58;
     }
   };
 
-  // Title banner
-  doc.setFillColor(11, 87, 208);
-  doc.rect(marginX, cursorY - 14, 36, 4, 'F');
-  cursorY += 6;
+  const renderStyledRichLine = (rawText: string, startX: number, availWidth: number, prefix = '') => {
+    // Detect bold lead-in syntax: "**Label:** rest of text" or clean text
+    const boldLeadMatch = /^\s*\*\*([^*]{1,80})\*\*\s*(.*)$/.exec(rawText.trim());
+    if (boldLeadMatch && prefix === '') {
+      const lead = `${cleanText(boldLeadMatch[1])} `;
+      const rest = cleanText(boldLeadMatch[2]);
+      doc.setFont('helvetica', 'bold');
+      const leadW = doc.getTextWidth(lead);
+      if (leadW < availWidth * 0.65 && rest) {
+        const firstLineAvail = availWidth - leadW;
+        const restWords = rest.split(/\s+/);
+        let firstChunk = '';
+        let consumed = 0;
+        doc.setFont('helvetica', 'normal');
+        for (let i = 0; i < restWords.length; i++) {
+          const candidate = firstChunk ? `${firstChunk} ${restWords[i]}` : restWords[i];
+          if (doc.getTextWidth(candidate) <= firstLineAvail) {
+            firstChunk = candidate;
+            consumed = i + 1;
+          } else {
+            break;
+          }
+        }
+        const remainingText = restWords.slice(consumed).join(' ');
+        const extraLines = remainingText ? (doc.splitTextToSize(remainingText, availWidth) as string[]) : [];
+        ensureSpace((1 + extraLines.length) * 14 + 6);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(15, 23, 42);
+        doc.text(lead, startX, cursorY);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(30, 41, 59);
+        if (firstChunk) {
+          doc.text(firstChunk, startX + leadW, cursorY);
+        }
+        cursorY += 14;
+        if (extraLines.length > 0) {
+          doc.text(extraLines, startX, cursorY);
+          cursorY += extraLines.length * 14;
+        }
+        cursorY += 5;
+        return;
+      }
+    }
+
+    const plain = prefix ? `${prefix}${cleanText(rawText)}` : cleanText(rawText);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(30, 41, 59);
+    const lines = doc.splitTextToSize(plain, availWidth) as string[];
+    ensureSpace(lines.length * 14 + 6);
+    doc.text(lines, startX, cursorY);
+    cursorY += lines.length * 14 + 5;
+  };
+
+  // Top accent bar & executive title block
+  doc.setFillColor(accentR, accentG, accentB);
+  doc.rect(marginX, cursorY - 14, 42, 4, 'F');
+  cursorY += 8;
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(20);
+  doc.setFontSize(21);
   doc.setTextColor(15, 23, 42);
-  const titleLines = doc.splitTextToSize(spec.title, maxWidth) as string[];
+  const titleLines = doc.splitTextToSize(cleanText(spec.title), maxWidth) as string[];
   doc.text(titleLines, marginX, cursorY);
-  cursorY += titleLines.length * 24 + 4;
+  cursorY += titleLines.length * 25 + 2;
 
   if (spec.subtitle) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10.5);
-    doc.setTextColor(100, 116, 139);
-    const subLines = doc.splitTextToSize(spec.subtitle, maxWidth) as string[];
+    doc.setTextColor(71, 85, 105);
+    const subLines = doc.splitTextToSize(cleanText(spec.subtitle), maxWidth) as string[];
     doc.text(subLines, marginX, cursorY);
-    cursorY += subLines.length * 14 + 12;
-  } else {
-    cursorY += 8;
+    cursorY += subLines.length * 14 + 4;
   }
 
-  for (const sec of spec.sections) {
-    ensureSpace(44);
+  const metaLine = [spec.author || 'MCP Hub Pro Studio', spec.dateLabel || new Date().toLocaleDateString()]
+    .filter(Boolean)
+    .join(' · ');
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(148, 163, 184);
+  doc.text(metaLine, marginX, cursorY);
+  cursorY += 14;
+
+  // Divider rule
+  doc.setDrawColor(226, 232, 240);
+  doc.setLineWidth(0.75);
+  doc.line(marginX, cursorY, pageWidth - marginX, cursorY);
+  cursorY += 14;
+
+  // Optional Executive KPI Metrics Strip
+  if (spec.metrics && spec.metrics.length > 0) {
+    const items = spec.metrics.slice(0, 4);
+    const gap = 10;
+    const cardW = (maxWidth - gap * (items.length - 1)) / items.length;
+    const cardH = 54;
+    ensureSpace(cardH + 14);
+    items.forEach((m, idx) => {
+      const cx = marginX + idx * (cardW + gap);
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(cx, cursorY, cardW, cardH, 6, 6, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(100, 116, 139);
+      doc.text(cleanText(m.label).toUpperCase().slice(0, 24), cx + 9, cursorY + 15);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.setTextColor(accentR, accentG, accentB);
+      doc.text(cleanText(m.value).slice(0, 18), cx + 9, cursorY + 34);
+
+      if (m.note) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(cleanText(m.note).slice(0, 26), cx + 9, cursorY + 47);
+      }
+    });
+    cursorY += cardH + 18;
+  }
+
+  spec.sections.forEach((sec, secIdx) => {
+    ensureSpace(48);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(13.5);
-    doc.setTextColor(11, 87, 208);
-    const hLines = doc.splitTextToSize(sec.heading, maxWidth) as string[];
+    doc.setTextColor(accentR, accentG, accentB);
+    const headingLabel = `${secIdx + 1}. ${cleanText(sec.heading)}`;
+    const hLines = doc.splitTextToSize(headingLabel, maxWidth) as string[];
     doc.text(hLines, marginX, cursorY);
     cursorY += hLines.length * 17 + 4;
 
     if (sec.callout) {
-      const cLines = doc.splitTextToSize(sec.callout, maxWidth - 20) as string[];
+      const cLines = doc.splitTextToSize(cleanText(sec.callout), maxWidth - 22) as string[];
       const boxH = cLines.length * 14 + 14;
-      ensureSpace(boxH + 8);
+      ensureSpace(boxH + 10);
       doc.setFillColor(239, 246, 255);
-      doc.roundedRect(marginX, cursorY - 10, maxWidth, boxH, 4, 4, 'F');
+      doc.roundedRect(marginX, cursorY - 9, maxWidth, boxH, 5, 5, 'F');
+      doc.setFillColor(accentR, accentG, accentB);
+      doc.rect(marginX, cursorY - 9, 3.5, boxH, 'F');
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
+      doc.setFontSize(9.5);
       doc.setTextColor(30, 58, 138);
-      doc.text(cLines, marginX + 10, cursorY + 4);
-      cursorY += boxH + 8;
+      doc.text(cLines, marginX + 12, cursorY + 5);
+      cursorY += boxH + 10;
     }
 
-    doc.setFont('helvetica', 'normal');
     doc.setFontSize(10.5);
-    doc.setTextColor(30, 41, 59);
-
     for (const para of sec.paragraphs ?? []) {
-      const pLines = doc.splitTextToSize(para, maxWidth) as string[];
-      ensureSpace(pLines.length * 14 + 6);
-      doc.text(pLines, marginX, cursorY);
-      cursorY += pLines.length * 14 + 7;
+      renderStyledRichLine(para, marginX, maxWidth);
     }
 
     for (const bullet of sec.bullets ?? []) {
-      const bLines = doc.splitTextToSize(`•  ${bullet}`, maxWidth - 10) as string[];
-      ensureSpace(bLines.length * 14 + 4);
-      doc.text(bLines, marginX + 8, cursorY);
-      cursorY += bLines.length * 14 + 4;
+      renderStyledRichLine(bullet, marginX + 10, maxWidth - 10, '•  ');
     }
 
     if (sec.table && sec.table.headers.length > 0) {
-      ensureSpace(64);
+      ensureSpace(72);
       autoTable(doc, {
         startY: cursorY,
-        head: [sec.table.headers],
-        body: sec.table.rows,
+        head: [sec.table.headers.map(cleanText)],
+        body: sec.table.rows.map((r) => r.map(cleanText)),
         margin: { left: marginX, right: marginX },
-        styles: { fontSize: 9.5, cellPadding: 5, textColor: [30, 41, 59] },
-        headStyles: { fillColor: [11, 87, 208], textColor: [255, 255, 255], fontStyle: 'bold' },
+        showHead: 'everyPage',
+        styles: { fontSize: 9.5, cellPadding: 6, textColor: [30, 41, 59], lineColor: [226, 232, 240] },
+        headStyles: { fillColor: [accentR, accentG, accentB], textColor: [255, 255, 255], fontStyle: 'bold' },
         alternateRowStyles: { fillColor: [248, 250, 252] },
       });
       const lastTable = (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable;
-      cursorY = (lastTable?.finalY ?? cursorY + 60) + 16;
+      cursorY = (lastTable?.finalY ?? cursorY + 60) + 18;
     } else {
-      cursorY += 6;
+      cursorY += 8;
     }
-  }
+  });
 
   const pageCount = doc.getNumberOfPages();
   for (let p = 1; p <= pageCount; p++) {
     doc.setPage(p);
+    if (p > 1) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(148, 163, 184);
+      doc.text(cleanText(spec.title).slice(0, 70), marginX, 28);
+    }
+    doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.setTextColor(148, 163, 184);
-    doc.text(`MCP Hub Pro Studio · Page ${p} of ${pageCount}`, marginX, pageHeight - 24);
+    doc.text(`${spec.author || 'MCP Hub Pro Studio'} · Page ${p} of ${pageCount}`, marginX, pageHeight - 24);
   }
 
   return doc.output('blob');

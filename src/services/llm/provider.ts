@@ -110,6 +110,7 @@ export async function streamWithRateLimitFallback(params: {
   effort: EffortLevel;
   chatMode?: import('../../types').ChatMode;
   knowledgeSource?: import('../../types').KnowledgeSourceMode;
+  a2uiEnabled?: boolean;
   messages: StreamCompletionRequest['messages'];
   tools: StreamCompletionRequest['tools'];
   signal?: AbortSignal;
@@ -137,6 +138,7 @@ export async function streamWithRateLimitFallback(params: {
         effort: params.effort,
         chatMode: params.chatMode,
         knowledgeSource: params.knowledgeSource,
+        a2uiEnabled: params.a2uiEnabled,
         messages: params.messages,
         tools: params.tools,
         signal: params.signal,

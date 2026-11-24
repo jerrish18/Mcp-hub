@@ -3,9 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
-import { createAuthRouter } from './src/server/authRouter.ts';
+import { createAuthService } from './src/server/authRouter.ts';
 import { createControlRouter } from './src/server/controlRouter.ts';
 import { createStudyImagesRouter } from './src/server/studyImagesRouter.ts';
+import { createWorkspaceRouter } from './src/server/workspaceRouter.ts';
 
 dotenv.config();
 
@@ -23,15 +24,19 @@ async function startServer() {
   app.set('trust proxy', 1);
 
   const controlRouter = createControlRouter();
-  const authRouter = createAuthRouter();
+  const authService = createAuthService();
+  const workspaceRouter = createWorkspaceRouter({
+    verifyBearerToken: authService.verifyBearerToken,
+  });
   const studyImagesRouter = createStudyImagesRouter();
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'mcp-hub' });
   });
 
-  // Mount app authentication, study image search, & control REST / key management under /api/*
-  app.use('/api', authRouter);
+  // Mount app authentication, workspace persistence, study image search, & control REST under /api/*
+  app.use('/api', authService.router);
+  app.use('/api', workspaceRouter);
   app.use('/api', studyImagesRouter);
   app.use('/api', controlRouter);
 

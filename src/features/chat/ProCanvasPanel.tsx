@@ -80,6 +80,19 @@ interface RuntimeLogEntry {
   timestamp: number;
 }
 
+function renderRichLeadText(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, idx) =>
+    part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (
+      <strong key={idx} className="font-semibold text-slate-900">
+        {part.slice(2, -2)}
+      </strong>
+    ) : (
+      <span key={idx}>{part}</span>
+    )
+  );
+}
+
 const EXT_BY_LANG: Record<string, string> = {
   html: 'html',
   htm: 'html',
@@ -532,9 +545,9 @@ export function ProCanvasPanel({
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className="shrink-0 px-3.5 py-2.5 border-b flex items-center justify-between gap-2 pt-safe"
+        className="shrink-0 px-3.5 py-2.5 border-b flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 pt-safe"
       >
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 w-full sm:w-auto sm:flex-1">
           <span
             style={{
               backgroundColor: 'var(--m3-primary-container)',
@@ -544,7 +557,7 @@ export function ProCanvasPanel({
           >
             {renderHeaderGlyph()}
           </span>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <h2 className="font-display text-sm font-bold text-slate-950 dark:text-white truncate">
               {artifact.title}
             </h2>
@@ -558,7 +571,7 @@ export function ProCanvasPanel({
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center justify-between sm:justify-end gap-1.5 w-full sm:w-auto shrink-0">
           <div
             style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
             className="inline-flex items-center p-0.5 rounded-full"
@@ -1161,65 +1174,109 @@ export function ProCanvasPanel({
             );
           })()
         ) : (
-          <div className="rounded-2xl border border-slate-200 bg-white text-slate-900 p-5 sm:p-6 space-y-4 shadow-xs">
-            <div className="border-b border-slate-200 pb-3 space-y-1">
-              <h3 className="font-display text-lg font-bold text-slate-950">
-                {artifact.spec.title}
-              </h3>
-              {artifact.spec.subtitle && (
-                <p className="text-xs text-slate-500">{artifact.spec.subtitle}</p>
-              )}
-            </div>
+          (() => {
+            const accentHex =
+              'themeColor' in artifact.spec && artifact.spec.themeColor
+                ? `#${artifact.spec.themeColor.replace(/^#/, '')}`
+                : '#0B57D0';
+            const docMetrics = 'metrics' in artifact.spec ? artifact.spec.metrics : undefined;
+            const docAuthor = 'author' in artifact.spec ? artifact.spec.author : undefined;
+            const docDate = 'dateLabel' in artifact.spec ? artifact.spec.dateLabel : undefined;
 
-            {artifact.spec.sections.map((sec, si) => (
-              <div key={si} className="space-y-2">
-                <h4 className="font-display text-sm font-bold text-blue-700">{sec.heading}</h4>
-                {sec.callout && (
-                  <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-medium text-blue-950">
-                    {sec.callout}
+            return (
+              <div className="rounded-2xl border border-slate-200 bg-white text-slate-900 overflow-hidden shadow-xs">
+                <div style={{ backgroundColor: accentHex }} className="h-1.5 w-full" />
+                <div className="p-5 sm:p-6 space-y-4">
+                  <div className="border-b border-slate-200 pb-3 space-y-1">
+                    <h3 className="font-display text-lg font-bold text-slate-950">
+                      {artifact.spec.title}
+                    </h3>
+                    {artifact.spec.subtitle && (
+                      <p className="text-xs text-slate-600">{artifact.spec.subtitle}</p>
+                    )}
+                    {(docAuthor || docDate) && (
+                      <p className="text-[11px] text-slate-400 tabular-nums pt-0.5">
+                        {[docAuthor, docDate].filter(Boolean).join(' · ')}
+                      </p>
+                    )}
                   </div>
-                )}
-                {(sec.paragraphs ?? []).map((p, pi) => (
-                  <p key={pi} className="text-xs leading-relaxed text-slate-700">
-                    {p}
-                  </p>
-                ))}
-                {sec.bullets && sec.bullets.length > 0 && (
-                  <ul className="space-y-1 pl-3 text-xs text-slate-700">
-                    {sec.bullets.map((b, bi) => (
-                      <li key={bi}>• {b}</li>
-                    ))}
-                  </ul>
-                )}
-                {sec.table && sec.table.headers.length > 0 && (
-                  <div className="overflow-x-auto rounded-lg border border-slate-200">
-                    <table className="w-full text-left border-collapse text-xs tabular-nums">
-                      <thead>
-                        <tr className="bg-blue-600 text-white">
-                          {sec.table.headers.map((h, hi) => (
-                            <th key={hi} className="px-2.5 py-1.5 font-semibold whitespace-nowrap">
-                              {h}
-                            </th>
+
+                  {docMetrics && docMetrics.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      {docMetrics.slice(0, 4).map((m, mi) => (
+                        <div
+                          key={mi}
+                          className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-0.5"
+                        >
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                            {m.label}
+                          </div>
+                          <div
+                            style={{ color: accentHex }}
+                            className="font-display text-base font-bold tabular-nums"
+                          >
+                            {m.value}
+                          </div>
+                          {m.note && <div className="text-[11px] text-slate-500">{m.note}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {artifact.spec.sections.map((sec, si) => (
+                    <div key={si} className="space-y-2">
+                      <h4 style={{ color: accentHex }} className="font-display text-sm font-bold">
+                        {si + 1}. {sec.heading}
+                      </h4>
+                      {sec.callout && (
+                        <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-medium text-blue-950">
+                          {renderRichLeadText(sec.callout)}
+                        </div>
+                      )}
+                      {(sec.paragraphs ?? []).map((p, pi) => (
+                        <p key={pi} className="text-xs leading-relaxed text-slate-700">
+                          {renderRichLeadText(p)}
+                        </p>
+                      ))}
+                      {sec.bullets && sec.bullets.length > 0 && (
+                        <ul className="space-y-1 pl-3 text-xs text-slate-700">
+                          {sec.bullets.map((b, bi) => (
+                            <li key={bi}>• {renderRichLeadText(b)}</li>
                           ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-200">
-                        {sec.table.rows.map((row, ri) => (
-                          <tr key={ri} className={ri % 2 === 1 ? 'bg-slate-50' : 'bg-white'}>
-                            {row.map((c, ci) => (
-                              <td key={ci} className="px-2.5 py-1.5 text-slate-700">
-                                {c}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                        </ul>
+                      )}
+                      {sec.table && sec.table.headers.length > 0 && (
+                        <div className="overflow-x-auto rounded-lg border border-slate-200">
+                          <table className="w-full text-left border-collapse text-xs tabular-nums">
+                            <thead>
+                              <tr style={{ backgroundColor: accentHex }} className="text-white">
+                                {sec.table.headers.map((h, hi) => (
+                                  <th key={hi} className="px-2.5 py-1.5 font-semibold whitespace-nowrap">
+                                    {h}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200">
+                              {sec.table.rows.map((row, ri) => (
+                                <tr key={ri} className={ri % 2 === 1 ? 'bg-slate-50' : 'bg-white'}>
+                                  {row.map((c, ci) => (
+                                    <td key={ci} className="px-2.5 py-1.5 text-slate-700">
+                                      {c}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
-          </div>
+            );
+          })()
         )}
       </div>
 
@@ -1282,6 +1339,70 @@ export function ProCanvasPanel({
             </div>
           )}
         </div>
+      )}
+
+      {/* Document Studio Quick-Refine Footer */}
+      {artifact.kind === 'document' && !isRunning && (
+        <footer
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="shrink-0 px-3.5 py-2.5 border-t flex items-center gap-1.5 overflow-x-auto pb-safe"
+        >
+          <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 inline-flex items-center gap-1 shrink-0 mr-1">
+            <Sparkles className="w-3 h-3" />
+            Refine:
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              onAskCanvasAction(
+                `Expand the following .${artifact.spec.format.toUpperCase()} document with deeper analysis, concrete examples, and clear takeaways while keeping the exact \`\`\`artifact-${artifact.spec.format} JSON format:\n\n\`\`\`artifact-${artifact.spec.format}\n${artifact.rawJson}\n\`\`\``,
+                `Expand details in ${artifact.title}`
+              )
+            }
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+          >
+            Expand Details
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              onAskCanvasAction(
+                `Add a structured comparison or KPI benchmark table to this .${artifact.spec.format.toUpperCase()} document and return the complete updated \`\`\`artifact-${artifact.spec.format} JSON:\n\n\`\`\`artifact-${artifact.spec.format}\n${artifact.rawJson}\n\`\`\``,
+                `Add data table to ${artifact.title}`
+              )
+            }
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+          >
+            Add Data Table
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              onAskCanvasAction(
+                `Polish this .${artifact.spec.format.toUpperCase()} document into crisp executive prose with concise metrics and return the updated \`\`\`artifact-${artifact.spec.format} JSON:\n\n\`\`\`artifact-${artifact.spec.format}\n${artifact.rawJson}\n\`\`\``,
+                `Executive polish for ${artifact.title}`
+              )
+            }
+            style={{
+              backgroundColor: 'var(--m3-surface)',
+              borderColor: 'var(--m3-outline)',
+            }}
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+          >
+            Executive Tone
+          </button>
+        </footer>
       )}
 
       {/* Footer Quick IDE Actions for Code & Multi-File App Canvas */}
