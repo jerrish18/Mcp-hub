@@ -23,6 +23,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
+import { validateCanvasPublish, type CanvasPublishRequest, type CanvasPublishResult } from '../../services/mcp/canvasPublish';
 import { CanvasVersions } from './CanvasVersions';
 import { canvasProjectFiles, canvasProjectZip, canvasSelectionRequest, type CanvasArtifact, type CanvasRevision } from '../../utils/canvasArtifacts';
 import { CanvasPreviewFrame, type CanvasRuntimeLog } from './CanvasPreviewFrame';
@@ -30,7 +31,6 @@ import { canvasPushBlockReason, openCanvasPreviewInNewTab, type CanvasPreviewSta
 import { MermaidDiagramCard } from '../../ui/MermaidDiagramCard';
 import {
   buildAppPreviewSrcDoc,
-  buildGitHubSyncPrompt,
   downloadAppBundle,
   suggestRepoSlug,
   validateAppExport,
@@ -57,6 +57,7 @@ interface ProCanvasPanelProps {
   onSaveRevision: () => void;
   onRestoreRevision: (version: CanvasRevision) => void;
   onAskCanvasEdit: (prompt: string, label: string) => void;
+  onPublish: (request: CanvasPublishRequest) => Promise<CanvasPublishResult>;
   onAskCanvasAction: (prompt: string, displayLabel: string, requireWriteApproval?: boolean) => void;
   onClose: () => void;
 }
@@ -266,6 +267,7 @@ export function ProCanvasPanel({
   onSaveRevision,
   onRestoreRevision,
   onAskCanvasEdit,
+  onPublish,
   onAskCanvasAction,
   onClose,
 }: ProCanvasPanelProps) {
@@ -296,6 +298,8 @@ export function ProCanvasPanel({
   const [commitMessage, setCommitMessage] = useState('feat: sync Pro Canvas app from MCP Hub');
   const [isNewRepo, setIsNewRepo] = useState(true);
   const [isPrivateRepo, setIsPrivateRepo] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishResult, setPublishResult] = useState<CanvasPublishResult>();
 
   const [jsonError, setJsonError] = useState('');
   const [copied, setCopied] = useState(false);
@@ -317,6 +321,7 @@ export function ProCanvasPanel({
     setSyncPanelOpen(false);
     setVersionsOpen(false);
     setZipError('');
+    setPublishResult(undefined);
     if (artifact) {
       setRepoName(suggestRepoSlug(artifact.title));
       setCommitMessage(`feat: add ${artifact.title}`);
@@ -498,21 +503,35 @@ export function ProCanvasPanel({
     setSyncPanelOpen((v) => !v);
   };
 
-  const handleSubmitGithubSync = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (projectFiles.length === 0 || pushBlockReason) return;
-    const prompt = buildGitHubSyncPrompt({
-      title: artifact.title,
-      description: artifact.kind === 'app' ? artifact.spec.description : undefined,
-      repoName: repoName.trim() || suggestRepoSlug(artifact.title),
+  const handleSubmitGithubSync = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (pushBlockReason || publishing || isRunning) return;
+    const request: CanvasPublishRequest = {
+      repository: repoName.trim(),
       branch: repoBranch.trim() || 'main',
-      commitMessage: commitMessage.trim() || `feat: sync ${artifact.title}`,
-      isNewRepo,
-      isPrivate: isPrivateRepo,
+      message: commitMessage.trim(),
+      description: artifact.kind === 'app' ? artifact.spec.description : undefined,
+      createRepository: isNewRepo,
+      privateRepository: isPrivateRepo,
       files: projectFiles,
-    });
-    setSyncPanelOpen(false);
-    onAskCanvasAction(prompt, `Sync ${artifact.title} to GitHub (${repoName || 'repo'})`, true);
+    };
+    try {
+      validateCanvasPublish(request);
+    } catch (error) {
+      setPublishResult({ error: error instanceof Error ? error.message : 'Review the repository and files.' });
+      return;
+    }
+    setPublishing(true);
+    try {
+      const result = await onPublish(request);
+      setPublishResult(result);
+      if (result.createdRepository && result.repository) {
+        setRepoName(result.repository);
+        setIsNewRepo(false);
+      }
+    } finally {
+      setPublishing(false);
+    }
   };
 
   const buildCodeContextForPrompt = (): string => {
@@ -806,7 +825,7 @@ export function ProCanvasPanel({
       {/* Collapsible GitHub Sync Drawer */}
       {syncPanelOpen && (artifact.kind === 'app' || artifact.kind === 'code') && (
         <form
-          onSubmit={handleSubmitGithubSync}
+          onSubmit={(event) => void handleSubmitGithubSync(event)}
           data-testid="canvas-github-sync-drawer"
           style={{
             backgroundColor: 'var(--m3-surface-container)',
@@ -935,7 +954,7 @@ export function ProCanvasPanel({
             <button
               type="submit"
               data-testid="canvas-github-push-submit"
-              disabled={Boolean(pushBlockReason) || isRunning}
+              disabled={Boolean(pushBlockReason) || isRunning || publishing}
               style={{
                 backgroundColor: 'var(--m3-primary)',
                 color: 'var(--m3-on-primary)',
@@ -943,9 +962,21 @@ export function ProCanvasPanel({
               className="min-h-[44px] px-4 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
             >
               <GitBranch className="w-3.5 h-3.5" />
-              <span>Push to GitHub</span>
+              <span>{publishing ? 'Publishing…' : 'Review and publish'}</span>
             </button>
           </div>
+          {publishResult && (
+            <div role="status" className="mt-2 text-xs text-slate-700 dark:text-slate-200">
+              {publishResult.commitUrl ? (
+                <a href={publishResult.commitUrl} target="_blank" rel="noreferrer" className="inline-flex min-h-[44px] items-center underline">View GitHub commit</a>
+              ) : (
+                <p>
+                  {publishResult.error ?? (publishResult.cancelled ? 'Publishing cancelled.' : '')}
+                  {publishResult.createdRepository && ` ${publishResult.repository} was created. You can retry as an existing repository.`}
+                </p>
+              )}
+            </div>
+          )}
           {pushBlockReason && <p role="status" className="mt-2 text-xs text-amber-800 dark:text-amber-200 break-words">{pushBlockReason}</p>}
         </form>
       )}

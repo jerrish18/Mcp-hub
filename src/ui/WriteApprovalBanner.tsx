@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { motion } from 'motion/react';
+import { motion, useIsPresent } from 'motion/react';
 import {
   AlertOctagon,
   AlertTriangle,
@@ -34,6 +34,7 @@ function formatKeyLabel(key: string): string {
 }
 
 export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBannerProps) {
+  const isPresent = useIsPresent();
   const [viewMode, setViewMode] = useState<'fields' | 'json'>('fields');
   const [draftArgs, setDraftArgs] = useState<Record<string, unknown>>(() => ({
     ...approval.arguments,
@@ -97,6 +98,10 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
   };
 
   const handleApprove = (decision: 'approve' | 'always_allow') => {
+    if (approval.lockedArguments) {
+      if (decision === 'approve') onDecision({ decision });
+      return;
+    }
     const durationMeta =
       decision === 'always_allow' ? { alwaysAllowDuration: alwaysDuration } : {};
     if (isDirty || viewMode === 'json') {
@@ -118,6 +123,8 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
       exit={{ opacity: 0, y: 8, scale: 0.98 }}
       transition={M3_SPRING}
       role="alertdialog"
+      inert={!isPresent}
+      aria-hidden={!isPresent || undefined}
       aria-label={`Confirm write action ${approval.toolName}`}
       data-testid="write-approval-banner"
       style={{
@@ -177,7 +184,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
         </div>
 
         {/* Fields / Raw JSON Switcher */}
-        <div
+        {!approval.lockedArguments && (<div
           style={{ backgroundColor: 'var(--m3-surface)' }}
           className="inline-flex items-center p-0.5 rounded-full border border-slate-200 dark:border-slate-700 shrink-0"
         >
@@ -193,7 +200,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
                   }
                 : undefined
             }
-            className="min-h-[30px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            className="min-h-[44px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
           >
             <ListChecks className="w-3.5 h-3.5" />
             <span>Fields</span>
@@ -210,12 +217,12 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
                   }
                 : undefined
             }
-            className="min-h-[30px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            className="min-h-[44px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
           >
             <Code2 className="w-3.5 h-3.5" />
             <span>Raw JSON</span>
           </button>
-        </div>
+        </div>)}
       </div>
 
       <div className="p-4 space-y-3">
@@ -234,7 +241,12 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
         )}
 
         {/* Structured Field-Level Editor or Raw JSON */}
-        {viewMode === 'fields' ? (
+        {approval.lockedArguments ? (
+          <details className="rounded-xl border p-2 text-xs">
+            <summary className="min-h-[44px] cursor-pointer py-3 font-semibold">Review exact arguments and file contents</summary>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all text-slate-900 dark:text-slate-100">{argsText}</pre>
+          </details>
+        ) : viewMode === 'fields' ? (
           argEntries.length === 0 ? (
             <div
               style={{
@@ -398,7 +410,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="flex-1 min-h-[38px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                className="flex-1 min-h-[44px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
               />
               <button
                 type="button"
@@ -408,7 +420,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
                     denyReason: denyReason.trim() || undefined,
                   })
                 }
-                className="min-h-[38px] px-4 rounded-full bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold whitespace-nowrap"
+                className="min-h-[44px] px-4 rounded-full bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold whitespace-nowrap"
               >
                 Confirm Deny
               </button>
@@ -425,13 +437,13 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
               backgroundColor: isDestructive ? '#e11d48' : 'var(--m3-primary)',
               color: isDestructive ? '#ffffff' : 'var(--m3-on-primary)',
             }}
-            className="min-h-[42px] px-4 py-2 rounded-full text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+            className="min-h-[44px] px-4 py-2 rounded-full text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
           >
             <Check className="w-4 h-4" />
             <span>{isDirty ? 'Approve Edited' : 'Approve & Run'}</span>
           </button>
 
-          {!isDestructive && !hasInjectionWarning && (
+          {!approval.lockedArguments && !isDestructive && !hasInjectionWarning && (
             <div className="inline-flex items-center gap-1.5 flex-wrap">
               <select
                 aria-label="Always allow duration"
@@ -441,7 +453,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="min-h-[42px] px-2.5 rounded-full border text-xs font-medium text-slate-800 dark:text-slate-100"
+                className="min-h-[44px] px-2.5 rounded-full border text-xs font-medium text-slate-800 dark:text-slate-100"
               >
                 <option value="1h">1 hour</option>
                 <option value="24h">24 hours</option>
@@ -456,7 +468,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="min-h-[42px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+                className="min-h-[44px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
               >
                 <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 <span>Always allow</span>
@@ -469,7 +481,7 @@ export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBanne
             data-testid="approval-deny-btn"
             onClick={() => setDenyPanelOpen((v) => !v)}
             style={{ backgroundColor: 'var(--m3-surface)' }}
-            className="min-h-[42px] px-3.5 py-2 rounded-full border border-rose-300 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+            className="min-h-[44px] px-3.5 py-2 rounded-full border border-rose-300 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
           >
             {denyPanelOpen ? <X className="w-4 h-4" /> : <MessageSquareX className="w-4 h-4" />}
             <span>{denyPanelOpen ? 'Cancel' : 'Deny'}</span>

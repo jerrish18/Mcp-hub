@@ -304,7 +304,7 @@ export async function sendMcpRpc<T = unknown>(params: {
       method,
       rpcParams,
       secrets,
-      fetchFn,
+      fetchFn: (input, init) => fetchFn(input, { ...init, signal: signal ?? init?.signal }),
     })) as unknown as JsonRpcMessage<T>;
     if (res.error) throw new Error(res.error.message);
     return { result: res.result as T, requestId: reqId };

@@ -1,3 +1,4 @@
+import { publishCanvasRevision, type CanvasPublishRequest, type CanvasPublishResult } from '../services/mcp/canvasPublish';
 import type { CanvasEditLink } from '../utils/canvasArtifacts';
 import type { TraceToolRetry } from '../services/llm/agentLoop';
 import { readA2uiMode } from '../utils/a2ui';
@@ -5,6 +6,8 @@ import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
 import { logoutCurrentAccount, type AuthUser } from '../services/auth/appAuth';
 import {
+  buildAgentToolCatalog,
+  resolveToolPermissionPolicy,
   durationToExpiresAt,
   pruneExpiredAlwaysAllowRules,
   runAgentLoop,
@@ -13,6 +16,7 @@ import { getApiKeyForProvider, streamWithRateLimitFallback, syncLiveProviderMode
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
 import {
+  callMcpTool,
   closeAllMcpConnections,
   connectAndInspectServer,
   disconnectMcpServer,
@@ -383,7 +387,8 @@ export interface HubState {
     options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; canvasEdit?: CanvasEditLink; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
-  resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution) => void;
+  publishCanvas: (request: CanvasPublishRequest) => Promise<CanvasPublishResult>;
+  resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution, expectedId?: string) => void;
   enableDemoSandbox: () => Promise<void>;
   saveStudyNote: (note: Omit<SavedStudyNote, 'id' | 'createdAt'>) => void;
   removeSavedStudyNote: (noteId: string) => void;
@@ -1377,11 +1382,87 @@ export const useHubStore = create<HubState>((set, get) => {
       pending.resolve(normalized);
     },
 
-    resolvePendingApproval: (decision) => {
+    resolvePendingApproval: (decision, expectedId) => {
       const pending = get().pendingApproval;
-      if (!pending) return;
-      pending.resolve(decision);
+      if (!pending || (expectedId !== undefined && pending.toolCallId !== expectedId)) return;
       set({ pendingApproval: null });
+      pending.resolve(decision);
+    },
+
+    publishCanvas: async (request) => {
+      const initial = get();
+      if (initial.isRunning) return { error: 'Finish the current run first.' };
+      const scope = activeScope();
+      const conversation = initial.conversations.find((item) => item.id === initial.activeConversationId);
+      const agentId = conversation?.agentId ?? initial.agents[0]?.id;
+      const server = initial.servers.find((item) => item.url === 'virtual://github-api' && item.enabled && item.status === 'connected');
+      if (!server) return { error: 'Connect GitHub first.' };
+
+      const controller = new AbortController();
+      const signal = controller.signal;
+      set({ isRunning: true, abortController: controller });
+      const checkSession = () => {
+        const state = get();
+        if (signal.aborted || activeScope() !== scope || state.vaultLocked ||
+            !state.servers.some((item) => item.id === server.id && item.url === server.url && item.enabled && item.status === 'connected')) {
+          throw new Error('The GitHub connection changed. Start a new review.');
+        }
+        return state;
+      };
+      const checkTool = (name: string, args: Record<string, unknown>) => {
+        const state = checkSession();
+        const agent = state.agents.find((item) => item.id === agentId);
+        if (!agent || !buildAgentToolCatalog(agent, state.servers).tools.some((tool) => tool.serverId === server.id && tool.originalName === name)) {
+          throw new Error(`The active agent cannot use ${name}.`);
+        }
+        const qualifiedKey = `${server.id}:${name}`;
+        if (resolveToolPermissionPolicy({ agent, qualifiedKey, toolName: name, args, settingsToolPolicies: state.settings.toolPolicies ?? [] }) === 'deny') {
+          throw new Error(`${name} is blocked by the current tool policy.`);
+        }
+        return qualifiedKey;
+      };
+      try {
+        return await publishCanvasRevision(request, {
+          check: checkTool,
+          getLogin: async () => {
+            checkSession();
+            const secrets = await loadServerSecrets(server.id);
+            checkSession();
+            const { result } = await sendMcpRpc<{ login?: string }>({ server, method: 'github/viewer', secrets, signal });
+            return result?.login ?? '';
+          },
+          approve: (name, args, description) => {
+            const qualifiedKey = checkTool(name, args);
+            return new Promise((resolve) => {
+              const cancel = () => settle('deny');
+              const settle = (decision: ApprovalDecision | ApprovalResolution) => {
+                signal.removeEventListener('abort', cancel);
+                resolve(!signal.aborted && (typeof decision === 'string' ? decision : decision.decision) === 'approve');
+              };
+              signal.addEventListener('abort', cancel, { once: true });
+              set({ pendingApproval: {
+                toolCallId: 'canvas-' + name + '-' + Date.now(),
+                serverId: server.id,
+                serverName: server.name,
+                toolName: name,
+                qualifiedKey,
+                arguments: args,
+                description,
+                lockedArguments: true,
+                resolve: settle,
+              } });
+            });
+          },
+          call: async (name, args) => {
+            checkTool(name, args);
+            const secrets = await loadServerSecrets(server.id);
+            checkTool(name, args);
+            return callMcpTool({ server, secrets, toolName: name, args, signal });
+          },
+        });
+      } finally {
+        if (get().abortController === controller) set({ isRunning: false, abortController: null, pendingApproval: null });
+      }
     },
 
     enableDemoSandbox: async () => {

@@ -232,6 +232,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     pendingProPlan,
     resolveProPlan,
     pendingApproval,
+    publishCanvas,
     sendMessage,
     stopRun,
     resolvePendingApproval,
@@ -1823,7 +1824,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   settings.hapticsEnabled,
                   resolution.decision === 'deny' ? 'warning' : 'success'
                 );
-                resolvePendingApproval(resolution);
+                resolvePendingApproval(resolution, pendingApproval.toolCallId);
               }}
             />
           )}
@@ -2258,11 +2259,15 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         open={canvasOpen}
         artifact={canvasArtifact}
         isRunning={isRunning}
-        githubConnected={Boolean(
-          servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')?.status ===
-            'connected'
-        )}
+        githubConnected={servers.some((server) => server.url === 'virtual://github-api' && server.enabled && server.status === 'connected')}
         onRequestConnectGithub={() => setGithubConnectOpen(true)}
+        onPublish={async (request) => {
+          closeCanvas();
+          const scope = getAccountScope(authUser);
+          const result = await publishCanvas(request);
+          if (getAccountScope(useHubStore.getState().authUser) === scope) setCanvasOpen(true);
+          return result;
+        }}
         onChangeArtifact={canvas.change}
         revisions={canvas.revisions}
         historyError={canvas.storageError}

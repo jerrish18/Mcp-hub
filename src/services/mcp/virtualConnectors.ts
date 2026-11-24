@@ -1,3 +1,4 @@
+import { canvasFilePathError } from '../../utils/canvasArtifacts';
 import type { McpTool, ServerSecretPayload } from '../../types';
 import { redactSecrets } from '../../utils/redact';
 import type { FetchLike } from '../auth/oauth';
@@ -410,6 +411,14 @@ export async function handleGithubVirtualMcp(params: {
     };
   }
 
+  if (method === 'github/viewer') {
+    if (!token) throw new Error('GitHub token is required.');
+    const response = await fetchFn('https://api.github.com/user', { headers: authHeaders });
+    if (!response.ok) throw new Error(`GitHub API ${response.status}: ${redactSecrets(await response.text(), [token])}`);
+    const { login } = await response.json() as { login?: string };
+    return { jsonrpc: '2.0', id, result: { login } };
+  }
+
   if (method === 'notifications/initialized') return { jsonrpc: '2.0', id, result: {} };
   if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: GITHUB_TOOLS } };
   if (method === 'resources/list') return { jsonrpc: '2.0', id, result: { resources: [] } };
@@ -484,6 +493,13 @@ export async function handleGithubVirtualMcp(params: {
     if (name === 'github_create_repo') {
       const repoName = String(args.name ?? '').trim();
       if (!repoName) return errText(id, 'Repository "name" is required.');
+      if (typeof args.expectedOwner === 'string') {
+        const identity = await fetchFn('https://api.github.com/user', { headers: authHeaders });
+        const user = identity.ok ? await identity.json() as { login?: string } : {};
+        if (user.login?.toLowerCase() !== args.expectedOwner.toLowerCase()) {
+          return errText(id, 'The connected GitHub account changed. Review creation again.');
+        }
+      }
       const res = await fetchFn('https://api.github.com/user/repos', {
         method: 'POST',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
@@ -702,6 +718,7 @@ export async function handleGithubVirtualMcp(params: {
         return errText(id, 'Both repository "owner" and "repo" are required.');
       }
 
+      const atomic = args.atomic === true;
       const rawFiles = Array.isArray(args.files) ? args.files : [];
       const files = rawFiles
         .filter((f): f is { path: string; content: string } => {
@@ -710,12 +727,17 @@ export async function handleGithubVirtualMcp(params: {
           return typeof obj.path === 'string' && obj.path.trim().length > 0 && typeof obj.content === 'string';
         })
         .map((f) => ({
-          path: f.path.trim().replace(/^\.\/+/, '').replace(/^\/+/, ''),
+          path: atomic ? f.path : f.path.trim().replace(/^\.\/+/, '').replace(/^\/+/, ''),
           content: f.content,
         }));
 
       if (files.length === 0) {
         return errText(id, 'At least one { path, content } file entry is required.');
+      }
+
+      if (atomic && (files.length !== rawFiles.length || files.some(({ path }) => canvasFilePathError(path)) ||
+        new Set(files.map(({ path }) => path.toLowerCase())).size !== files.length)) {
+        return errText(id, 'The reviewed revision contains an invalid or duplicate path.');
       }
 
       const owner = encodeURIComponent(ownerRaw);
@@ -740,7 +762,17 @@ export async function handleGithubVirtualMcp(params: {
       );
 
       let remainingFiles = files;
-      if (refRes.status === 404 || refRes.status === 409) {
+      let createRef = false;
+      if (atomic && (refRes.status === 404 || refRes.status === 409)) {
+        if (branch === defaultBranch) return errText(id, 'Initialize the repository before publishing this Canvas revision.');
+        const baseRef = await fetchFn(
+          `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(defaultBranch)}`,
+          { headers: authHeaders }
+        );
+        if (!baseRef.ok) return errText(id, 'The default branch is unavailable. Initialize the repository before publishing.');
+        refRes = baseRef;
+        createRef = true;
+      } else if (refRes.status === 404 || refRes.status === 409) {
         // Check if default branch exists when pushing to a new feature branch
         const defaultRefRes =
           branch !== defaultBranch
@@ -877,11 +909,13 @@ export async function handleGithubVirtualMcp(params: {
       const newCommit = (await newCommitRes.json()) as { sha: string; html_url?: string };
 
       const patchRefRes = await fetchFn(
-        `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`,
+        `https://api.github.com/repos/${owner}/${repo}/git/refs${createRef ? '' : '/heads/' + encodeURIComponent(branch)}`,
         {
-          method: 'PATCH',
+          method: createRef ? 'POST' : 'PATCH',
           headers: { ...authHeaders, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sha: newCommit.sha }),
+          body: JSON.stringify(createRef
+            ? { ref: `refs/heads/${branch}`, sha: newCommit.sha }
+            : { sha: newCommit.sha, force: false }),
         }
       );
       if (!patchRefRes.ok) {
