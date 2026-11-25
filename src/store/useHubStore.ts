@@ -1,21 +1,18 @@
-import { buildConversationFork, type ConversationForkRequest } from '../utils/chatBranches';
-import { githubApprovalReads } from '../utils/approvalDiff';
-import { attachConversationToProject, listWorkspaceProjects, projectAgent, projectForConversation, projectReferenceContext, projectServers, saveWorkspaceProjects } from '../utils/projects';
-import { publishCanvasRevision, type CanvasPublishRequest, type CanvasPublishResult } from '../services/mcp/canvasPublish';
-import type { CanvasEditLink } from '../utils/canvasArtifacts';
-import type { TraceToolRetry } from '../services/llm/agentLoop';
-import { readA2uiMode } from '../utils/a2ui';
 import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, getModelById, normalizeModelId } from '../config/models';
 import { logoutCurrentAccount, type AuthUser } from '../services/auth/appAuth';
 import {
   buildAgentToolCatalog,
-  resolveToolPermissionPolicy,
   durationToExpiresAt,
   pruneExpiredAlwaysAllowRules,
   runAgentLoop,
 } from '../services/llm/agentLoop';
-import { getApiKeyForProvider, mergeModelCatalog, streamWithRateLimitFallback, syncLiveProviderModels } from '../services/llm/provider';
+import {
+  dispatchStreamCompletion,
+  getApiKeyForProvider,
+  getAvailableModels,
+  syncLiveProviderModels,
+} from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
 import {
@@ -53,6 +50,7 @@ import {
   unlockVaultWithPassphrase,
 } from '../services/storage/secureStorage';
 import type {
+  A2uiWidgetState,
   AgentProfile,
   AppSettings,
   ApprovalDecision,
@@ -65,8 +63,10 @@ import type {
   GroundingCitation,
   KnowledgeSourceMode,
   McpServerConfig,
+  MessageVerification,
   ModelConfig,
   PendingApproval,
+  ProjectProfile,
   ProviderId,
   ProviderKeys,
   RunTrace,
@@ -75,9 +75,9 @@ import type {
   ToolCallRecord,
   ToolPolicyRule,
 } from '../types';
+import { resolveA2uiMode } from '../utils/a2ui';
 import type { SavedStudyNote } from '../utils/studyTools';
 import { safeErrorMessage } from '../utils/redact';
-import { finishProTaskPlan, makeProTaskPlan, normalizeProPlan, parseProTaskPlan, PRO_PLAN_SYSTEM_PROMPT, shouldPlanProTask, splitProTask, type ProTaskPlan } from '../utils/proTaskPlan';
 import {
   BUILT_IN_AGENTS,
   DEFAULT_SAVED_PROMPTS,
@@ -120,6 +120,7 @@ interface PersistedMeta {
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
   savedPrompts?: SavedPrompt[];
+  projects?: ProjectProfile[];
   updatedAt?: number;
 }
 
@@ -164,11 +165,6 @@ function migrateConversation(c: Conversation): Conversation {
     chatMode: c.chatMode ?? 'professional',
     knowledgeSource: c.knowledgeSource ?? 'auto',
     studyInstructions: c.studyInstructions ?? DEFAULT_STUDY_INSTRUCTIONS,
-    messages: c.messages.map((message) => {
-      const plan = message.proTaskPlan;
-      if (!plan || (plan.status !== 'review' && plan.status !== 'running')) return message;
-      return { ...message, isStreaming: false, proTaskPlan: finishProTaskPlan(plan, true) };
-    }),
   };
 }
 
@@ -188,8 +184,8 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
         parsed.agents && parsed.agents.length > 0
           ? mergeBuiltInAgents(parsed.agents)
           : BUILT_IN_AGENTS;
-      const mergedSettings: AppSettings = { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}), a2uiMode: readA2uiMode(parsed.settings) };
-      delete mergedSettings.a2uiEnabled;
+      const mergedSettings: AppSettings = { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) };
+      const migratedA2uiMode = resolveA2uiMode(parsed.settings);
       const rawRules = mergedSettings.alwaysAllowedRules ?? [];
       const prunedRules = pruneExpiredAlwaysAllowRules(rawRules);
       const expiredKeys = new Set(
@@ -202,6 +198,8 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
         agents: migratedAgents,
         settings: {
           ...mergedSettings,
+          a2uiMode: migratedA2uiMode,
+          a2uiEnabled: migratedA2uiMode !== 'off',
           alwaysAllowedRules: prunedRules,
           alwaysAllowedTools: mergedSettings.alwaysAllowedTools.filter((k) => !expiredKeys.has(k)),
         },
@@ -211,6 +209,7 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
           parsed.savedPrompts && parsed.savedPrompts.length > 0
             ? parsed.savedPrompts
             : DEFAULT_SAVED_PROMPTS,
+        projects: Array.isArray(parsed.projects) ? parsed.projects : [],
         updatedAt: Number(parsed.updatedAt) || 0,
       };
     }
@@ -224,6 +223,7 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
     dynamicModels: [],
     dismissedDefaultServerIds: [],
     savedPrompts: DEFAULT_SAVED_PROMPTS,
+    projects: [],
     updatedAt: 0,
   };
 }
@@ -301,9 +301,6 @@ export interface CompareResultItem {
 }
 
 export interface HubState {
-  liveTrace?: { messageId: string; trace: RunTrace };
-  pendingProPlan?: { messageId: string; resolve: (steps: string[] | null) => void };
-  resolveProPlan: (steps: string[] | null) => void;
   initialized: boolean;
   isLocked: boolean;
   passphraseVaultEnabled: boolean;
@@ -321,6 +318,7 @@ export interface HubState {
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
   savedPrompts: SavedPrompt[];
+  projects: ProjectProfile[];
   conversations: Conversation[];
   activeConversationId: string | null;
   savedStudyNotes: SavedStudyNote[];
@@ -344,6 +342,7 @@ export interface HubState {
   continueAsGuest: () => void;
   signOutAccount: () => Promise<void>;
   syncWorkspaceNow: () => Promise<void>;
+  flushPendingSync: () => Promise<void>;
 
   // Settings & Keys & Models
   updateSettings: (patch: Partial<AppSettings>) => void;
@@ -375,8 +374,7 @@ export interface HubState {
   deleteAgent: (agentId: string) => void;
 
   // Conversations & Chat
-  startNewConversation: (agentId?: string, modelId?: string, projectId?: string) => void;
-  forkConversation: (sourceId: string, request: ConversationForkRequest) => Promise<void>;
+  startNewConversation: (agentId?: string, modelId?: string) => void;
   selectConversation: (conversationId: string) => void;
   renameConversation: (conversationId: string, title: string) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
@@ -386,19 +384,30 @@ export interface HubState {
   setChatMode: (mode: ChatMode) => void;
   setKnowledgeSource: (source: KnowledgeSourceMode) => void;
   setStudyInstructions: (instructions: string) => void;
+  updateMessageA2uiState: (messageId: string, patch: Partial<A2uiWidgetState>) => void;
   sendMessage: (
     text: string,
-    options?: { autoApproveWrites?: boolean; requireWriteApproval?: boolean; retryToolCall?: TraceToolRetry; canvasEdit?: CanvasEditLink; excludeFallbackModelId?: string; attachments?: ChatAttachment[]; displayText?: string }
+    options?: { autoApproveWrites?: boolean; attachments?: ChatAttachment[]; displayText?: string }
   ) => Promise<void>;
   stopRun: () => void;
-  loadApprovalBefore: (approval: PendingApproval, args: Record<string, unknown>, signal: AbortSignal) => Promise<Record<string, string>>;
-  publishCanvas: (request: CanvasPublishRequest) => Promise<CanvasPublishResult>;
-  resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution, expectedId?: string) => void;
+  resolvePendingApproval: (decision: ApprovalDecision | ApprovalResolution) => void;
+  retryToolCall: (params: {
+    serverId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+  }) => Promise<{ ok: boolean; result?: string; error?: string; denied?: boolean; durationMs: number }>;
   enableDemoSandbox: () => Promise<void>;
   saveStudyNote: (note: Omit<SavedStudyNote, 'id' | 'createdAt'>) => void;
   removeSavedStudyNote: (noteId: string) => void;
   savePromptMacro: (macro: Omit<SavedPrompt, 'id' | 'updatedAt'> & { id?: string }) => SavedPrompt;
   deletePromptMacro: (macroId: string) => void;
+  saveProject: (project: Omit<ProjectProfile, 'id' | 'updatedAt'> & { id?: string }) => ProjectProfile;
+  deleteProject: (projectId: string) => void;
+  setConversationProject: (projectId: string | null) => void;
+  verifyAssistantMessage: (messageId: string, verifierModelId?: string) => Promise<void>;
+  editAndRerunUserMessage: (messageId: string, newText: string) => Promise<void>;
+  regenerateAssistantMessage: (assistantMsgId: string, modelIdOverride?: string) => Promise<void>;
+  forkConversationFromMessage: (messageId: string) => Promise<Conversation | null>;
   runCompareTurn: (
     rawText: string,
     modelIds: string[],
@@ -420,6 +429,7 @@ export const useHubStore = create<HubState>((set, get) => {
   let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSyncRun = 0;
   let listChangedSubscribed = false;
+  let visibilitySyncBound = false;
 
   const activeScope = () => getAccountScope(get().authUser);
 
@@ -430,6 +440,7 @@ export const useHubStore = create<HubState>((set, get) => {
     dynamicModels: state.dynamicModels,
     dismissedDefaultServerIds: state.dismissedDefaultServerIds,
     savedPrompts: state.savedPrompts,
+    projects: state.projects,
     conversations: state.conversations,
     savedStudyNotes: state.savedStudyNotes,
     updatedAt,
@@ -457,7 +468,15 @@ export const useHubStore = create<HubState>((set, get) => {
     syncDebounceTimer = setTimeout(() => {
       syncDebounceTimer = null;
       void pushCurrentStateToRemote();
-    }, 1200);
+    }, 3500);
+  };
+
+  const flushPendingSyncNow = async () => {
+    if (syncDebounceTimer !== null) {
+      clearTimeout(syncDebounceTimer);
+      syncDebounceTimer = null;
+      await pushCurrentStateToRemote();
+    }
   };
 
   const persist = () => {
@@ -471,6 +490,7 @@ export const useHubStore = create<HubState>((set, get) => {
         dynamicModels: s.dynamicModels,
         dismissedDefaultServerIds: s.dismissedDefaultServerIds,
         savedPrompts: s.savedPrompts,
+        projects: s.projects,
         updatedAt: Date.now(),
       },
       scope
@@ -500,6 +520,7 @@ export const useHubStore = create<HubState>((set, get) => {
       dynamicModels: localMeta.dynamicModels,
       dismissedDefaultServerIds: localMeta.dismissedDefaultServerIds,
       savedPrompts: localMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
+      projects: localMeta.projects ?? [],
       conversations: localConvs,
       activeConversationId: localConvs[0]?.id ?? null,
       savedStudyNotes: localNotes,
@@ -519,6 +540,7 @@ export const useHubStore = create<HubState>((set, get) => {
           dynamicModels: localMeta.dynamicModels,
           dismissedDefaultServerIds: localMeta.dismissedDefaultServerIds,
           savedPrompts: localMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
+          projects: localMeta.projects ?? [],
           conversations: localConvs,
           savedStudyNotes: localNotes,
           updatedAt: localMeta.updatedAt ?? 0,
@@ -555,6 +577,7 @@ export const useHubStore = create<HubState>((set, get) => {
           dynamicModels: finalSnapshot.dynamicModels,
           dismissedDefaultServerIds: finalSnapshot.dismissedDefaultServerIds,
           savedPrompts: finalSnapshot.savedPrompts,
+          projects: finalSnapshot.projects ?? [],
           updatedAt: finalSnapshot.updatedAt,
         },
         scope
@@ -580,6 +603,7 @@ export const useHubStore = create<HubState>((set, get) => {
           finalSnapshot.savedPrompts && finalSnapshot.savedPrompts.length > 0
             ? finalSnapshot.savedPrompts
             : DEFAULT_SAVED_PROMPTS,
+        projects: finalSnapshot.projects ?? [],
         conversations: finalSnapshot.conversations,
         activeConversationId: nextActiveId,
         savedStudyNotes: finalSnapshot.savedStudyNotes,
@@ -645,6 +669,7 @@ export const useHubStore = create<HubState>((set, get) => {
       dynamicModels: guestMeta.dynamicModels,
       dismissedDefaultServerIds: guestMeta.dismissedDefaultServerIds,
       savedPrompts: guestMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
+      projects: guestMeta.projects ?? [],
       conversations: guestConvs,
       activeConversationId: guestConvs[0]?.id ?? null,
       savedStudyNotes: guestNotes,
@@ -672,6 +697,7 @@ export const useHubStore = create<HubState>((set, get) => {
     dynamicModels: initialMeta.dynamicModels,
     dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
     savedPrompts: initialMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
+    projects: initialMeta.projects ?? [],
     conversations: [],
     activeConversationId: null,
     savedStudyNotes: readSavedStudyNotes('guest'),
@@ -748,6 +774,10 @@ export const useHubStore = create<HubState>((set, get) => {
       await hydrateAccountWorkspace(user);
     },
 
+    flushPendingSync: async () => {
+      await flushPendingSyncNow();
+    },
+
     initializeApp: async (autostartSkipOnboarding = false) => {
       const scope = getAccountScope(get().authUser);
       const [keys, rawConvs] = await Promise.all([
@@ -787,6 +817,20 @@ export const useHubStore = create<HubState>((set, get) => {
         authGuestMode: autostartSkipOnboarding ? true : state.authGuestMode,
       });
       persist();
+
+      if (!visibilitySyncBound && typeof window !== 'undefined') {
+        visibilitySyncBound = true;
+        window.addEventListener('pagehide', () => {
+          void flushPendingSyncNow();
+        });
+        if (typeof document !== 'undefined') {
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+              void flushPendingSyncNow();
+            }
+          });
+        }
+      }
 
       if (!listChangedSubscribed) {
         listChangedSubscribed = true;
@@ -880,7 +924,15 @@ export const useHubStore = create<HubState>((set, get) => {
     },
 
     updateSettings: (patch) => {
-      set((s) => ({ settings: { ...s.settings, ...patch } }));
+      set((s) => {
+        const merged = { ...s.settings, ...patch };
+        if (patch.a2uiMode) {
+          merged.a2uiEnabled = patch.a2uiMode !== 'off';
+        } else if (patch.a2uiEnabled !== undefined) {
+          merged.a2uiMode = patch.a2uiEnabled ? 'smart' : 'off';
+        }
+        return { settings: merged };
+      });
       persist();
     },
 
@@ -1195,13 +1247,10 @@ export const useHubStore = create<HubState>((set, get) => {
       persist();
     },
 
-    startNewConversation: (agentId, modelId, projectId) => {
+    startNewConversation: (agentId, modelId) => {
       const state = get();
-      const scope = activeScope();
-      const projects = projectId ? listWorkspaceProjects(scope) : [];
-      const project = projects.find((item) => item.id === projectId);
       const agent =
-        state.agents.find((a) => a.id === (project?.defaultAgentId || agentId)) ??
+        state.agents.find((a) => a.id === agentId) ??
         state.agents[0] ??
         BUILT_IN_AGENTS[0];
       const hasAnyRealKey = Boolean(
@@ -1209,44 +1258,12 @@ export const useHubStore = create<HubState>((set, get) => {
       );
       const chosenModel = modelId ?? (hasAnyRealKey ? agent.defaultModelId : 'demo-sandbox');
       const conv = createNewConversation(agent, chosenModel);
-      if (project) saveWorkspaceProjects(scope, attachConversationToProject(projects, conv.id, project.id));
       set((s) => ({
         conversations: [conv, ...s.conversations],
         activeConversationId: conv.id,
       }));
       void historyDb.saveConversation(conv, activeScope());
       scheduleRemoteSync();
-    },
-
-    forkConversation: async (sourceId, request) => {
-      const state = get();
-      const source = state.conversations.find((item) => item.id === sourceId);
-      if (state.isRunning) throw new Error('Finish the current run before creating a branch.');
-      if (!source) throw new Error('The source chat is unavailable.');
-      const originalModel = source.messages.find((message) => message.id === request.messageId)?.modelId ?? source.modelId;
-      if (request.mode === 'regenerate') {
-        const model = mergeModelCatalog(state.dynamicModels).find((item) => item.id === request.modelId);
-        if (!model || !model.isFreeTier || normalizeModelId(model.id) === normalizeModelId(originalModel) ||
-          (model.provider !== 'demo' && !getApiKeyForProvider(model.provider, state.providerKeys))) {
-          throw new Error('Choose a different configured free-tier model.');
-        }
-      }
-      const scope = activeScope();
-      const id = 'conv_' + (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`);
-      const { conversation, replay } = buildConversationFork(source, request, id);
-      const projects = listWorkspaceProjects(scope);
-      const project = projectForConversation(projects, source.id);
-      if (project) saveWorkspaceProjects(scope, attachConversationToProject(projects, conversation.id, project.id));
-      set((current) => ({ conversations: [conversation, ...current.conversations], activeConversationId: conversation.id }));
-      await historyDb.saveConversation(conversation, scope);
-      if (activeScope() !== scope) return;
-      scheduleRemoteSync();
-      if (replay && get().activeConversationId === conversation.id) {
-        void get().sendMessage(replay.content, {
-          attachments: replay.attachments, displayText: replay.displayContent, requireWriteApproval: true,
-          excludeFallbackModelId: request.mode === 'regenerate' ? originalModel : undefined,
-        });
-      }
     },
 
     selectConversation: (conversationId) => {
@@ -1405,134 +1422,130 @@ export const useHubStore = create<HubState>((set, get) => {
       }
     },
 
+    updateMessageA2uiState: (messageId, patch) => {
+      const convId = get().activeConversationId;
+      if (!convId) return;
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          updated = {
+            ...c,
+            updatedAt: Date.now(),
+            messages: c.messages.map((m) => {
+              if (m.id !== messageId) return m;
+              const prev = m.a2uiWidgetState ?? {};
+              return {
+                ...m,
+                a2uiWidgetState: {
+                  ...prev,
+                  ...patch,
+                  checklist: patch.checklist
+                    ? { ...(prev.checklist ?? {}), ...patch.checklist }
+                    : prev.checklist,
+                  formValues: patch.formValues
+                    ? { ...(prev.formValues ?? {}), ...patch.formValues }
+                    : prev.formValues,
+                  usedActions: patch.usedActions
+                    ? Array.from(new Set([...(prev.usedActions ?? []), ...patch.usedActions]))
+                    : prev.usedActions,
+                },
+              };
+            }),
+          };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
+    },
+
     stopRun: () => {
       const state = get();
       state.abortController?.abort();
-      state.pendingApproval?.resolve('deny');
-      state.pendingProPlan?.resolve(null);
-      set({ pendingApproval: null, pendingProPlan: undefined });
+      if (state.pendingApproval) {
+        state.pendingApproval.resolve('deny');
+      }
+      set({ isRunning: false, abortController: null, pendingApproval: null });
     },
 
-    resolveProPlan: (steps) => {
-      const pending = get().pendingProPlan;
-      if (!pending) return;
-      const normalized = steps ? normalizeProPlan(steps) : null;
-      if (normalized && normalized.length < 2) return;
-      set({ pendingProPlan: undefined });
-      pending.resolve(normalized);
-    },
-
-    resolvePendingApproval: (decision, expectedId) => {
+    resolvePendingApproval: (decision) => {
       const pending = get().pendingApproval;
-      if (!pending || (expectedId !== undefined && pending.toolCallId !== expectedId)) return;
-      set({ pendingApproval: null });
+      if (!pending) return;
       pending.resolve(decision);
+      set({ pendingApproval: null });
     },
 
-    loadApprovalBefore: async (approval, args, signal) => {
+    retryToolCall: async ({ serverId, toolName, args }) => {
+      const startedAt = Date.now();
       const state = get();
-      const scope = activeScope();
-      const requested = githubApprovalReads(approval, args);
-      const conversation = state.conversations.find((item) => item.id === state.activeConversationId);
-      const agent = state.agents.find((item) => item.id === (approval.agentId ?? conversation?.agentId)) ?? state.agents[0];
-      const server = state.servers.find((item) => item.id === approval.serverId);
-      const readTool = 'github_read_file';
-      if (!requested.length || !agent || !server || !buildAgentToolCatalog(agent, [server]).tools.some((tool) =>
-        tool.originalName === readTool && tool.isReadOnly)) return {};
-      const secrets = await loadServerSecrets(server.id);
-      const entries = await Promise.all(requested.map(async (readArgs) => {
-        if (signal.aborted || activeScope() !== scope || get().pendingApproval?.toolCallId !== approval.toolCallId ||
-          resolveToolPermissionPolicy({
-            agent, qualifiedKey: `${server.id}:${readTool}`, toolName: readTool, args: readArgs,
-            settingsToolPolicies: get().settings.toolPolicies ?? [],
-          }) === 'deny') return [];
-        try {
-          const result = await callMcpTool({ server, secrets, toolName: readTool, args: readArgs, signal });
-          if (result.isError) return [];
-          const value = JSON.parse(result.text) as { content?: string };
-          return typeof value.content === 'string' ? [[String(readArgs.path), value.content.slice(0, 12001)]] : [];
-        } catch {
-          return [];
-        }
-      }));
-      return Object.fromEntries(entries.flat());
-    },
+      const server = state.servers.find((s) => s.id === serverId);
+      if (!server || server.status !== 'connected') {
+        return {
+          ok: false,
+          error: server ? `Server "${server.name}" is disconnected.` : 'Target MCP server not found.',
+          durationMs: 0,
+        };
+      }
+      const toolDef = server.tools.find((t) => t.name === toolName);
+      const isReadOnly = toolDef?.annotations?.readOnlyHint === true;
+      const isDestructive = toolDef?.annotations?.destructiveHint === true;
+      let effectiveArgs = args;
 
-    publishCanvas: async (request) => {
-      const initial = get();
-      if (initial.isRunning) return { error: 'Finish the current run first.' };
-      const scope = activeScope();
-      const conversation = initial.conversations.find((item) => item.id === initial.activeConversationId);
-      const agentId = conversation?.agentId ?? initial.agents[0]?.id;
-      const project = projectForConversation(listWorkspaceProjects(scope), conversation?.id);
-      const server = projectServers(initial.servers, project).find((item) => item.url === 'virtual://github-api' && item.enabled && item.status === 'connected');
-      if (!server) return { error: 'Connect GitHub first.' };
-
-      const controller = new AbortController();
-      const signal = controller.signal;
-      set({ isRunning: true, abortController: controller });
-      const checkSession = () => {
-        const state = get();
-        if (signal.aborted || activeScope() !== scope || state.vaultLocked ||
-            !state.servers.some((item) => item.id === server.id && item.url === server.url && item.enabled && item.status === 'connected')) {
-          throw new Error('The GitHub connection changed. Start a new review.');
-        }
-        return state;
-      };
-      const checkTool = (name: string, args: Record<string, unknown>) => {
-        const state = checkSession();
-        const agent = state.agents.find((item) => item.id === agentId);
-        if (!agent || !buildAgentToolCatalog(agent, state.servers).tools.some((tool) => tool.serverId === server.id && tool.originalName === name)) {
-          throw new Error(`The active agent cannot use ${name}.`);
-        }
-        const qualifiedKey = `${server.id}:${name}`;
-        if (resolveToolPermissionPolicy({ agent, qualifiedKey, toolName: name, args, settingsToolPolicies: state.settings.toolPolicies ?? [] }) === 'deny') {
-          throw new Error(`${name} is blocked by the current tool policy.`);
-        }
-        return qualifiedKey;
-      };
-      try {
-        return await publishCanvasRevision(request, {
-          check: checkTool,
-          getLogin: async () => {
-            checkSession();
-            const secrets = await loadServerSecrets(server.id);
-            checkSession();
-            const { result } = await sendMcpRpc<{ login?: string }>({ server, method: 'github/viewer', secrets, signal });
-            return result?.login ?? '';
-          },
-          approve: (name, args, description) => {
-            const qualifiedKey = checkTool(name, args);
-            return new Promise((resolve) => {
-              const cancel = () => settle('deny');
-              const settle = (decision: ApprovalDecision | ApprovalResolution) => {
-                signal.removeEventListener('abort', cancel);
-                resolve(!signal.aborted && (typeof decision === 'string' ? decision : decision.decision) === 'approve');
-              };
-              signal.addEventListener('abort', cancel, { once: true });
-              set({ pendingApproval: {
-                toolCallId: 'canvas-' + name + '-' + Date.now(),
-                serverId: server.id,
-                serverName: server.name,
-                toolName: name,
-                qualifiedKey,
-                arguments: args,
-                description,
-                lockedArguments: true,
-                agentId,
-                resolve: settle,
-              } });
-            });
-          },
-          call: async (name, args) => {
-            checkTool(name, args);
-            const secrets = await loadServerSecrets(server.id);
-            checkTool(name, args);
-            return callMcpTool({ server, secrets, toolName: name, args, signal });
-          },
+      if (!isReadOnly && state.settings.confirmBeforeWrite) {
+        const rawDecision = await new Promise<ApprovalDecision | ApprovalResolution>((resolve) => {
+          set({
+            pendingApproval: {
+              toolCallId: `retry_${Date.now()}`,
+              serverId: server.id,
+              serverName: server.name,
+              toolName,
+              qualifiedKey: `${server.id}:${toolName}`,
+              arguments: args,
+              description: toolDef?.description ?? `Retry trace tool call: ${toolName}`,
+              isDestructive,
+              resolve,
+            },
+          });
         });
-      } finally {
-        if (get().abortController === controller) set({ isRunning: false, abortController: null, pendingApproval: null });
+        const resolution: ApprovalResolution =
+          typeof rawDecision === 'string' ? { decision: rawDecision } : rawDecision;
+        if (resolution.decision === 'deny') {
+          return {
+            ok: false,
+            denied: true,
+            error: resolution.denyReason?.trim() || 'Write action denied by user.',
+            durationMs: Date.now() - startedAt,
+          };
+        }
+        if (resolution.editedArguments) {
+          effectiveArgs = resolution.editedArguments;
+        }
+      }
+
+      try {
+        const secrets = await loadServerSecrets(server.id);
+        const res = await callMcpTool({
+          server,
+          secrets,
+          saveUpdatedSecrets: (updated) => saveServerSecrets(server.id, updated),
+          toolName,
+          args: effectiveArgs,
+        });
+        return {
+          ok: !res.isError,
+          result: res.text,
+          error: res.isError ? res.text : undefined,
+          durationMs: Date.now() - startedAt,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: safeErrorMessage(err),
+          durationMs: Date.now() - startedAt,
+        };
       }
     },
 
@@ -1606,6 +1619,258 @@ export const useHubStore = create<HubState>((set, get) => {
       persist();
     },
 
+    saveProject: (project) => {
+      const now = Date.now();
+      const entry: ProjectProfile = {
+        id: project.id ?? `proj_${now}_${Math.random().toString(36).slice(2, 6)}`,
+        name: project.name.trim() || 'Untitled Project',
+        description: project.description.trim(),
+        instructions: project.instructions,
+        pinnedFiles: project.pinnedFiles ?? [],
+        defaultAgentId: project.defaultAgentId,
+        allowedServerIds: project.allowedServerIds ?? null,
+        updatedAt: now,
+      };
+      set((s) => {
+        const exists = s.projects.some((p) => p.id === entry.id);
+        return {
+          projects: exists
+            ? s.projects.map((p) => (p.id === entry.id ? entry : p))
+            : [entry, ...s.projects],
+        };
+      });
+      persist();
+      return entry;
+    },
+
+    deleteProject: (projectId) => {
+      const scope = activeScope();
+      const touchedConvs: Conversation[] = [];
+      set((s) => ({
+        projects: s.projects.filter((p) => p.id !== projectId),
+        conversations: s.conversations.map((c) => {
+          if (c.projectId !== projectId) return c;
+          const next = { ...c, projectId: null, updatedAt: Date.now() };
+          touchedConvs.push(next);
+          return next;
+        }),
+      }));
+      for (const c of touchedConvs) {
+        void historyDb.saveConversation(c, scope);
+      }
+      persist();
+    },
+
+    setConversationProject: (projectId) => {
+      const convId = get().activeConversationId;
+      if (!convId) return;
+      const proj = projectId ? get().projects.find((p) => p.id === projectId) : null;
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          const shouldApplyAgent =
+            proj?.defaultAgentId &&
+            c.messages.filter((m) => m.role === 'user').length === 0 &&
+            s.agents.some((a) => a.id === proj.defaultAgentId);
+          updated = {
+            ...c,
+            projectId: projectId ?? null,
+            ...(shouldApplyAgent ? { agentId: proj!.defaultAgentId! } : {}),
+            updatedAt: Date.now(),
+          };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        void historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
+    },
+
+    verifyAssistantMessage: async (messageId, verifierModelId) => {
+      const state = get();
+      const conv = state.conversations.find((c) => c.id === state.activeConversationId);
+      if (!conv) return;
+      const idx = conv.messages.findIndex((m) => m.id === messageId && m.role === 'assistant');
+      if (idx === -1) return;
+      const targetMsg = conv.messages[idx];
+      if (!targetMsg.content.trim()) return;
+
+      let precedingUser = '';
+      for (let i = idx - 1; i >= 0; i--) {
+        if (conv.messages[i].role === 'user') {
+          precedingUser = conv.messages[i].content;
+          break;
+        }
+      }
+
+      const available = getAvailableModels(state.providerKeys, state.dynamicModels);
+      const chosenModel =
+        (verifierModelId && available.find((m) => m.id === verifierModelId)) ||
+        available.find((m) => m.id !== targetMsg.modelId && m.provider !== 'demo') ||
+        available.find((m) => m.id === (targetMsg.modelId || conv.modelId)) ||
+        getModelById(targetMsg.modelId || conv.modelId, state.dynamicModels);
+
+      const apiKey = getApiKeyForProvider(chosenModel.provider, state.providerKeys);
+      let rawReview = '';
+      try {
+        await dispatchStreamCompletion({
+          model: chosenModel,
+          apiKey,
+          systemPrompt:
+            'You are an independent technical reviewer verifying another assistant response. Respond ONLY with:\nLine 1: one word VERIFIED, CAUTION, or ISSUES\nLines 2-4: concise bullet points checking factual accuracy, code/tool safety, and completeness (<= 90 words total).',
+          effort: 'low',
+          messages: [
+            {
+              role: 'user',
+              text: `User question:\n${precedingUser || '(context unavailable)'}\n\nAssistant answer to verify:\n${targetMsg.content.slice(0, 8000)}`,
+            },
+          ],
+          tools: [],
+          onEvent: (ev) => {
+            if (ev.type === 'text_delta') rawReview += ev.delta;
+          },
+        });
+      } catch (err) {
+        rawReview = `CAUTION\n- Verification request failed: ${safeErrorMessage(err)}`;
+      }
+
+      const trimmed = rawReview.trim();
+      const firstLine = (trimmed.split(/\r?\n/)[0] ?? '').toUpperCase();
+      const verdict: MessageVerification['verdict'] = firstLine.includes('ISSUES')
+        ? 'issues'
+        : firstLine.includes('CAUTION')
+          ? 'caution'
+          : 'verified';
+      const summaryLines = trimmed
+        .split(/\r?\n/)
+        .slice(1)
+        .join('\n')
+        .trim();
+      const verification: MessageVerification = {
+        modelId: chosenModel.id,
+        verdict,
+        summary: summaryLines || trimmed || 'Reviewed with no issues flagged.',
+        checkedAt: Date.now(),
+      };
+
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv.id) return c;
+          updated = {
+            ...c,
+            updatedAt: Date.now(),
+            messages: c.messages.map((m) => (m.id === messageId ? { ...m, verification } : m)),
+          };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        await historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
+    },
+
+    editAndRerunUserMessage: async (messageId, newText) => {
+      if (get().isRunning) return;
+      const trimmed = newText.trim();
+      if (!trimmed) return;
+      const state = get();
+      const conv = state.conversations.find((c) => c.id === state.activeConversationId);
+      if (!conv) return;
+      const idx = conv.messages.findIndex((m) => m.id === messageId && m.role === 'user');
+      if (idx === -1) return;
+      const origMsg = conv.messages[idx];
+
+      let truncated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv.id) return c;
+          truncated = {
+            ...c,
+            updatedAt: Date.now(),
+            messages: c.messages.slice(0, idx),
+          };
+          return truncated;
+        }),
+      }));
+      if (truncated) {
+        await historyDb.saveConversation(truncated, activeScope());
+      }
+      await get().sendMessage(trimmed, { attachments: origMsg.attachments });
+    },
+
+    regenerateAssistantMessage: async (assistantMsgId, modelIdOverride) => {
+      if (get().isRunning) return;
+      const state = get();
+      const conv = state.conversations.find((c) => c.id === state.activeConversationId);
+      if (!conv) return;
+      const idx = conv.messages.findIndex((m) => m.id === assistantMsgId && m.role === 'assistant');
+      if (idx === -1) return;
+
+      let userIdx = -1;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (conv.messages[i].role === 'user') {
+          userIdx = i;
+          break;
+        }
+      }
+      if (userIdx === -1) return;
+      const userMsg = conv.messages[userIdx];
+
+      let truncated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv.id) return c;
+          truncated = {
+            ...c,
+            ...(modelIdOverride ? { modelId: modelIdOverride } : {}),
+            updatedAt: Date.now(),
+            messages: c.messages.slice(0, userIdx),
+          };
+          return truncated;
+        }),
+      }));
+      if (truncated) {
+        await historyDb.saveConversation(truncated, activeScope());
+      }
+      await get().sendMessage(userMsg.content, {
+        attachments: userMsg.attachments,
+        displayText: userMsg.displayContent,
+      });
+    },
+
+    forkConversationFromMessage: async (messageId) => {
+      const state = get();
+      const conv = state.conversations.find((c) => c.id === state.activeConversationId);
+      if (!conv) return null;
+      const idx = conv.messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return null;
+
+      const now = Date.now();
+      const clonedMessages = conv.messages.slice(0, idx + 1).map((m) => ({
+        ...m,
+        isStreaming: false,
+      }));
+      const forked: Conversation = {
+        ...conv,
+        id: `conv_${now}_${Math.random().toString(36).slice(2, 7)}`,
+        title: conv.title.endsWith('(Fork)') ? conv.title : `${conv.title} (Fork)`,
+        messages: clonedMessages,
+        createdAt: now,
+        updatedAt: now,
+      };
+      set((s) => ({
+        conversations: [forked, ...s.conversations],
+        activeConversationId: forked.id,
+      }));
+      await historyDb.saveConversation(forked, activeScope());
+      scheduleRemoteSync();
+      return forked;
+    },
+
     runCompareTurn: async (rawText, modelIds, options) => {
       const text = rawText.trim();
       const uniqueIds = Array.from(new Set(modelIds)).slice(0, 3);
@@ -1613,15 +1878,14 @@ export const useHubStore = create<HubState>((set, get) => {
 
       const state = get();
       const conv = state.conversations.find((c) => c.id === state.activeConversationId) ?? state.conversations[0];
-      const project = projectForConversation(listWorkspaceProjects(activeScope()), conv?.id);
-      const agent = projectAgent(state.agents.find((a) => a.id === conv?.agentId) ?? state.agents[0], project);
+      const agent = state.agents.find((a) => a.id === conv?.agentId) ?? state.agents[0];
       const attachments = options?.attachments ?? [];
       const history: LlmConversationItem[] = [];
       for (const m of conv?.messages ?? []) {
         if (m.role === 'user') history.push({ role: 'user', text: m.content, attachments: m.attachments });
         else if (m.role === 'assistant' && m.content) history.push({ role: 'assistant', text: m.content });
       }
-      history.push({ role: 'user', text: text + projectReferenceContext(text, project), attachments: attachments.length > 0 ? attachments : undefined });
+      history.push({ role: 'user', text, attachments: attachments.length > 0 ? attachments : undefined });
 
       const controller = new AbortController();
       set({ isRunning: true, abortController: controller });
@@ -1654,6 +1918,9 @@ export const useHubStore = create<HubState>((set, get) => {
             }
 
             try {
+              const activeProject = conv?.projectId
+                ? get().projects.find((p) => p.id === conv.projectId) ?? null
+                : null;
               const loopRes = await runAgentLoop({
                 agent,
                 modelId: targetModelId,
@@ -1661,10 +1928,12 @@ export const useHubStore = create<HubState>((set, get) => {
                 chatMode: conv?.chatMode ?? 'professional',
                 studyInstructions: conv?.studyInstructions ?? '',
                 knowledgeSource: conv?.knowledgeSource ?? 'auto',
-                a2uiMode: state.settings.a2uiMode,
+                a2uiEnabled: resolveA2uiMode(state.settings) !== 'off',
+                a2uiMode: resolveA2uiMode(state.settings),
+                project: activeProject,
                 keys: state.providerKeys,
                 dynamicModels: state.dynamicModels,
-                servers: projectServers(state.servers, project),
+                servers: state.servers,
                 history,
                 maxSteps: state.settings.maxAgentSteps,
                 confirmBeforeWrite: true,
@@ -1765,7 +2034,6 @@ export const useHubStore = create<HubState>((set, get) => {
         agentId: conv.agentId,
         effort: conv.effort,
         runTrace: item.runTrace,
-        a2uiMaxWidgets: 3,
         createdAt: now + 1,
         isStreaming: false,
       };
@@ -1810,11 +2078,10 @@ export const useHubStore = create<HubState>((set, get) => {
       }
       if (!conv) return;
 
-      const project = projectForConversation(listWorkspaceProjects(scope), conv.id);
-      const agent = projectAgent(state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0], project);
+      const agent = state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0];
       const model = getModelById(conv.modelId, state.dynamicModels);
       const apiKey = getApiKeyForProvider(model.provider, state.providerKeys);
-      const chatMode = options?.retryToolCall ? 'professional' : conv.chatMode ?? 'professional';
+      const chatMode = conv.chatMode ?? 'professional';
       const knowledgeSource = conv.knowledgeSource ?? 'auto';
       const studyInstructions = conv.studyInstructions ?? '';
 
@@ -1845,12 +2112,11 @@ export const useHubStore = create<HubState>((set, get) => {
         effort: conv.effort,
         createdAt: Date.now(),
         isStreaming: true,
-        canvasEdit: options?.canvasEdit,
       };
 
       const titleSource = displayLabel || text;
       const isFirstUserMsg = conv.messages.filter((m) => m.role === 'user').length === 0;
-      const derivedTitle = isFirstUserMsg && !conv.forkedFrom
+      const derivedTitle = isFirstUserMsg
         ? titleSource.length > 42
           ? `${titleSource.slice(0, 42)}…`
           : titleSource
@@ -1868,7 +2134,7 @@ export const useHubStore = create<HubState>((set, get) => {
         return latest;
       };
 
-      if (!options?.retryToolCall && model.provider !== 'demo' && !apiKey) {
+      if (model.provider !== 'demo' && !apiKey) {
         const errorAssistant: ChatMessage = {
           ...assistantMsg,
           isStreaming: false,
@@ -1888,11 +2154,7 @@ export const useHubStore = create<HubState>((set, get) => {
       }
 
       const abortController = new AbortController();
-      set({ isRunning: true, abortController, liveTrace: undefined });
-      let latestTrace: RunTrace | undefined;
-      let plan: ProTaskPlan | undefined;
-      let approvedSteps: string[] | null = null;
-      const finishPlan = (stopped = false) => plan ? finishProTaskPlan(plan, stopped) : undefined;
+      set({ isRunning: true, abortController });
 
       patchConv((c) => ({
         ...c,
@@ -1912,7 +2174,7 @@ export const useHubStore = create<HubState>((set, get) => {
       }
       llmHistory.push({
         role: 'user',
-        text: text + projectReferenceContext(text, project),
+        text,
         attachments: attachments.length > 0 ? attachments : undefined,
       });
 
@@ -1960,58 +2222,17 @@ export const useHubStore = create<HubState>((set, get) => {
       };
 
       try {
-        if (chatMode === 'professional' && !options?.retryToolCall && !options?.requireWriteApproval &&
-            !options?.autoApproveWrites && !options?.canvasEdit && shouldPlanProTask(text)) {
-          let planText = '';
-          try {
-            await streamWithRateLimitFallback({
-              primaryModelId: conv.modelId,
-              keys: state.providerKeys,
-              dynamicModels: state.dynamicModels,
-              systemPrompt: PRO_PLAN_SYSTEM_PROMPT,
-              effort: 'low',
-              chatMode,
-              a2uiEnabled: false,
-              messages: llmHistory.slice(-6),
-              tools: [],
-              signal: abortController.signal,
-              onEvent: (event) => {
-                if (event.type === 'text_delta' && planText.length < 5000) planText += event.delta;
-              },
-            });
-          } catch (error) {
-            if (abortController.signal.aborted) throw error;
-          }
-          const draft = parseProTaskPlan(planText);
-          plan = makeProTaskPlan(draft.length >= 2 ? draft : splitProTask(text), 'review');
-          updateAssistantMsg({ proTaskPlan: plan });
-          approvedSteps = await new Promise<string[] | null>((resolve) => {
-            if (abortController.signal.aborted) { resolve(null); return; }
-            const cancel = () => resolvePlan(null);
-            const resolvePlan = (steps: string[] | null) => {
-              abortController.signal.removeEventListener('abort', cancel);
-              resolve(steps);
-            };
-            abortController.signal.addEventListener('abort', cancel, { once: true });
-            set({ pendingProPlan: { messageId: assistantMsgId, resolve: resolvePlan } });
-          });
-          if (!approvedSteps || abortController.signal.aborted) {
-            plan = { ...plan, status: 'cancelled' };
-            const saved = patchConv((conversation) => ({
-              ...conversation,
-              updatedAt: Date.now(),
-              messages: conversation.messages.map((message) => message.id === assistantMsgId
-                ? { ...message, content: 'Plan cancelled.', isStreaming: false, proTaskPlan: finishPlan() }
-                : message),
-            }));
-            if (saved) {
-              await historyDb.saveConversation(saved, scope);
-              scheduleRemoteSync();
-            }
-            return;
-          }
-          plan = makeProTaskPlan(approvedSteps, 'running');
-          updateAssistantMsg({ proTaskPlan: plan });
+        const activeProject = conv.projectId
+          ? get().projects.find((p) => p.id === conv.projectId) ?? null
+          : null;
+
+        if (chatMode === 'professional') {
+          const { tools } = buildAgentToolCatalog(
+            agent,
+            get().servers,
+            activeProject?.allowedServerIds ?? null
+          );
+          void tools;
         }
 
         const result = await runAgentLoop({
@@ -2021,17 +2242,15 @@ export const useHubStore = create<HubState>((set, get) => {
           chatMode,
           studyInstructions,
           knowledgeSource,
-          a2uiMode: get().settings.a2uiMode,
+          a2uiEnabled: resolveA2uiMode(get().settings) !== 'off',
+          a2uiMode: resolveA2uiMode(get().settings),
+          project: activeProject,
           keys: get().providerKeys,
           dynamicModels: get().dynamicModels,
-          servers: projectServers(get().servers, project),
+          servers: get().servers,
           history: llmHistory,
           maxSteps: get().settings.maxAgentSteps,
           confirmBeforeWrite: options?.autoApproveWrites ? false : get().settings.confirmBeforeWrite,
-          requireWriteApproval: options?.requireWriteApproval,
-          retryToolCall: options?.retryToolCall,
-          excludeFallbackModelId: options?.excludeFallbackModelId,
-          approvedPlan: approvedSteps ?? undefined,
           alwaysAllowedTools: get().settings.alwaysAllowedTools,
           alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
           toolPolicies: get().settings.toolPolicies ?? [],
@@ -2052,15 +2271,6 @@ export const useHubStore = create<HubState>((set, get) => {
               pendingReasoning = fullReasoning;
               scheduleDeltaFlush();
             },
-            onPlanStepChanged: (index, status) => {
-              if (!plan) return;
-              plan = { ...plan, steps: plan.steps.map((step, i) => i === index ? { ...step, status } : step) };
-              updateAssistantMsg({ proTaskPlan: plan });
-            },
-            onTraceUpdated: (trace) => {
-              latestTrace = trace;
-              set({ liveTrace: { messageId: assistantMsgId, trace } });
-            },
             onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => {
               if (thinkingStartMs !== null && thinkingDurationMs === undefined) {
                 thinkingDurationMs = Math.max(100, Date.now() - thinkingStartMs);
@@ -2074,6 +2284,9 @@ export const useHubStore = create<HubState>((set, get) => {
             onCitationsUpdated: (citations: GroundingCitation[]) => {
               flushPendingDeltas();
               updateAssistantMsg({ citations });
+            },
+            onTraceUpdated: (liveTrace: RunTrace) => {
+              updateAssistantMsg({ runTrace: liveTrace });
             },
             onFallbackNotice: (fromModel, toModel, reason) => {
               flushPendingDeltas();
@@ -2154,8 +2367,6 @@ export const useHubStore = create<HubState>((set, get) => {
                   citations: result.citations,
                   modelId: result.usedModelId,
                   runTrace: result.runTrace,
-                  a2uiMaxWidgets: 3,
-                  proTaskPlan: finishPlan(result.stoppedByUser),
                   isStreaming: false,
                 }
               : m
@@ -2177,10 +2388,7 @@ export const useHubStore = create<HubState>((set, get) => {
               ? {
                   ...m,
                   isStreaming: false,
-                  content: abortController.signal.aborted ? m.content || '_Generation stopped._' : m.content,
-                  error: abortController.signal.aborted ? undefined : msg,
-                  runTrace: latestTrace,
-                  proTaskPlan: finishPlan(true),
+                  error: msg,
                 }
               : m
           ),
@@ -2191,9 +2399,7 @@ export const useHubStore = create<HubState>((set, get) => {
         }
       } finally {
         if (flushTimer !== null) clearTimeout(flushTimer);
-        if (get().abortController === abortController) {
-          set({ isRunning: false, abortController: null, pendingApproval: null, pendingProPlan: undefined, liveTrace: undefined });
-        }
+        set({ isRunning: false, abortController: null, pendingApproval: null });
       }
     },
   };

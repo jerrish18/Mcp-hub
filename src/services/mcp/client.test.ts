@@ -646,6 +646,16 @@ test('Phase 2: callMcpTool streams SSE notifications/progress, list_changed, med
       })}\n\n`,
       `event: message\ndata: ${JSON.stringify({
         jsonrpc: '2.0',
+        method: 'notifications/resources/list_changed',
+        params: {},
+      })}\n\n`,
+      `event: message\ndata: ${JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'notifications/prompts/list_changed',
+        params: {},
+      })}\n\n`,
+      `event: message\ndata: ${JSON.stringify({
+        jsonrpc: '2.0',
         id: req.id,
         result: {
           content: [
@@ -690,7 +700,7 @@ test('Phase 2: callMcpTool streams SSE notifications/progress, list_changed, med
     assert.deepEqual(res.structuredContent, { rows: 12, status: 'ok' });
     assert.equal(progressUpdates.length, 1);
     assert.equal(progressUpdates[0].progress, 50);
-    assert.deepEqual(listChangedEvents, ['tools']);
+    assert.deepEqual(listChangedEvents, ['tools', 'resources', 'prompts']);
   } finally {
     unsub();
   }

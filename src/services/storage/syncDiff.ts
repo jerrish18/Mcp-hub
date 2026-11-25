@@ -1,4 +1,3 @@
-import { readA2uiMode } from '../../utils/a2ui';
 import type {
   AgentProfile,
   AppSettings,
@@ -6,9 +5,11 @@ import type {
   Conversation,
   McpServerConfig,
   ModelConfig,
+  ProjectProfile,
   SavedPrompt,
 } from '../../types';
 import type { SavedStudyNote } from '../../utils/studyTools';
+import { resolveA2uiMode } from '../../utils/a2ui';
 
 export interface RemoteSyncBaseline {
   stateExists: boolean;
@@ -67,11 +68,14 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
         )
     : [];
 
+  const resolvedA2uiMode = resolveA2uiMode(settings);
+
   return {
     theme: settings.theme,
     accentTheme: settings.accentTheme,
     oledDark: Boolean(settings.oledDark),
-    a2uiMode: readA2uiMode(settings),
+    a2uiEnabled: resolvedA2uiMode !== 'off',
+    a2uiMode: resolvedA2uiMode,
     confirmBeforeWrite: Boolean(settings.confirmBeforeWrite),
     maxAgentSteps: Math.max(1, Math.min(25, Number(settings.maxAgentSteps) || 10)),
     toolOutputBudgetChars: budget,
@@ -123,18 +127,6 @@ function sanitizeAttachments(attachments?: ChatAttachment[]): ChatAttachment[] |
 }
 
 export function sanitizeConversationForSync(conv: Conversation): Conversation {
-  const recent = (conv.messages ?? []).slice(-150);
-  let traceBudget = 120_000;
-  const syncedMessages = [...recent].reverse().map((message) => {
-    const trace = message.runTrace;
-    if (!trace?.steps?.length) return message;
-    const bytes = new TextEncoder().encode(JSON.stringify(trace.steps)).length;
-    if (traceBudget >= bytes) {
-      traceBudget -= bytes;
-      return message;
-    }
-    return { ...message, runTrace: { ...trace, steps: undefined } };
-  }).reverse();
   return stripUndefined({
     ...conv,
     id: sanitizeDocId(conv.id, 'conv'),
@@ -145,12 +137,20 @@ export function sanitizeConversationForSync(conv: Conversation): Conversation {
     chatMode: conv.chatMode ?? 'professional',
     knowledgeSource: conv.knowledgeSource ?? 'auto',
     studyInstructions: String(conv.studyInstructions ?? '').slice(0, 4000),
-    messages: syncedMessages.map((m) =>
+    projectId: conv.projectId ? String(conv.projectId).slice(0, 128) : undefined,
+    messages: (conv.messages ?? []).slice(-150).map((m) =>
       stripUndefined({
         ...m,
         content: String(m.content ?? '').slice(0, 60000),
         reasoning: m.reasoning ? m.reasoning.slice(0, 12000) : undefined,
         attachments: sanitizeAttachments(m.attachments),
+        runTrace: m.runTrace
+          ? {
+              ...m.runTrace,
+              isLive: undefined,
+              steps: m.runTrace.steps?.slice(0, 60),
+            }
+          : undefined,
         isStreaming: false,
       })
     ),
@@ -183,6 +183,31 @@ export function sanitizeSavedPromptsForSync(prompts: SavedPrompt[] = []): SavedP
     );
 }
 
+export function sanitizeProjectsForSync(projects: ProjectProfile[] = []): ProjectProfile[] {
+  return projects
+    .filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string')
+    .slice(0, 50)
+    .map((p) =>
+      stripUndefined({
+        id: sanitizeDocId(p.id, 'proj'),
+        name: p.name.trim().slice(0, 80) || 'Untitled Project',
+        description: String(p.description ?? '').slice(0, 300),
+        instructions: String(p.instructions ?? '').slice(0, 8000),
+        pinnedFiles: (p.pinnedFiles ?? []).slice(0, 10).map((f) => ({
+          id: sanitizeDocId(f.id, 'pfile'),
+          name: String(f.name ?? 'file.txt').slice(0, 120),
+          size: Number(f.size) || 0,
+          textContent: String(f.textContent ?? '').slice(0, 12000),
+        })),
+        defaultAgentId: p.defaultAgentId ? String(p.defaultAgentId).slice(0, 128) : undefined,
+        allowedServerIds: Array.isArray(p.allowedServerIds)
+          ? p.allowedServerIds.slice(0, 50)
+          : p.allowedServerIds ?? null,
+        updatedAt: Number(p.updatedAt) || Date.now(),
+      })
+    );
+}
+
 export function computeStateSignature(statePart: {
   settings: AppSettings;
   agents: AgentProfile[];
@@ -190,9 +215,10 @@ export function computeStateSignature(statePart: {
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
   savedPrompts?: SavedPrompt[];
+  projects?: ProjectProfile[];
 }): string {
   return JSON.stringify(
-    statePart.savedPrompts !== undefined
+    statePart.savedPrompts !== undefined || statePart.projects !== undefined
       ? statePart
       : {
           settings: statePart.settings,
@@ -206,7 +232,11 @@ export function computeStateSignature(statePart: {
 
 export function computeConversationSignature(conv: Conversation): string {
   const lastMsg = conv.messages[conv.messages.length - 1];
-  return `${conv.updatedAt}:${conv.messages.length}:${conv.title}:${conv.agentId}:${conv.modelId}:${conv.effort}:${conv.chatMode ?? ''}:${conv.knowledgeSource ?? ''}:${conv.studyInstructions?.length ?? 0}:${lastMsg?.id ?? ''}:${lastMsg?.content.length ?? 0}`;
+  const widgetSigLen = conv.messages.reduce(
+    (sum, m) => sum + (m.a2uiWidgetState ? JSON.stringify(m.a2uiWidgetState).length : 0),
+    0
+  );
+  return `${conv.updatedAt}:${conv.messages.length}:${conv.title}:${conv.agentId}:${conv.modelId}:${conv.effort}:${conv.chatMode ?? ''}:${conv.knowledgeSource ?? ''}:${conv.projectId ?? ''}:${conv.studyInstructions?.length ?? 0}:${widgetSigLen}:${lastMsg?.id ?? ''}:${lastMsg?.content.length ?? 0}`;
 }
 
 export function computeStudyNoteSignature(note: SavedStudyNote): string {
@@ -236,6 +266,7 @@ export function computeDirtySyncPlan(
     dynamicModels: ModelConfig[];
     dismissedDefaultServerIds: string[];
     savedPrompts?: SavedPrompt[];
+    projects?: ProjectProfile[];
     conversations: Conversation[];
     savedStudyNotes: SavedStudyNote[];
   },
@@ -248,6 +279,7 @@ export function computeDirtySyncPlan(
     dynamicModels: cleanPayload.dynamicModels,
     dismissedDefaultServerIds: cleanPayload.dismissedDefaultServerIds,
     ...(cleanPayload.savedPrompts !== undefined ? { savedPrompts: cleanPayload.savedPrompts } : {}),
+    ...(cleanPayload.projects !== undefined ? { projects: cleanPayload.projects } : {}),
   });
 
   const stateOp =

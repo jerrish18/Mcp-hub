@@ -73,17 +73,16 @@ service cloud.firestore {
           'oledDark',
           'a2uiEnabled',
           'a2uiMode',
-          'toolOutputBudgetChars',
-          'alwaysAllowedRules',
-          'toolPolicies',
           'confirmBeforeWrite',
           'maxAgentSteps',
+          'toolOutputBudgetChars',
           'alwaysAllowedTools',
+          'alwaysAllowedRules',
+          'toolPolicies',
           'biometricLockEnabled',
           'hapticsEnabled',
           'onboardingCompleted'
-        ])
-        && (!('a2uiMode' in settings) || settings.a2uiMode in ['off', 'smart', 'always']);
+        ]);
     }
 
     function isValidWorkspaceState(data, userId) {
@@ -105,10 +104,10 @@ service cloud.firestore {
           'dynamicModels',
           'dismissedDefaultServerIds',
           'savedPrompts',
+          'projects',
           'createdAt',
           'updatedAt'
         ])
-        && (!('savedPrompts' in data) || (data.savedPrompts is list && data.savedPrompts.size() <= 100))
         && isValidId(data.ownerId)
         && data.ownerId == userId
         && data.ownerId == request.auth.uid
@@ -125,6 +124,8 @@ service cloud.firestore {
         && data.dismissedDefaultServerIds is list
         && data.dismissedDefaultServerIds.size() <= 50
         && (data.dismissedDefaultServerIds.size() == 0 || data.dismissedDefaultServerIds[0] is string)
+        && (!('savedPrompts' in data) || (data.savedPrompts is list && data.savedPrompts.size() <= 100 && (data.savedPrompts.size() == 0 || data.savedPrompts[0] is map)))
+        && (!('projects' in data) || (data.projects is list && data.projects.size() <= 50 && (data.projects.size() == 0 || data.projects[0] is map)))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -156,19 +157,13 @@ service cloud.firestore {
           'chatMode',
           'knowledgeSource',
           'studyInstructions',
+          'projectId',
           'messages',
-          'forkedFrom',
           'clientCreatedAt',
           'clientUpdatedAt',
           'createdAt',
           'updatedAt'
         ])
-        && (!('forkedFrom' in data) || (
-          data.forkedFrom is map
-          && data.forkedFrom.keys().hasOnly(['conversationId', 'messageId'])
-          && isValidId(data.forkedFrom.conversationId)
-          && (!('messageId' in data.forkedFrom) || isValidId(data.forkedFrom.messageId))
-        ))
         && isValidId(data.ownerId)
         && data.ownerId == userId
         && data.ownerId == request.auth.uid
@@ -194,6 +189,7 @@ service cloud.firestore {
         && data.knowledgeSource in ['auto', 'uploaded', 'web', 'general']
         && data.studyInstructions is string
         && data.studyInstructions.size() <= 4000
+        && (!('projectId' in data) || data.projectId == null || (data.projectId is string && data.projectId.size() <= 128))
         && data.messages is list
         && data.messages.size() <= 300
         && (data.messages.size() == 0 || data.messages[0] is map)
@@ -305,6 +301,8 @@ service cloud.firestore {
           'servers',
           'dynamicModels',
           'dismissedDefaultServerIds',
+          'savedPrompts',
+          'projects',
           'updatedAt'
         ])
         && incoming().ownerId == existing().ownerId
@@ -336,8 +334,8 @@ service cloud.firestore {
           'chatMode',
           'knowledgeSource',
           'studyInstructions',
+          'projectId',
           'messages',
-          'forkedFrom',
           'clientUpdatedAt',
           'updatedAt'
         ])

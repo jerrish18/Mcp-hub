@@ -65,7 +65,7 @@ function summarizeArgs(args: Record<string, unknown>): string {
   return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact;
 }
 
-function resolveSafeMediaSrc(block: ToolMediaBlock): string | null {
+export function resolveSafeMediaSrc(block: ToolMediaBlock): string | null {
   if (block.data) {
     const safeMime = /^[a-z]+\/[a-z0-9.+-]+$/i.test(block.mimeType)
       ? block.mimeType

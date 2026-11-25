@@ -1,5 +1,3 @@
-import { CANVAS_ANALYSIS_CSP, CANVAS_ANALYSIS_PAGE } from './src/server/canvasAnalysis.ts';
-import { CANVAS_ANALYSIS_PATH } from './src/utils/canvasAnalysis.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,9 +5,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import { buildCanvasPreviewCsp, buildCanvasPreviewPage, standaloneCanvasPreviewCsp } from './src/server/canvasPreview.ts';
-import { CANVAS_PREVIEW_PATH } from './src/utils/canvasPreview.ts';
 import { createAuthService } from './src/server/authRouter.ts';
+import { handleCanvasPreviewRequest } from './src/server/canvasPreview.ts';
 import { createControlRouter } from './src/server/controlRouter.ts';
 import { createStudyImagesRouter } from './src/server/studyImagesRouter.ts';
 import { createWorkspaceRouter } from './src/server/workspaceRouter.ts';
@@ -29,30 +26,15 @@ async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
 
-  app.get(CANVAS_PREVIEW_PATH, (req, res) => {
-    const standalone = req.query.standalone === '1';
-    res.set({
-      'Content-Security-Policy': standalone ? standaloneCanvasPreviewCsp() : buildCanvasPreviewCsp(),
-      'Referrer-Policy': 'no-referrer',
-      'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'no-store',
-    });
-    res.type('html').send(buildCanvasPreviewPage(standalone));
-  });
-
-  app.get(CANVAS_ANALYSIS_PATH, (_req, res) => {
-    res.set({
-      'Content-Security-Policy': CANVAS_ANALYSIS_CSP,
-      'Referrer-Policy': 'no-referrer',
-      'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'no-store',
-    }).type('html').send(CANVAS_ANALYSIS_PAGE);
-  });
+  // Dedicated isolated preview loader for Pro Canvas (must bypass parent helmet CSP & SPA fallback)
+  app.get('/__canvas-preview', handleCanvasPreviewRequest);
 
   app.use(
     helmet({
       frameguard: false,
       crossOriginEmbedderPolicy: false,
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
@@ -70,8 +52,10 @@ async function startServer() {
             ...(!isProduction ? ['ws:', 'http://localhost:*', 'http://127.0.0.1:*'] : []),
           ],
           frameSrc: ["'self'", 'blob:', 'data:', 'https://accounts.google.com', 'https://*.firebaseapp.com'],
+          frameAncestors: ["'self'", 'https:', 'http://localhost:*', 'http://127.0.0.1:*'],
           objectSrc: ["'none'"],
           baseUri: ["'self'"],
+          upgradeInsecureRequests: null,
         },
       },
     })

@@ -1,14 +1,3 @@
-import { ConversationForkSheet } from './ConversationForkSheet';
-import type { ConversationForkRequest } from '../../utils/chatBranches';
-import { compareCommand, composerCommand, matchingPromptMacros, removeComposerCommand } from '../../utils/composerCommands';
-import type { SavedPrompt } from '../../types';
-import { VerificationSheet } from './VerificationSheet';
-import { eligibleReviewModels } from '../../services/llm/verifyAnswer';
-import { ProjectsSheet } from './ProjectsSheet';
-import { listWorkspaceProjects, projectForConversation, projectServers, type WorkspaceProject } from '../../utils/projects';
-import { getAccountScope } from '../../services/storage/accountSync';
-import { useCanvasWorkspace } from './useCanvasWorkspace';
-import type { CanvasEditLink } from '../../utils/canvasArtifacts';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
@@ -29,11 +18,15 @@ import {
   ExternalLink,
   FileSpreadsheet,
   FileText,
+  FolderKanban,
+  GitFork,
   Globe,
   HelpCircle,
   History,
   Info,
   Layers,
+  LayoutGrid,
+  ListChecks,
   Loader2,
   Maximize2,
   MessageCircle,
@@ -42,30 +35,35 @@ import {
   MicOff,
   PanelRight,
   Pause,
+  Pencil,
   Play,
   Plus,
   Presentation,
   RotateCcw,
   Share2,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Square,
   Terminal,
   Timer,
+  Trash2,
   Upload,
   Volume2,
   VolumeX,
   Wrench,
   X,
+  Command,
 } from 'lucide-react';
 import { getModelById, getShortModelName } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
 import { getMcpPrompt, readMcpResource } from '../../services/mcp/client';
-import { getApiKeyForProvider, mergeModelCatalog } from '../../services/llm/provider';
+import { mergeModelCatalog } from '../../services/llm/provider';
 import { loadServerSecrets, saveServerSecrets } from '../../services/storage/secureStorage';
 import { DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
 import { type CompareResultItem, useHubStore } from '../../store/useHubStore';
 import type {
+  A2uiMode,
   ChatAttachment,
   ChatMessage,
   ChatMode,
@@ -74,17 +72,26 @@ import type {
   McpPrompt,
   McpResource,
   McpServerConfig,
+  RunTrace,
 } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { MarkdownRenderer, type MarkdownCanvasRequest } from '../../ui/MarkdownRenderer';
 import { ThinkingBlock } from '../../ui/ThinkingBlock';
 import { ToolCallCard } from '../../ui/ToolCallCard';
 import { WriteApprovalBanner } from '../../ui/WriteApprovalBanner';
+import { resolveA2uiMode } from '../../utils/a2ui';
 import { formatFileSize, processUploadedFiles } from '../../utils/attachments';
+import { parseDelimitedDataset } from '../../utils/dataAnalysis';
 import { downloadDocumentSpec, markdownToDocSpec, type DocFormat } from '../../utils/docExport';
 import { triggerHaptic } from '../../utils/haptics';
 import { stripMarkdownForSpeech } from '../../utils/markdownParser';
 import { M3_EMPHASIZED_EASE } from '../../utils/motion';
+import {
+  buildExecutionPlanDraft,
+  buildPlanGuidedPrompt,
+  shouldOfferProPlan,
+  type PlanStepItem,
+} from '../../utils/proFeatures';
 import {
   buildFlashcardsGenerationPrompt,
   buildQuickStudyActionPrompt,
@@ -96,13 +103,15 @@ import {
 } from '../../utils/studyTools';
 import { QuickConnectSheet } from '../servers/QuickConnectSheet';
 import { AgentSwitcherSheet } from './AgentSwitcherSheet';
+import { CommandPaletteModal } from './CommandPaletteModal';
 import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
+import { InlineRunTraceBar } from './InlineRunTraceBar';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
-import { ProCanvasPanel } from './ProCanvasPanel';
-import { PromptMacrosSheet, extractMacroVariables } from './PromptMacrosSheet';
-import { ProTaskPlanCard } from './ProTaskPlanCard';
-import { RunTraceChip, RunTraceSheet } from './RunTraceSheet';
+import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
+import { ProjectsModal } from './ProjectsModal';
+import { PromptMacrosSheet } from './PromptMacrosSheet';
+import { RunTraceSheet, type ConversationTraceEntry } from './RunTraceSheet';
 import { SavedNotesModal } from './SavedNotesModal';
 import { StudyFlashcardsModal } from './StudyFlashcardsModal';
 import { StudyQuizModal } from './StudyQuizModal';
@@ -235,18 +244,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     settings,
     savedStudyNotes,
     savedPrompts,
+    projects,
     isRunning,
-    liveTrace,
-    pendingProPlan,
-    resolveProPlan,
     pendingApproval,
-    publishCanvas,
-    loadApprovalBefore,
     sendMessage,
     stopRun,
     resolvePendingApproval,
     startNewConversation,
-    forkConversation,
     selectConversation,
     renameConversation,
     deleteConversation,
@@ -256,12 +260,22 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setChatMode,
     setKnowledgeSource,
     setStudyInstructions,
+    setConversationProject,
+    saveProject,
+    deleteProject,
+    updateMessageA2uiState,
     saveStudyNote,
     removeSavedStudyNote,
     savePromptMacro,
     deletePromptMacro,
     runCompareTurn,
     acceptComparedReply,
+    verifyAssistantMessage,
+    editAndRerunUserMessage,
+    regenerateAssistantMessage,
+    forkConversationFromMessage,
+    retryToolCall,
+    updateSettings,
   } = useHubStore();
 
   const [input, setInput] = useState('');
@@ -276,7 +290,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
 
   // MCP @ Resource & / Prompt pickers
-  const commandPicker = useRef<HTMLDivElement>(null);
   const [mcpPickerMode, setMcpPickerMode] = useState<'resource' | 'prompt' | null>(null);
   const [mcpPickerQuery, setMcpPickerQuery] = useState('');
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -291,35 +304,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [vaultOpen, setVaultOpen] = useState(false);
 
   // Pro Canvas & Document Export state
-  const [forkDialog, setForkDialog] = useState<{ mode: 'edit' | 'regenerate'; message: ChatMessage }>();
-  const [forkError, setForkError] = useState('');
-  const [verification, setVerification] = useState<{ answer: ChatMessage; question: string }>();
-  const [projectsOpen, setProjectsOpen] = useState(false);
-  const projectScope = getAccountScope(authUser);
-  const [projectSnapshot, setProjectSnapshot] = useState<{ scope: string; projects: WorkspaceProject[] }>(
-    () => ({ scope: projectScope, projects: listWorkspaceProjects(projectScope) })
-  );
-  useEffect(() => {
-    setProjectsOpen(false);
-    setVerification(undefined);
-    setForkDialog(undefined);
-    setForkError('');
-    setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
-  }, [projectScope]);
-  const projects = projectSnapshot.scope === projectScope ? projectSnapshot.projects : [];
-  const refreshProjects = () => setProjectSnapshot({ scope: projectScope, projects: listWorkspaceProjects(projectScope) });
   const [canvasOpen, setCanvasOpen] = useState(false);
-  const canvasConversation = activeConversationId ?? conversations[0]?.id ?? 'scratch';
-  const canvas = useCanvasWorkspace(getAccountScope(authUser), canvasConversation);
-  useEffect(() => { setCanvasOpen(false); }, [canvasConversation, projectScope]);
-  const canvasArtifact = canvas.artifact;
+  const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
   // Phase 4: Run Trace, Saved Macros & Compare Mode
-  const [traceSheetState, setTraceSheetState] = useState<{ messageId: string; title: string } | null>(null);
+  const [traceSheetState, setTraceSheetState] = useState<{
+    trace: RunTrace;
+    title: string;
+  } | null>(null);
   const [macrosSheetOpen, setMacrosSheetOpen] = useState(false);
-  const [paletteMacro, setPaletteMacro] = useState<SavedPrompt>();
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareModelIds, setCompareModelIds] = useState<string[]>(['demo-sandbox', 'gemini-4-hydrogen']);
   const [compareLastPrompt, setCompareLastPrompt] = useState('');
@@ -354,6 +349,20 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
 
+  // Part 3: Projects, Command Palette, Plan-then-execute, Message Branching & Verify
+  const [projectsModalOpen, setProjectsModalOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [planMode, setPlanMode] = useState(false);
+  const [pendingPlanDraft, setPendingPlanDraft] = useState<{
+    prompt: string;
+    attachments: ChatAttachment[];
+    steps: PlanStepItem[];
+  } | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [editingMsgText, setEditingMsgText] = useState('');
+  const [verifyingMsgId, setVerifyingMsgId] = useState<string | null>(null);
+  const [regenPickerMsgId, setRegenPickerMsgId] = useState<string | null>(null);
+
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -362,8 +371,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const speechTimerRef = useRef<number | null>(null);
 
   const activeConv = conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
-  const activeProject = projectForConversation(projects, activeConv?.id);
   const activeAgent = agents.find((a) => a.id === activeConv?.agentId) ?? agents[0];
+  const activeProject = activeConv?.projectId
+    ? projects.find((p) => p.id === activeConv.projectId) ?? null
+    : null;
   const allCatalogModels = useMemo(() => mergeModelCatalog(dynamicModels), [dynamicModels]);
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeModelShort = getShortModelName(activeModel);
@@ -371,42 +382,52 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const activeChatMode: ChatMode = activeConv?.chatMode ?? 'professional';
   const activeKnowledgeSource: KnowledgeSourceMode = activeConv?.knowledgeSource ?? 'auto';
   const activeStudyInstructions = activeConv?.studyInstructions ?? DEFAULT_STUDY_INSTRUCTIONS;
+  const resolvedA2uiMode: A2uiMode = resolveA2uiMode(settings);
+
+  const cycleA2uiMode = () => {
+    const nextMode: A2uiMode =
+      resolvedA2uiMode === 'smart'
+        ? 'always'
+        : resolvedA2uiMode === 'always'
+          ? 'off'
+          : 'smart';
+    triggerHaptic(settings.hapticsEnabled, 'light');
+    updateSettings({ a2uiMode: nextMode, a2uiEnabled: nextMode !== 'off' });
+  };
 
   const activeSourceOption =
     KNOWLEDGE_SOURCE_OPTIONS.find((o) => o.id === activeKnowledgeSource) ??
     KNOWLEDGE_SOURCE_OPTIONS[0];
 
-  const scopedServers = useMemo(() => projectServers(servers, activeProject), [servers, activeProject]);
-  const { tools } = buildAgentToolCatalog(activeAgent, scopedServers);
+  const { tools } = buildAgentToolCatalog(
+    activeAgent,
+    servers,
+    activeProject?.allowedServerIds ?? null
+  );
   const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
-  const traceHistory = useMemo(() => (activeConv?.messages ?? []).flatMap((message) => {
-    const trace = liveTrace?.messageId === message.id ? liveTrace.trace : message.runTrace;
-    return trace ? [{ id: message.id, trace }] : [];
-  }).reverse(), [activeConv?.messages, liveTrace]);
-  const selectedTrace = traceHistory.find((entry) => entry.id === traceSheetState?.messageId)?.trace ?? null;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
 
   const availableResources = useMemo(() => {
     const items: Array<{ server: McpServerConfig; resource: McpResource }> = [];
-    for (const srv of scopedServers) {
+    for (const srv of servers) {
       if (!srv.enabled || srv.status !== 'connected') continue;
       for (const res of srv.resources) {
         items.push({ server: srv, resource: res });
       }
     }
     return items;
-  }, [scopedServers]);
+  }, [servers]);
 
   const availablePrompts = useMemo(() => {
     const items: Array<{ server: McpServerConfig; prompt: McpPrompt }> = [];
-    for (const srv of scopedServers) {
+    for (const srv of servers) {
       if (!srv.enabled || srv.status !== 'connected') continue;
       for (const prompt of srv.prompts) {
         items.push({ server: srv, prompt });
       }
     }
     return items;
-  }, [scopedServers]);
+  }, [servers]);
 
   const filteredMcpResources = useMemo(() => {
     const q = mcpPickerQuery.trim().toLowerCase();
@@ -437,6 +458,27 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     }
     return map;
   }, [savedStudyNotes]);
+
+  const conversationTraces = useMemo<ConversationTraceEntry[]>(() => {
+    const msgs = activeConv?.messages ?? [];
+    const entries: ConversationTraceEntry[] = [];
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (m.role !== 'assistant' || !m.runTrace) continue;
+      const mModel = getShortModelName(getModelById(m.modelId ?? activeModel.id, dynamicModels));
+      const prevUser = msgs
+        .slice(0, i)
+        .reverse()
+        .find((u) => u.role === 'user');
+      const promptSnippet = (prevUser?.displayContent ?? prevUser?.content ?? 'Turn').slice(0, 36);
+      entries.push({
+        id: m.id,
+        label: `${promptSnippet} · ${mModel}`,
+        trace: m.runTrace,
+      });
+    }
+    return entries;
+  }, [activeConv?.messages, activeModel.id, dynamicModels]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -496,7 +538,15 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   }, [sourceMenuOpen]);
 
   useEffect(() => {
+    const handleGlobalKeyDown = (ev: KeyboardEvent) => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'k') {
+        ev.preventDefault();
+        setCommandPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
     return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
       if (speechTimerRef.current !== null) window.clearTimeout(speechTimerRef.current);
       recognitionRef.current?.stop();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -525,11 +575,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if ((!input.trim() && attachments.length === 0) || isRunning) return;
-    const compareText = compareCommand(input);
-    if (compareText !== undefined) {
-      openCompareCommand(compareText);
-      return;
-    }
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
@@ -543,6 +588,20 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setSourceMenuOpen(false);
     setMcpPickerMode(null);
     triggerHaptic(settings.hapticsEnabled, 'light');
+
+    if (
+      activeChatMode === 'professional' &&
+      planMode &&
+      !compareEnabled &&
+      msg.trim().length > 0
+    ) {
+      setPendingPlanDraft({
+        prompt: msg,
+        attachments: currentAttachments,
+        steps: buildExecutionPlanDraft(msg, activeToolsCount),
+      });
+      return;
+    }
 
     if (compareEnabled && compareModelIds.length > 0) {
       setCompareLastPrompt(msg);
@@ -574,59 +633,25 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     await sendMessage(msg, { attachments: currentAttachments });
   };
 
-  const openCompareCommand = (text = '') => {
-    setCompareEnabled(true);
-    setInput(text);
-    setMcpPickerMode(null);
-    composerRef.current?.focus();
-  };
-
   const handleComposerChange = (value: string) => {
     setInput(value);
-    const command = composerCommand(value);
-    setMcpPickerMode(command?.mode ?? null);
-    setMcpPickerQuery(command?.query ?? '');
-  };
-
-  const selectPaletteMacro = (macro: SavedPrompt) => {
-    setMcpPickerMode(null);
-    const withoutCommand = removeComposerCommand(input);
-    if (extractMacroVariables(macro.template).length) {
-      setInput(withoutCommand);
-      setPaletteMacro(macro);
-      setMacrosSheetOpen(true);
-    } else {
-      setInput([withoutCommand, macro.template].filter(Boolean).join('\n\n'));
-      composerRef.current?.focus();
+    const resMatch = value.match(/(?:^|\s)@([^\s]*)$/);
+    if (resMatch && availableResources.length > 0) {
+      setMcpPickerMode('resource');
+      setMcpPickerQuery(resMatch[1] ?? '');
+      return;
+    }
+    const promptMatch = value.match(/(?:^|\s)\/([^\s]*)$/);
+    if (promptMatch && availablePrompts.length > 0) {
+      setMcpPickerMode('prompt');
+      setMcpPickerQuery(promptMatch[1] ?? '');
+      return;
+    }
+    if (mcpPickerMode) {
+      setMcpPickerMode(null);
+      setMcpPickerQuery('');
     }
   };
-
-  useEffect(() => {
-    const handleKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !canvasOpen) {
-        event.preventDefault();
-        setMcpPickerMode(event.shiftKey ? 'resource' : 'prompt');
-        setMcpPickerQuery('');
-        composerRef.current?.focus();
-        return;
-      }
-      if (!mcpPickerMode || !(event.target === composerRef.current || commandPicker.current?.contains(event.target as Node))) return;
-      if (event.key === 'Escape') {
-        setMcpPickerMode(null);
-        composerRef.current?.focus();
-      } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        const items = Array.from(commandPicker.current?.querySelectorAll<HTMLButtonElement>('[data-command-item]:not(:disabled)') ?? []);
-        if (!items.length) return;
-        event.preventDefault();
-        const current = items.indexOf(document.activeElement as HTMLButtonElement);
-        const next = current < 0 ? (event.key === 'ArrowDown' ? 0 : items.length - 1)
-          : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-        items[next].focus();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [mcpPickerMode, canvasOpen]);
 
   const handleSelectMcpResource = async (server: McpServerConfig, resource: McpResource) => {
     setMcpBusy(true);
@@ -709,13 +734,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     await executeGetMcpPrompt(server, prompt, {});
   };
 
-  const handleQuickPrompt = async (promptText: string, displayText?: string, requireWriteApproval?: boolean) => {
+  const handleQuickPrompt = async (promptText: string, displayText?: string) => {
     if (isRunning) return;
     setStudyPlanOpen(false);
     setSourceMenuOpen(false);
     setMcpPickerMode(null);
     triggerHaptic(settings.hapticsEnabled, 'light');
-    await sendMessage(promptText, { displayText, requireWriteApproval });
+    await sendMessage(promptText, displayText ? { displayText } : undefined);
   };
 
   const handleCycleEffort = () => {
@@ -827,48 +852,77 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
   };
 
-  const handleOpenInCanvas = async (payload: MarkdownCanvasRequest, messageId: string, block: number, link?: CanvasEditLink) => {
-    if (await canvas.open(payload, activeConv?.id ?? 'scratch', messageId, block, link)) {
-      setCanvasOpen(true);
-      triggerHaptic(settings.hapticsEnabled, 'light');
+  const handleOpenInCanvas = (payload: MarkdownCanvasRequest) => {
+    const id = `canvas_${Date.now()}`;
+    if (payload.kind === 'code') {
+      setCanvasArtifact({
+        kind: 'code',
+        id,
+        title: payload.title,
+        language: payload.language,
+        code: payload.code,
+      });
+    } else if (payload.kind === 'app') {
+      setCanvasArtifact({
+        kind: 'app',
+        id,
+        title: payload.title,
+        spec: payload.spec,
+        rawJson: payload.rawJson,
+      });
+    } else if (payload.kind === 'dataset') {
+      setCanvasArtifact({
+        kind: 'dataset',
+        id,
+        title: payload.title,
+        spec: payload.spec,
+      });
+    } else {
+      setCanvasArtifact({
+        kind: 'document',
+        id,
+        title: payload.title,
+        spec: payload.spec,
+        rawJson: payload.rawJson,
+      });
     }
+    setCanvasOpen(true);
+    triggerHaptic(settings.hapticsEnabled, 'light');
   };
 
-  const closeCanvas = () => {
-    void canvas.save();
-    setCanvasOpen(false);
+  const isTabularAttachment = (att: ChatAttachment) =>
+    Boolean(att.textContent) && /\.(csv|tsv|xlsx|xls)$/i.test(att.name);
+
+  const handleAnalyzeDatasetAttachment = (att: ChatAttachment) => {
+    if (!att.textContent) return;
+    const spec = parseDelimitedDataset(att.textContent, att.name);
+    if (!spec) {
+      setUploadError(`Could not parse tabular rows from ${att.name}.`);
+      return;
+    }
+    setCanvasArtifact({
+      kind: 'dataset',
+      id: `canvas_ds_${Date.now()}`,
+      title: spec.title,
+      spec,
+    });
+    setCanvasOpen(true);
+    triggerHaptic(settings.hapticsEnabled, 'light');
   };
 
   const handleToggleHeaderCanvas = () => {
-    if (canvasOpen) {
-      closeCanvas();
-      return;
-    }
     if (canvasArtifact) {
-      setCanvasOpen(true);
+      setCanvasOpen((v) => !v);
       return;
     }
-    void handleOpenInCanvas({
+    setCanvasArtifact({
       kind: 'code',
+      id: `canvas_${Date.now()}`,
       title: 'Pro Canvas Scratchpad',
       language: 'html',
       code: `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <style>\n    body { font-family: system-ui, sans-serif; padding: 24px; background: #f8fafc; color: #0f172a; }\n    .card { max-width: 480px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px; }\n  </style>\n</head>\n<body>\n  <div class="card">\n    <h2>Interactive Pro Canvas</h2>\n    <p>Ask the Pro agent to build HTML widgets, SVG diagrams, PPTX decks, XLSX workbooks, or PDF/DOCX reports.</p>\n  </div>\n</body>\n</html>`,
-    }, 'scratch', 0);
-  };
-
-  const createFork = async (request: ConversationForkRequest) => {
-    if (!activeConv) return;
-    setForkError('');
-    await forkConversation(activeConv.id, request);
-    refreshProjects();
-    setForkDialog(undefined);
-    closeCanvas();
-  };
-
-  const forkFrom = (messageId?: string) => {
-    void createFork({ mode: 'fork', messageId }).catch((error) => {
-      setForkError(error instanceof Error ? error.message : 'Could not fork this chat.');
     });
+    setCanvasOpen(true);
   };
 
   const handleQuickExportPro = async (msgId: string, content: string, format: DocFormat) => {
@@ -936,7 +990,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             conversations={conversations}
             activeConversationId={activeConv?.id ?? null}
             onSelect={selectConversation}
-            onNewChat={() => startNewConversation(activeAgent.id, activeProject ? undefined : activeModel.id, activeProject?.id)}
+            onNewChat={() => startNewConversation(activeAgent.id, activeModel.id)}
             onRename={renameConversation}
             onDelete={deleteConversation}
           />
@@ -1001,7 +1055,22 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               </button>
             </div>
 
-            <div className="flex items-center shrink-0">
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                data-testid="command-palette-btn"
+                onClick={() => setCommandPaletteOpen(true)}
+                aria-label="Open command palette"
+                title="Command Palette (Ctrl/Cmd+K)"
+                style={{
+                  backgroundColor: 'var(--m3-surface-container-high)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[34px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 hover:opacity-90"
+              >
+                <Command className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline font-mono text-[11px]">⌘K</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setHistoryOpen(true)}
@@ -1010,14 +1079,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               >
                 <History className="w-5 h-5" />
               </button>
-              <button type="button" onClick={() => { refreshProjects(); setProjectsOpen(true); }}
-                aria-label="Projects" title={activeProject?.name ?? 'Projects'}
-                className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs font-semibold dark:border-slate-700">
-                {activeProject ? <span className="block max-w-20 truncate sm:max-w-32">{activeProject.name}</span> : 'Projects'}
-              </button>
               <button
                 type="button"
-                onClick={() => startNewConversation(activeAgent.id, activeProject ? undefined : activeModel.id, activeProject?.id)}
+                onClick={() => startNewConversation(activeAgent.id, activeModel.id)}
                 aria-label="New conversation"
                 className="min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
               >
@@ -1025,18 +1089,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               </button>
             </div>
           </div>
-
-          {(Boolean(activeConv?.messages.length) || activeConv?.forkedFrom) && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <button type="button" disabled={isRunning} onClick={() => forkFrom()}
-                className="min-h-[44px] rounded-full border border-slate-200 px-3 dark:border-slate-700">Fork conversation</button>
-              {activeConv?.forkedFrom && conversations.some((conversation) => conversation.id === activeConv.forkedFrom?.conversationId) && (
-                <button type="button" onClick={() => selectConversation(activeConv.forkedFrom!.conversationId)}
-                  className="min-h-[44px] px-2 underline">Open source conversation</button>
-              )}
-              {forkError && <p role="alert" className="text-rose-700 dark:text-rose-300">{forkError}</p>}
-            </div>
-          )}
 
           {/* Row 2: Mode Segmented Tabs (left) + Effort / Study Tools (wraps cleanly on narrow mobile) */}
           <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2">
@@ -1185,29 +1237,116 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               )}
 
               {activeChatMode === 'professional' && (
-                <button
-                  type="button"
-                  data-testid="pro-canvas-toggle-btn"
-                  onClick={handleToggleHeaderCanvas}
-                  aria-pressed={canvasOpen}
-                  style={
-                    canvasOpen
-                      ? {
-                          backgroundColor: 'var(--m3-primary-container)',
-                          color: 'var(--m3-on-primary-container)',
-                          borderColor: 'var(--m3-primary)',
-                        }
-                      : {
-                          backgroundColor: 'var(--m3-surface-container-high)',
-                          borderColor: 'var(--m3-outline)',
-                        }
-                  }
-                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-                >
-                  <PanelRight className="w-3.5 h-3.5" />
-                  <span>Canvas</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    data-testid="pro-plan-toggle"
+                    onClick={() => {
+                      triggerHaptic(settings.hapticsEnabled, 'light');
+                      setPlanMode((v) => !v);
+                    }}
+                    aria-pressed={planMode}
+                    title="Plan-then-execute: draft editable steps before running Pro tasks"
+                    style={
+                      planMode
+                        ? {
+                            backgroundColor: 'var(--m3-primary-container)',
+                            color: 'var(--m3-on-primary-container)',
+                            borderColor: 'var(--m3-primary)',
+                          }
+                        : {
+                            backgroundColor: 'var(--m3-surface-container-high)',
+                            borderColor: 'var(--m3-outline)',
+                          }
+                    }
+                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                  >
+                    <ListChecks className="w-3.5 h-3.5" />
+                    <span>Plan</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="pro-canvas-toggle-btn"
+                    onClick={handleToggleHeaderCanvas}
+                    aria-pressed={canvasOpen}
+                    style={
+                      canvasOpen
+                        ? {
+                            backgroundColor: 'var(--m3-primary-container)',
+                            color: 'var(--m3-on-primary-container)',
+                            borderColor: 'var(--m3-primary)',
+                          }
+                        : {
+                            backgroundColor: 'var(--m3-surface-container-high)',
+                            borderColor: 'var(--m3-outline)',
+                          }
+                    }
+                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                  >
+                    <PanelRight className="w-3.5 h-3.5" />
+                    <span>Canvas</span>
+                  </button>
+                </>
               )}
+
+              {/* Active Project Workspace Pill */}
+              <button
+                type="button"
+                data-testid="project-picker-btn"
+                onClick={() => setProjectsModalOpen(true)}
+                aria-label={`Project workspace: ${activeProject ? activeProject.name : 'None'}`}
+                style={
+                  activeProject
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                        borderColor: 'var(--m3-primary)',
+                      }
+                    : {
+                        backgroundColor: 'var(--m3-surface-container-high)',
+                        borderColor: 'var(--m3-outline)',
+                      }
+                }
+                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+              >
+                <FolderKanban className="w-3.5 h-3.5" />
+                <span className="truncate max-w-[104px]">
+                  {activeProject ? activeProject.name : 'Project'}
+                </span>
+              </button>
+
+              {/* Live A2UI Interactive Widgets Mode Cycler (Smart / Always / Off) */}
+              <button
+                type="button"
+                data-testid="a2ui-toggle-btn"
+                aria-pressed={resolvedA2uiMode !== 'off'}
+                aria-label={`Interactive A2UI widgets: ${resolvedA2uiMode}. Tap to switch mode`}
+                title={`A2UI Mode: ${resolvedA2uiMode.toUpperCase()} (tap to cycle Smart → Always → Off)`}
+                onClick={cycleA2uiMode}
+                style={
+                  resolvedA2uiMode !== 'off'
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                        borderColor: 'var(--m3-primary)',
+                      }
+                    : {
+                        backgroundColor: 'var(--m3-surface-container-high)',
+                        borderColor: 'var(--m3-outline)',
+                      }
+                }
+                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>
+                  {resolvedA2uiMode === 'smart'
+                    ? 'A2UI · Smart'
+                    : resolvedA2uiMode === 'always'
+                      ? 'A2UI · Always'
+                      : 'A2UI · Off'}
+                </span>
+              </button>
 
               {/* Multi-Model Side-by-Side Compare Toggle */}
               <button
@@ -1334,7 +1473,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             results={compareResults}
             lastPrompt={compareLastPrompt}
             isRunning={isRunning}
-            a2uiEnabled={settings.a2uiMode !== 'off'}
+            a2uiEnabled={resolvedA2uiMode !== 'off'}
             onToggleModel={(mId) => {
               setCompareModelIds((prev) => {
                 if (prev.includes(mId)) {
@@ -1468,13 +1607,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             }
 
             if (msg.role === 'user') {
+              const isEditingThis = editingMsgId === msg.id;
               return (
                 <motion.div
                   key={msg.id}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={M3_EMPHASIZED_EASE}
-                  className="max-w-3xl mx-auto flex flex-col items-end gap-1.5"
+                  className="max-w-3xl mx-auto flex flex-col items-end gap-1.5 group"
                 >
                   {msg.attachments && msg.attachments.length > 0 && (
                     <div className="flex flex-wrap justify-end gap-2 max-w-[85%]">
@@ -1487,34 +1627,106 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                             className="w-28 h-28 object-cover rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xs"
                           />
                         ) : (
-                          <span
+                          <div
                             key={att.id}
                             style={{
                               backgroundColor: 'var(--m3-surface-container-high)',
                               borderColor: 'var(--m3-outline)',
                             }}
-                            className="px-3 py-1.5 rounded-xl border text-xs text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5"
+                            className="px-3 py-1.5 rounded-xl border text-xs text-slate-800 dark:text-slate-200 inline-flex items-center gap-2"
                           >
                             <FileText className="w-3.5 h-3.5 shrink-0" />
                             <span className="truncate max-w-[160px]">{att.name}</span>
-                          </span>
+                            {isTabularAttachment(att) && (
+                              <button
+                                type="button"
+                                onClick={() => handleAnalyzeDatasetAttachment(att)}
+                                className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-[10px] font-semibold inline-flex items-center gap-1 hover:bg-blue-700"
+                              >
+                                <FileSpreadsheet className="w-3 h-3" />
+                                <span>Analyze</span>
+                              </button>
+                            )}
+                          </div>
                         )
                       )}
                     </div>
                   )}
-                  <div
-                    style={{
-                      backgroundColor: 'var(--m3-primary)',
-                      color: 'var(--m3-on-primary)',
-                    }}
-                    className="max-w-[86%] rounded-[22px] rounded-br-md px-4 py-2.5 text-[15px] leading-relaxed shadow-xs"
-                  >
-                    {msg.displayContent ?? msg.content}
-                  </div>
-                  <button type="button" disabled={isRunning} onClick={() => setForkDialog({ mode: 'edit', message: msg })}
-                    className="min-h-[44px] rounded-full px-3 text-xs text-slate-600 underline dark:text-slate-300">
-                    Edit and rerun
-                  </button>
+                  {isEditingThis ? (
+                    <div
+                      style={{
+                        backgroundColor: 'var(--m3-surface-container)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="w-full max-w-[92%] rounded-2xl border p-3 space-y-2"
+                    >
+                      <textarea
+                        rows={3}
+                        value={editingMsgText}
+                        onChange={(e) => setEditingMsgText(e.target.value)}
+                        style={{
+                          backgroundColor: 'var(--m3-surface)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="w-full p-2.5 rounded-xl border text-sm text-slate-900 dark:text-white"
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingMsgId(null);
+                            setEditingMsgText('');
+                          }}
+                          className="min-h-[34px] px-3 rounded-full text-xs font-medium text-slate-500 hover:text-slate-800 dark:hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!editingMsgText.trim() || isRunning}
+                          onClick={() => {
+                            const nextText = editingMsgText.trim();
+                            setEditingMsgId(null);
+                            setEditingMsgText('');
+                            void editAndRerunUserMessage(msg.id, nextText);
+                          }}
+                          style={{
+                            backgroundColor: 'var(--m3-primary)',
+                            color: 'var(--m3-on-primary)',
+                          }}
+                          className="min-h-[34px] px-4 rounded-full text-xs font-semibold disabled:opacity-50"
+                        >
+                          Save & Rerun
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div
+                        style={{
+                          backgroundColor: 'var(--m3-primary)',
+                          color: 'var(--m3-on-primary)',
+                        }}
+                        className="max-w-[86%] rounded-[22px] rounded-br-md px-4 py-2.5 text-[15px] leading-relaxed shadow-xs"
+                      >
+                        {msg.displayContent ?? msg.content}
+                      </div>
+                      {!isRunning && (
+                        <button
+                          type="button"
+                          data-testid={`edit-user-msg-${msg.id}`}
+                          onClick={() => {
+                            setEditingMsgId(msg.id);
+                            setEditingMsgText(msg.displayContent ?? msg.content);
+                          }}
+                          className="min-h-[28px] px-2 rounded-full text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 opacity-80 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span>Edit</span>
+                        </button>
+                      )}
+                    </>
+                  )}
                 </motion.div>
               );
             }
@@ -1577,12 +1789,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   durationMs={msg.thinkingDurationMs}
                 />
 
-                {msg.proTaskPlan && (
-                  <ProTaskPlanCard plan={msg.proTaskPlan}
-                    onApprove={pendingProPlan?.messageId === msg.id ? resolveProPlan : undefined}
-                    onCancel={() => resolveProPlan(null)} />
-                )}
-
                 {msg.toolCalls && msg.toolCalls.length > 0 && (
                   <div className="space-y-1">
                     {msg.toolCalls.map((tc) => (
@@ -1612,11 +1818,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     >
                       <MarkdownRenderer
                         content={msg.content}
-                        a2uiEnabled={settings.a2uiMode !== 'off'}
-                        a2uiStorageKey={JSON.stringify([authUser?.id ?? 'guest', activeConv?.id, msg.id])}
-                        isStreaming={msg.isStreaming}
-                        a2uiMaxWidgets={msg.a2uiMaxWidgets ?? (msg.isStreaming ? 3 : undefined)}
-                        onA2UIAction={isRunning ? undefined : (promptText, displayLabel) => {
+                        a2uiEnabled={resolvedA2uiMode !== 'off'}
+                        a2uiWidgetState={msg.a2uiWidgetState}
+                        onUpdateA2uiWidgetState={(patch) => updateMessageA2uiState(msg.id, patch)}
+                        onToggleA2ui={() => updateSettings({ a2uiMode: 'smart', a2uiEnabled: true })}
+                        onA2UIAction={(promptText, displayLabel) => {
                           void handleQuickPrompt(promptText, displayLabel);
                         }}
                         onOpenInteractiveFlashcards={() =>
@@ -1625,7 +1831,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         onOpenInteractiveQuiz={() =>
                           openQuizFromText(activeConv?.title || 'Practice Quiz', msg.content)
                         }
-                        onOpenInCanvas={(payload, block) => void handleOpenInCanvas(payload, msg.id, block, msg.canvasEdit)}
+                        onOpenInCanvas={handleOpenInCanvas}
                       />
 
                       {msg.citations && msg.citations.length > 0 && (
@@ -1761,26 +1967,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           <span>{copiedMsgId === msg.id ? 'Copied' : 'Copy'}</span>
                         </button>
 
-                        {!msg.isStreaming && (
-                          <button type="button" onClick={() => {
-                            const request = activeConv?.messages.slice(0, msgIdx).filter((message) => message.role === 'user').at(-1);
-                            setVerification({ answer: msg, question: request?.content ?? '' });
-                          }} className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs font-semibold dark:border-slate-700">
-                            Verify
-                          </button>
-                        )}
-                        {!msg.isStreaming && <>
-                          <button type="button" disabled={isRunning} onClick={() => setForkDialog({ mode: 'regenerate', message: msg })}
-                            className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs dark:border-slate-700">
-                            Regenerate
-                          </button>
-                          <button type="button" disabled={isRunning} onClick={() => forkFrom(msg.id)}
-                            className="min-h-[44px] rounded-full border border-slate-200 px-3 text-xs dark:border-slate-700">
-                            Fork here
-                          </button>
-                        </>}
-
-
                         <button
                           type="button"
                           onClick={() => handleSpeakMessage(msg.id, msg.content)}
@@ -1803,6 +1989,92 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         >
                           <Share2 className="w-3.5 h-3.5" />
                           <span>Share</span>
+                        </button>
+
+                        {/* Verify Reply with 2nd Model */}
+                        <button
+                          type="button"
+                          data-testid="verify-msg-btn"
+                          disabled={isRunning || verifyingMsgId === msg.id}
+                          onClick={() => {
+                            setVerifyingMsgId(msg.id);
+                            void verifyAssistantMessage(msg.id).finally(() => setVerifyingMsgId(null));
+                          }}
+                          aria-label="Verify response accuracy"
+                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                        >
+                          {verifyingMsgId === msg.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                          )}
+                          <span>{verifyingMsgId === msg.id ? 'Verifying…' : 'Verify'}</span>
+                        </button>
+
+                        {/* Regenerate (or pick different model) */}
+                        <div className="relative inline-flex items-center">
+                          <button
+                            type="button"
+                            data-testid="regen-msg-btn"
+                            disabled={isRunning}
+                            onClick={() =>
+                              setRegenPickerMsgId((curr) => (curr === msg.id ? null : msg.id))
+                            }
+                            aria-label="Regenerate response"
+                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Regen</span>
+                          </button>
+                          {regenPickerMsgId === msg.id && (
+                            <div
+                              style={{
+                                backgroundColor: 'var(--m3-surface-container-high)',
+                                borderColor: 'var(--m3-outline)',
+                              }}
+                              className="absolute left-0 bottom-full mb-1.5 z-30 w-56 rounded-2xl border p-1.5 shadow-xl space-y-0.5"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRegenPickerMsgId(null);
+                                  void regenerateAssistantMessage(msg.id);
+                                }}
+                                className="w-full min-h-[36px] px-2.5 rounded-xl text-left text-xs font-semibold text-slate-900 dark:text-white hover:bg-slate-200/60 dark:hover:bg-slate-800/70"
+                              >
+                                Retry with {activeModelShort}
+                              </button>
+                              <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                Or try another model
+                              </div>
+                              {allCatalogModels.slice(0, 6).map((m) => (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setRegenPickerMsgId(null);
+                                    void regenerateAssistantMessage(msg.id, m.id);
+                                  }}
+                                  className="w-full min-h-[34px] px-2.5 rounded-xl text-left text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800/70 truncate"
+                                >
+                                  {getShortModelName(m)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Fork Conversation Branch */}
+                        <button
+                          type="button"
+                          data-testid="fork-msg-btn"
+                          disabled={isRunning}
+                          onClick={() => void forkConversationFromMessage(msg.id)}
+                          aria-label="Fork conversation from this reply"
+                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                        >
+                          <GitFork className="w-3.5 h-3.5" />
+                          <span>Fork</span>
                         </button>
 
                         {(msg.chatMode ?? activeChatMode) === 'professional' && (
@@ -1837,6 +2109,37 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                             })}
                           </div>
                         )}
+                      </div>
+                    )}
+
+                    {/* Second-Model Verification Result Card */}
+                    {msg.verification && (
+                      <div
+                        data-testid="msg-verification-card"
+                        className={`rounded-2xl border px-3.5 py-2.5 text-xs space-y-1 ${
+                          msg.verification.verdict === 'verified'
+                            ? 'border-emerald-300/70 dark:border-emerald-800/70 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200'
+                            : msg.verification.verdict === 'issues'
+                              ? 'border-rose-300/70 dark:border-rose-800/70 bg-rose-50/70 dark:bg-rose-950/30 text-rose-900 dark:text-rose-200'
+                              : 'border-amber-300/70 dark:border-amber-800/70 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 font-semibold">
+                          <span className="inline-flex items-center gap-1.5 uppercase tracking-wide text-[11px]">
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>
+                              {msg.verification.verdict === 'verified'
+                                ? 'Verified'
+                                : msg.verification.verdict === 'issues'
+                                  ? 'Issues Flagged'
+                                  : 'Caution / Review'}
+                            </span>
+                          </span>
+                          <span className="text-[11px] opacity-80 font-normal">
+                            Reviewed by {getShortModelName(getModelById(msg.verification.modelId, dynamicModels))}
+                          </span>
+                        </div>
+                        <p className="leading-relaxed whitespace-pre-wrap">{msg.verification.summary}</p>
                       </div>
                     )}
 
@@ -1912,10 +2215,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   </div>
                 )}
 
-                {(msg.runTrace || liveTrace?.messageId === msg.id) && (
-                  <RunTraceChip
-                    trace={liveTrace?.messageId === msg.id ? liveTrace.trace : msg.runTrace!}
-                    onOpen={() => setTraceSheetState({ messageId: msg.id, title: `${msgModelShort} · ${activeAgent.name}` })}
+                {msg.runTrace && (
+                  <InlineRunTraceBar
+                    trace={msg.runTrace}
+                    dynamicModels={dynamicModels}
+                    onOpenFullWaterfall={() =>
+                      setTraceSheetState({
+                        trace: msg.runTrace!,
+                        title: `${msgModelShort} · ${activeAgent.name}`,
+                      })
+                    }
                   />
                 )}
 
@@ -1947,13 +2256,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             <WriteApprovalBanner
               key={pendingApproval.toolCallId}
               approval={pendingApproval}
-              loadBefore={loadApprovalBefore}
               onDecision={(resolution) => {
                 triggerHaptic(
                   settings.hapticsEnabled,
                   resolution.decision === 'deny' ? 'warning' : 'success'
                 );
-                resolvePendingApproval(resolution, pendingApproval.toolCallId);
+                resolvePendingApproval(resolution);
               }}
             />
           )}
@@ -1962,6 +2270,144 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         {speechNotice && (
           <div className="px-4 pb-1 text-center text-xs text-slate-500 dark:text-slate-400">
             {speechNotice}
+          </div>
+        )}
+
+        {/* Inline Editable Plan-Then-Execute Card */}
+        {pendingPlanDraft && (
+          <div className="px-3 sm:px-6 pb-2">
+            <div
+              data-testid="execution-plan-card"
+              style={{
+                backgroundColor: 'var(--m3-surface-container)',
+                borderColor: 'var(--m3-primary)',
+              }}
+              className="max-w-3xl mx-auto rounded-2xl border p-3.5 space-y-2.5 shadow-sm"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+                  <ListChecks className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span>Execution Plan — Review & Edit Before Running</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPlanDraft((curr) =>
+                      curr
+                        ? {
+                            ...curr,
+                            steps: [
+                              ...curr.steps,
+                              {
+                                id: `plan_${Date.now()}`,
+                                title: 'Additional step',
+                                done: false,
+                              },
+                            ],
+                          }
+                        : null
+                    );
+                  }}
+                  className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3" /> Add step
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {pendingPlanDraft.steps.map((step, sIdx) => (
+                  <div key={step.id} className="flex items-center gap-2">
+                    <span className="text-[11px] font-mono text-slate-400 w-5 shrink-0">
+                      {sIdx + 1}.
+                    </span>
+                    <input
+                      type="text"
+                      value={step.title}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setPendingPlanDraft((curr) =>
+                          curr
+                            ? {
+                                ...curr,
+                                steps: curr.steps.map((st, idx) =>
+                                  idx === sIdx ? { ...st, title: val } : st
+                                ),
+                              }
+                            : null
+                        );
+                      }}
+                      style={{
+                        backgroundColor: 'var(--m3-surface)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="flex-1 min-h-[34px] px-2.5 rounded-xl border text-xs text-slate-900 dark:text-white"
+                    />
+                    {pendingPlanDraft.steps.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPendingPlanDraft((curr) =>
+                            curr
+                              ? { ...curr, steps: curr.steps.filter((_, idx) => idx !== sIdx) }
+                              : null
+                          )
+                        }
+                        aria-label="Remove plan step"
+                        className="text-slate-400 hover:text-rose-500 p-1"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInput(pendingPlanDraft.prompt);
+                    setAttachments(pendingPlanDraft.attachments);
+                    setPendingPlanDraft(null);
+                  }}
+                  className="min-h-[36px] px-3 rounded-full text-xs font-medium text-slate-500 hover:text-slate-800 dark:hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const draft = pendingPlanDraft;
+                    setPendingPlanDraft(null);
+                    void sendMessage(draft.prompt, { attachments: draft.attachments });
+                  }}
+                  style={{
+                    backgroundColor: 'var(--m3-surface-container-high)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="min-h-[36px] px-3.5 rounded-full border text-xs font-semibold text-slate-700 dark:text-slate-200"
+                >
+                  Run Direct
+                </button>
+                <button
+                  type="button"
+                  data-testid="approve-plan-execute-btn"
+                  onClick={() => {
+                    const draft = pendingPlanDraft;
+                    setPendingPlanDraft(null);
+                    void sendMessage(buildPlanGuidedPrompt(draft.prompt, draft.steps), {
+                      attachments: draft.attachments,
+                      displayText: draft.prompt,
+                    });
+                  }}
+                  style={{
+                    backgroundColor: 'var(--m3-primary)',
+                    color: 'var(--m3-on-primary)',
+                  }}
+                  className="min-h-[36px] px-4 rounded-full text-xs font-semibold"
+                >
+                  Approve & Execute
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -1975,7 +2421,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             ref={fileInputRef}
             type="file"
             multiple
-            accept="image/*,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.pdf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,.log"
+            accept="image/*,.txt,.md,.markdown,.csv,.tsv,.xlsx,.xls,.json,.yaml,.yml,.pdf,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,.log"
             className="hidden"
             onChange={(e) => {
               if (e.target.files?.length) {
@@ -2053,7 +2499,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: 6, scale: 0.98 }}
                   transition={M3_EMPHASIZED_EASE}
-                  ref={commandPicker}
                   data-testid={`mcp-${mcpPickerMode}-popover`}
                   style={{
                     backgroundColor: 'var(--m3-surface-container-high)',
@@ -2063,13 +2508,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 >
                   <div className="flex items-center justify-between px-3 py-1.5">
                     <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                      {mcpPickerMode === 'resource' ? 'Attach MCP resource (@)' : 'Commands and saved prompts (/)'}
+                      {mcpPickerMode === 'resource' ? 'Attach MCP Resource (@)' : 'Insert MCP Prompt (/)'}
                     </span>
                     <button
                       type="button"
                       onClick={() => setMcpPickerMode(null)}
                       aria-label="Close MCP picker"
-                      className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                      className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -2082,20 +2527,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     </div>
                   )}
 
-                  {mcpPickerMode === 'prompt' && <>
-                    {'compare'.includes(mcpPickerQuery.toLowerCase()) && (
-                      <button type="button" data-command-item onClick={() => openCompareCommand(removeComposerCommand(input))}
-                        className="w-full min-h-[44px] rounded-xl px-3 text-left text-xs font-semibold hover:bg-slate-200 dark:hover:bg-slate-800">
-                        /compare · Compare models
-                      </button>
-                    )}
-                    {matchingPromptMacros(savedPrompts, mcpPickerQuery).map((macro) => (
-                      <button key={macro.id} type="button" data-command-item onClick={() => selectPaletteMacro(macro)}
-                        className="w-full min-h-[44px] rounded-xl px-3 text-left text-xs font-semibold hover:bg-slate-200 dark:hover:bg-slate-800">
-                        {macro.title}<span className="ml-2 font-normal text-slate-600 dark:text-slate-300">Saved prompt</span>
-                      </button>
-                    ))}
-                  </>}
                   {mcpPickerMode === 'resource' ? (
                     filteredMcpResources.length === 0 ? (
                       <div className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
@@ -2105,7 +2536,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       filteredMcpResources.map(({ server, resource }) => (
                         <button
                           key={`${server.id}:${resource.uri}`}
-                          type="button" data-command-item
+                          type="button"
                           onClick={() => void handleSelectMcpResource(server, resource)}
                           className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left hover:bg-slate-200/60 dark:hover:bg-slate-800/70 transition-colors"
                         >
@@ -2126,7 +2557,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     filteredMcpPrompts.map(({ server, prompt }) => (
                       <button
                         key={`${server.id}:${prompt.name}`}
-                        type="button" data-command-item
+                        type="button"
                         onClick={() => void handleSelectMcpPrompt(server, prompt)}
                         className="w-full min-h-[44px] px-3 py-2 rounded-xl text-left hover:bg-slate-200/60 dark:hover:bg-slate-800/70 transition-colors"
                       >
@@ -2180,6 +2611,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         <div className="truncate font-medium">{att.name}</div>
                         <div className="text-[10px] text-slate-500">{formatFileSize(att.size)}</div>
                       </div>
+                      {isTabularAttachment(att) && (
+                        <button
+                          type="button"
+                          onClick={() => handleAnalyzeDatasetAttachment(att)}
+                          title="Open tabular explorer in Canvas"
+                          className="min-h-[24px] px-2 rounded-full bg-blue-600 text-white text-[10px] font-semibold inline-flex items-center gap-1 hover:bg-blue-700"
+                        >
+                          <FileSpreadsheet className="w-3 h-3" />
+                          <span>Analyze</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleRemoveAttachment(att.id)}
@@ -2190,6 +2632,19 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       </button>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {shouldOfferProPlan(input, activeChatMode) && !planMode && !pendingPlanDraft && (
+                <div className="px-1 flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  <span>Multi-step Pro task detected — want to review a plan first?</span>
+                  <button
+                    type="button"
+                    onClick={() => setPlanMode(true)}
+                    className="font-semibold text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+                  >
+                    Enable Plan Mode
+                  </button>
                 </div>
               )}
 
@@ -2209,11 +2664,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     setMcpPickerMode(null);
                     return;
                   }
-                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
-                    const first = mcpPickerMode && commandPicker.current?.querySelector<HTMLButtonElement>('[data-command-item]:not(:disabled)');
-                    if (first) first.click();
-                    else void handleSend();
+                    void handleSend();
                   }
                 }}
                 placeholder={
@@ -2308,16 +2761,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     </button>
                   )}
 
-                  <button
+                  {availablePrompts.length > 0 && (
+                    <button
                       type="button"
                       data-testid="mcp-prompt-picker-btn"
                       onClick={() => {
                         setMcpPickerQuery('');
                         setMcpPickerMode((m) => (m === 'prompt' ? null : 'prompt'));
                       }}
-                      aria-label="Open command palette"
-                      aria-keyshortcuts="Control+K Meta+K"
-                      title="Commands (/) · Ctrl/Cmd+K"
+                      aria-label="Insert MCP prompt template"
+                      title="Insert MCP prompt (/)"
                       style={{
                         backgroundColor: 'var(--m3-surface-container)',
                         borderColor: 'var(--m3-outline)',
@@ -2325,8 +2778,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
                     >
                       <Terminal className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Commands</span>
-                  </button>
+                      <span className="hidden sm:inline">Prompt</span>
+                    </button>
+                  )}
 
                   {activeKnowledgeSource === 'uploaded' && attachments.length === 0 && (
                     <button
@@ -2404,55 +2858,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         open={canvasOpen}
         artifact={canvasArtifact}
         isRunning={isRunning}
-        githubConnected={servers.some((server) => server.url === 'virtual://github-api' && server.enabled && server.status === 'connected')}
+        githubConnected={Boolean(
+          servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')?.status ===
+            'connected'
+        )}
         onRequestConnectGithub={() => setGithubConnectOpen(true)}
-        onPublish={async (request) => {
-          closeCanvas();
-          const scope = getAccountScope(authUser);
-          const result = await publishCanvas(request);
-          if (getAccountScope(useHubStore.getState().authUser) === scope) setCanvasOpen(true);
-          return result;
+        onChangeArtifact={setCanvasArtifact}
+        onAskCanvasAction={(promptText, label) => {
+          void handleQuickPrompt(promptText, label);
         }}
-        onChangeArtifact={canvas.change}
-        revisions={canvas.revisions}
-        historyError={canvas.storageError}
-        onSaveRevision={() => void canvas.save('Saved version')}
-        onRestoreRevision={canvas.restore}
-        onAskCanvasEdit={(prompt, label) => {
-          if (!canvasArtifact || isRunning) return;
-          closeCanvas();
-          void sendMessage(prompt, { displayText: label, canvasEdit: {
-            artifactId: canvasArtifact.id,
-            kind: canvasArtifact.kind,
-            format: canvasArtifact.kind === 'document' ? canvasArtifact.spec.format : undefined,
-          } });
-        }}
-        onAskCanvasAction={(promptText, label, requireWriteApproval) => {
-          void handleQuickPrompt(promptText, label, requireWriteApproval);
-        }}
-        onClose={closeCanvas}
-      />
-
-      {forkDialog && <ConversationForkSheet key={forkDialog.message.id}
-        mode={forkDialog.mode} message={forkDialog.message}
-        models={allCatalogModels.filter((model) => model.isFreeTier && model.id !== (forkDialog.message.modelId ?? activeModel.id) &&
-          (model.provider === 'demo' || Boolean(getApiKeyForProvider(model.provider, providerKeys))))}
-        onClose={() => setForkDialog(undefined)} onConfirm={createFork} />}
-
-      {verification && <VerificationSheet key={verification.answer.id}
-        answer={verification.answer} question={verification.question} keys={providerKeys}
-        models={eligibleReviewModels(allCatalogModels, providerKeys, verification.answer.modelId ?? activeModel.id)}
-        onClose={() => setVerification(undefined)} />}
-
-      <ProjectsSheet key={projectScope}
-        open={projectsOpen} scope={projectScope} currentConversation={activeConv?.id}
-        projects={projects} agents={agents} servers={servers}
-        onClose={() => setProjectsOpen(false)} onUpdate={refreshProjects}
-        onUse={(project) => { if (project.defaultAgentId) setActiveAgent(project.defaultAgentId); }}
-        onNewChat={(project) => {
-          startNewConversation(project.defaultAgentId, undefined, project.id);
-          refreshProjects();
-        }}
+        onClose={() => setCanvasOpen(false)}
       />
 
       <QuickConnectSheet
@@ -2490,7 +2905,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         conversations={conversations}
         activeConversationId={activeConv?.id ?? null}
         onSelect={selectConversation}
-        onNewChat={() => startNewConversation(activeAgent.id, activeProject ? undefined : activeModel.id, activeProject?.id)}
+        onNewChat={() => startNewConversation(activeAgent.id, activeModel.id)}
         onRename={renameConversation}
         onDelete={deleteConversation}
       />
@@ -2629,29 +3044,67 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
       <RunTraceSheet
         open={Boolean(traceSheetState)}
-        trace={selectedTrace}
+        trace={traceSheetState?.trace ?? null}
         messageTitle={traceSheetState?.title}
-        history={traceHistory}
-        selectedId={traceSheetState?.messageId}
-        onSelect={(messageId) => setTraceSheetState((current) => current ? { ...current, messageId } : null)}
-        onRetry={isRunning ? undefined : (retryToolCall) => {
-          setTraceSheetState(null);
-          void sendMessage(`Retry tool call: ${retryToolCall.toolName}`, { retryToolCall });
-        }}
+        dynamicModels={dynamicModels}
+        conversationTraces={conversationTraces}
+        onSelectTrace={(entry) =>
+          setTraceSheetState({
+            trace: entry.trace,
+            title: entry.label,
+          })
+        }
+        onRetryToolCall={retryToolCall}
         onClose={() => setTraceSheetState(null)}
       />
 
-      <PromptMacrosSheet key={paletteMacro?.id ?? 'library'}
+      <PromptMacrosSheet
         open={macrosSheetOpen}
         macros={savedPrompts}
-        initialMacro={paletteMacro}
-        onClose={() => { setMacrosSheetOpen(false); setPaletteMacro(undefined); }}
+        onClose={() => setMacrosSheetOpen(false)}
         onInsertMacro={(resolved) => {
           setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${resolved}` : resolved));
           setTimeout(() => composerRef.current?.focus(), 40);
         }}
         onSaveMacro={savePromptMacro}
         onDeleteMacro={deletePromptMacro}
+      />
+
+      <ProjectsModal
+        open={projectsModalOpen}
+        onClose={() => setProjectsModalOpen(false)}
+        projects={projects}
+        activeProjectId={activeConv?.projectId ?? null}
+        agents={agents}
+        servers={servers}
+        onSelectProject={(projectId) => setConversationProject(projectId)}
+        onSaveProject={saveProject}
+        onDeleteProject={deleteProject}
+      />
+
+      <CommandPaletteModal
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        savedPrompts={savedPrompts}
+        servers={servers}
+        projects={projects}
+        onInsertPrompt={(text) => {
+          setInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text));
+          setTimeout(() => composerRef.current?.focus(), 40);
+        }}
+        onSwitchMode={(mode) => setChatMode(mode)}
+        onSelectProject={(projectId) => setConversationProject(projectId)}
+        onStartNewChat={() => startNewConversation(activeAgent.id, activeModel.id)}
+        onToggleCompare={() => setCompareEnabled((v) => !v)}
+        onOpenTrace={() => {
+          if (conversationTraces[0]) {
+            setTraceSheetState({
+              trace: conversationTraces[conversationTraces.length - 1].trace,
+              title: conversationTraces[conversationTraces.length - 1].label,
+            });
+          }
+        }}
+        onOpenCanvas={handleToggleHeaderCanvas}
       />
     </div>
   );

@@ -92,99 +92,131 @@ export function parseAppArtifactBlock(language: string, rawCode: string): AppArt
   };
 }
 
-const STORAGE_SHIM_SCRIPT = `<script>
-(function installCanvasStorage() {
-  function storage() {
-    var values = new Map();
+export const CANVAS_IFRAME_SANDBOX =
+  'allow-scripts allow-forms allow-modals allow-popups allow-downloads';
+
+export const STORAGE_SHIM_SCRIPT = `<script data-mcphub-shim="storage">
+(function(){
+  function makeMemStorage() {
+    var store = Object.create(null);
     return {
-      get length() { return values.size; },
-      key: function(index) {
-        return Array.from(values.keys())[Number(index) >>> 0] ?? null;
-      },
-      getItem: function(key) { return values.get(String(key)) ?? null; },
-      setItem: function(key, value) { values.set(String(key), String(value)); },
-      removeItem: function(key) { values.delete(String(key)); },
-      clear: function() { values.clear(); }
+      get length() { return Object.keys(store).length; },
+      key: function(i) { var keys = Object.keys(store); return i >= 0 && i < keys.length ? keys[i] : null; },
+      getItem: function(k) { var key = String(k); return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null; },
+      setItem: function(k, v) { store[String(k)] = String(v); },
+      removeItem: function(k) { delete store[String(k)]; },
+      clear: function() { store = Object.create(null); }
     };
   }
-  ['localStorage', 'sessionStorage'].forEach(function(name) {
-    try { void window[name].length; }
-    catch {
-      Object.defineProperty(window, name, { configurable: true, value: storage() });
+  function ensureStorage(name) {
+    try {
+      var s = window[name];
+      if (!s) throw new Error('missing');
+      var testKey = '__mcphub_test__';
+      s.setItem(testKey, '1');
+      s.removeItem(testKey);
+    } catch (e) {
+      try {
+        Object.defineProperty(window, name, {
+          configurable: true,
+          enumerable: true,
+          value: makeMemStorage()
+        });
+      } catch (inner) {}
     }
-  });
-  try { void document.cookie; }
-  catch {
-    var cookies = new Map();
-    Object.defineProperty(document, 'cookie', {
-      configurable: true,
-      get: function() {
-        return Array.from(cookies, function(entry) { return entry.join('='); }).join('; ');
-      },
-      set: function(value) {
-        var parts = String(value).split(';');
-        var separator = parts[0].indexOf('=');
-        if (separator < 1) return;
-        var key = parts[0].slice(0, separator).trim();
-        var attributes = parts.slice(1).map(function(part) { return part.trim(); });
-        var maxAge = attributes.find(function(part) { return /^max-age=/i.test(part); });
-        var expires = attributes.find(function(part) { return /^expires=/i.test(part); });
-        if ((maxAge && Number(maxAge.slice(8)) <= 0) ||
-            (!maxAge && expires && Date.parse(expires.slice(8)) <= Date.now())) cookies.delete(key);
-        else cookies.set(key, parts[0].slice(separator + 1).trim());
-      }
-    });
+  }
+  ensureStorage('localStorage');
+  ensureStorage('sessionStorage');
+  try {
+    void document.cookie;
+  } catch (e) {
+    var cookieJar = Object.create(null);
+    try {
+      Object.defineProperty(document, 'cookie', {
+        configurable: true,
+        get: function() {
+          return Object.keys(cookieJar).map(function(k){ return k + '=' + cookieJar[k]; }).join('; ');
+        },
+        set: function(val) {
+          var str = String(val || '');
+          var first = str.split(';')[0] || '';
+          var eq = first.indexOf('=');
+          if (eq > 0) {
+            var k = first.slice(0, eq).trim();
+            var v = first.slice(eq + 1).trim();
+            if (v === '' || /max-age\\s*=\\s*0/i.test(str)) {
+              delete cookieJar[k];
+            } else {
+              cookieJar[k] = v;
+            }
+          }
+        }
+      });
+    } catch (inner) {}
   }
 })();
 </script>`;
 
-const RUNTIME_BRIDGE_SCRIPT = `<script>
+const RUNTIME_BRIDGE_SCRIPT = `<script data-mcphub-bridge="runtime">
 (function(){
+  if (!window.__mcpCanvasRenderListenerHooked) {
+    window.__mcpCanvasRenderListenerHooked = true;
+    window.addEventListener('message', function(ev) {
+      if (ev.source !== window.parent) return;
+      var data = ev.data;
+      if (data && data.type === 'mcphub-canvas-render' && typeof data.html === 'string') {
+        document.open();
+        document.write(data.html);
+        document.close();
+      }
+    });
+  }
   if (window.__mcpCanvasRuntimeHooked) return;
   window.__mcpCanvasRuntimeHooked = true;
-  function send(level, msg, blocking) {
-    window.parent.postMessage({
-      source: 'mcphub-canvas-runtime',
-      level: level,
-      message: String(msg || '').slice(0, 1000),
-      timestamp: Date.now(),
-      blocking: Boolean(blocking)
-    }, '*');
+  function send(level, msg) {
+    try {
+      window.parent.postMessage({
+        source: 'mcphub-canvas-runtime',
+        level: level,
+        message: String(msg || ''),
+        timestamp: Date.now()
+      }, '*');
+    } catch (e) {}
   }
-  window.addEventListener('load', function() {
-    window.parent.postMessage({ source: 'mcphub-canvas-runtime', type: 'loaded' }, '*');
-  }, { once: true });
   window.addEventListener('error', function(ev) {
-    var target = ev.target;
-    if (target && target !== window && target.tagName) {
-      var url = target.currentSrc || target.src || target.href;
-      var blocking = target.tagName === 'SCRIPT' || (target.tagName === 'LINK' && target.rel === 'stylesheet');
-      send(blocking ? 'error' : 'warn', 'Failed to load ' + target.tagName.toLowerCase() + (url ? ': ' + url : ''), blocking);
+    if (ev && ev.target && ev.target !== window && !(ev instanceof ErrorEvent)) {
+      var el = ev.target;
+      var tag = el.tagName ? el.tagName.toLowerCase() : 'resource';
+      var resUrl = el.src || el.href || '';
+      send('error', 'Failed to load ' + tag + (resUrl ? ': ' + resUrl : ''));
       return;
     }
-    send('error', (ev.message || 'Runtime error') + (ev.lineno ? ' (line ' + ev.lineno + ')' : ''), true);
+    send('error', (ev.message || 'Runtime error') + (ev.lineno ? ' (line ' + ev.lineno + ')' : ''));
   }, true);
   window.addEventListener('unhandledrejection', function(ev) {
     var reason = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason || 'Unhandled promise rejection');
-    send('error', reason, true);
+    send('error', reason);
   });
-  document.addEventListener('securitypolicyviolation', function(ev) {
-    var blocking = ev.disposition === 'enforce' &&
-      (ev.effectiveDirective === 'script-src-elem' || ev.effectiveDirective === 'script-src-attr' ||
-       ev.effectiveDirective === 'form-action');
-    send(blocking ? 'error' : 'warn', ev.effectiveDirective + ' blocked ' + (ev.blockedURI || 'a request'), blocking);
+  window.addEventListener('securitypolicyviolation', function(ev) {
+    var directive = ev.violatedDirective || ev.effectiveDirective || 'csp';
+    var blocked = ev.blockedURI || 'inline';
+    var line = ev.lineNumber ? ' (line ' + ev.lineNumber + ')' : '';
+    send('error', 'CSP blocked ' + directive + ': ' + blocked + line);
   });
-  ['error', 'warn'].forEach(function(level) {
-    var original = console[level];
-    console[level] = function() {
-      var message = Array.from(arguments, function(value) {
-        try { return typeof value === 'object' ? JSON.stringify(value) : String(value); }
-        catch { return String(value); }
-      }).join(' ');
-      send(level, message, false);
-      return original.apply(console, arguments);
-    };
-  });
+  var origErr = console.error;
+  console.error = function() {
+    send('error', Array.prototype.slice.call(arguments).map(function(a){
+      return typeof a === 'object' ? JSON.stringify(a) : String(a);
+    }).join(' '));
+    return origErr.apply(console, arguments);
+  };
+  var origWarn = console.warn;
+  console.warn = function() {
+    send('warn', Array.prototype.slice.call(arguments).map(function(a){
+      return typeof a === 'object' ? JSON.stringify(a) : String(a);
+    }).join(' '));
+    return origWarn.apply(console, arguments);
+  };
 })();
 </script>`;
 
@@ -216,7 +248,6 @@ export function buildAppPreviewSrcDoc(
   options?: { includeRuntimeBridge?: boolean }
 ): string {
   const includeBridge = options?.includeRuntimeBridge !== false;
-  const previewScripts = includeBridge ? STORAGE_SHIM_SCRIPT + '\n' + RUNTIME_BRIDGE_SCRIPT : '';
   const entryTarget = spec.entryFile?.toLowerCase();
   const htmlEntry =
     (entryTarget
@@ -238,7 +269,7 @@ export function buildAppPreviewSrcDoc(
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>${escapeHtml(spec.title)}</title>
-${previewScripts}
+${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
 <style>
   body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; color: #0f172a; padding: 24px; }
   .shell { max-width: 680px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px; }
@@ -330,56 +361,17 @@ ${previewScripts}
       : `${html}\n${scriptTags}`;
   }
 
-  if (includeBridge) {
-    // A malformed fragment may put code ahead of its head. Keep only the doctype ahead of the shim.
-    html = html.replace(/^(\s*(?:<!doctype[^>]*>\s*)?(?:<html\b[^>]*>\s*)?(?:<head\b[^>]*>\s*)?)/i,
-      (prefix) => `${prefix}${previewScripts}\n`);
+  const preloadScripts = includeBridge
+    ? `${STORAGE_SHIM_SCRIPT}\n${RUNTIME_BRIDGE_SCRIPT}`
+    : STORAGE_SHIM_SCRIPT;
+
+  if (/<head[^>]*>/i.test(html)) {
+    html = html.replace(/<head[^>]*>/i, (m) => `${m}\n${preloadScripts}`);
+  } else {
+    html = `${preloadScripts}\n${html}`;
   }
 
   return html;
-}
-
-/** Checks that the exported files can recreate the browser entry point on a case-sensitive host. */
-export function validateAppExport(spec: AppArtifactSpec): string[] {
-  const problems: string[] = [];
-  const paths = new Set<string>();
-  for (const file of spec.files) {
-    const path = file.path;
-    if (/[\\:]/.test(path) || [...path].some((char) => char < ' ' || char.charCodeAt(0) === 127) ||
-        path.split('/').some((part) => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) {
-      problems.push(`Invalid project file path: ${path}`);
-    }
-    const key = path.toLowerCase();
-    if (paths.has(key)) problems.push(`Duplicate project file path: ${path}`);
-    paths.add(key);
-  }
-
-  const entry = spec.entryFile
-    ? spec.files.find((file) => file.path === spec.entryFile)
-    : spec.files.find((file) => file.path === 'index.html') ??
-      spec.files.find((file) => inferFileLanguage(file.path) === 'html');
-  if (!entry && spec.entryFile) return [...problems, `Entry file is missing: ${spec.entryFile}`];
-  if (!entry || inferFileLanguage(entry.path) !== 'html') return problems;
-  if (!entry.content.trim()) return [...problems, `Entry file is empty: ${entry.path}`];
-
-  const base = new URL(entry.path, 'https://canvas.invalid/');
-  const markup = entry.content.replace(/<!--[\s\S]*?-->|(<script\b[^>]*>)[\s\S]*?<\/script\s*>/gi,
-    (_match, script?: string) => script ?? '');
-  for (const [, name, attrs] of markup.matchAll(/<(script|link|img|source|audio|video)\b([^>]*)>/gi)) {
-    if (name.toLowerCase() === 'link' && !/\brel\s*=\s*(?:"stylesheet"|'stylesheet'|stylesheet\b)/i.test(attrs)) continue;
-    const match = /(?:^|\s)(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i.exec(attrs);
-    const ref = match?.[1] ?? match?.[2] ?? match?.[3];
-    if (!ref || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(ref)) continue;
-    try {
-      const linked = decodeURIComponent(new URL(ref, base).pathname.slice(1));
-      if (!spec.files.some((file) => file.path === linked)) {
-        problems.push(`Missing local resource: ${ref} (from ${entry.path})`);
-      }
-    } catch {
-      problems.push(`Invalid local reference: ${ref}`);
-    }
-  }
-  return [...new Set(problems)];
 }
 
 export function suggestRepoSlug(title: string): string {

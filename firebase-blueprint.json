@@ -112,6 +112,14 @@
           "type": "array",
           "description": "Default server IDs dismissed by user (max 50)"
         },
+        "savedPrompts": {
+          "type": "array",
+          "description": "User saved prompt macros (max 100)"
+        },
+        "projects": {
+          "type": "array",
+          "description": "User workspace projects with instructions and pinned files (max 50)"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -191,6 +199,12 @@
           "description": "Study mode response layout instructions",
           "minLength": 0,
           "maxLength": 4000
+        },
+        "projectId": {
+          "type": "string",
+          "description": "Optional associated workspace Project ID",
+          "minLength": 0,
+          "maxLength": 128
         },
         "messages": {
           "type": "array",

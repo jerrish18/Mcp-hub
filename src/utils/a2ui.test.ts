@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { limitA2uiFences, loadA2uiState, parseA2uiBlock, readA2uiMode, shouldOfferA2ui } from './a2ui';
+import {
+  parseA2uiBlock,
+  repairA2uiJson,
+  resolveA2uiMode,
+  shouldOfferA2ui,
+} from './a2ui';
 
 test('parseA2uiBlock parses valid A2UI surfaces with multiple interactive widgets', () => {
   const raw = JSON.stringify({
@@ -80,35 +85,41 @@ test('parseA2uiBlock rejects non-a2ui languages, malformed JSON, and empty widge
   );
 });
 
-test('Smart A2UI offers financial, planning and comparison widgets selectively', () => {
-  assert.equal(readA2uiMode({ a2uiEnabled: true }), 'smart');
-  assert.equal(readA2uiMode({ a2uiEnabled: false }), 'off');
-  assert.equal(readA2uiMode({ a2uiMode: 'always', a2uiEnabled: false }), 'always');
-  assert.equal(shouldOfferA2ui('Compare A vs B', 'general', 'smart', true), true);
-  assert.equal(shouldOfferA2ui('Draft a release plan', 'general', 'smart', false), true);
-  assert.equal(shouldOfferA2ui('Status update', 'professional', 'smart', false), true);
-  assert.equal(shouldOfferA2ui('Status update', 'professional', 'smart', true), false);
-  assert.equal(shouldOfferA2ui('Compare them in plain text only', 'professional', 'smart', false), false);
-  assert.equal(shouldOfferA2ui('Hello!', 'study', 'smart', false), false);
-  assert.equal(shouldOfferA2ui('Compare A vs B', 'professional', 'off', false), false);
-  assert.equal(shouldOfferA2ui('Hello!', 'general', 'always', false), true);
+test('resolveA2uiMode migrates legacy boolean settings cleanly', () => {
+  assert.equal(resolveA2uiMode(undefined), 'smart');
+  assert.equal(resolveA2uiMode({ a2uiEnabled: true }), 'smart');
+  assert.equal(resolveA2uiMode({ a2uiEnabled: false }), 'off');
+  assert.equal(resolveA2uiMode({ a2uiMode: 'always', a2uiEnabled: true }), 'always');
+  assert.equal(resolveA2uiMode({ a2uiMode: 'off', a2uiEnabled: true }), 'off');
 });
 
-test('parser repairs smart quotes and trailing commas without touching quoted content', () => {
-  const parsed = parseA2uiBlock('a2ui', '{“title”:“Summary”,“widgets”:[{“type”:“callout”,“text”:"Keep “quotes” and comma,}",},],}');
-  assert.equal(parsed?.title, 'Summary');
-  assert.deepEqual(parsed?.widgets[0], { type: 'callout', title: undefined, tone: 'info', text: 'Keep “quotes” and comma,}' });
-  assert.equal(parseA2uiBlock('a2ui', 'irreparable'), null);
-  const many = JSON.stringify({ widgets: Array.from({ length: 5 }, () => ({ type: 'callout', text: 'ok' })) });
-  assert.equal(parseA2uiBlock('a2ui', many, 3)?.widgets.length, 3);
+test('shouldOfferA2ui gates widgets cleanly in Off, Smart, and Always modes', () => {
+  assert.equal(shouldOfferA2ui('Compare SQL vs NoSQL', 'general', 'off', false), false);
+  assert.equal(shouldOfferA2ui('hi', 'general', 'always', true), true);
+
+  // Smart mode skips greetings, plain-text/code-only asks, and casual general Q&A
+  assert.equal(shouldOfferA2ui('hello!', 'professional', 'smart', false), false);
+  assert.equal(shouldOfferA2ui('thanks', 'study', 'smart', false), false);
+  assert.equal(shouldOfferA2ui('Compare SQL vs NoSQL in plain text only', 'professional', 'smart', false), false);
+  assert.equal(shouldOfferA2ui('Give me code only for binary search', 'professional', 'smart', false), false);
+  assert.equal(shouldOfferA2ui('What is the capital of Japan?', 'general', 'smart', false), false);
+
+  // Smart mode enables for structured comparisons, metrics, roadmaps, checklists, quizzes, builds
+  assert.equal(shouldOfferA2ui('Compare Postgres vs DynamoDB trade-offs', 'general', 'smart', false), true);
+  assert.equal(shouldOfferA2ui('Create a Q3 budget metrics breakdown', 'professional', 'smart', false), true);
+  assert.equal(shouldOfferA2ui('Build a study plan and quiz for linear algebra', 'study', 'smart', false), true);
+  // Suppress consecutive unsolicited widgets without explicit structured intent
+  assert.equal(shouldOfferA2ui('Build a quick summary report for me please', 'professional', 'smart', true), false);
 });
 
-test('widget fences are limited without stripping code samples and saved state stays scoped', () => {
-  const fence = '```a2ui\n{"widgets":[]}\n```';
-  assert.equal(limitA2uiFences(['Prose', fence, fence].join('\n'), true), ['Prose', fence].join('\n'));
-  assert.equal(limitA2uiFences(['Prose', fence].join('\n'), false), 'Prose');
-  assert.equal(limitA2uiFences(['````md', fence, '````'].join('\n'), false), ['````md', fence, '````'].join('\n'));
-  const storage = { getItem: (key: string) => key === 'one' ? '{"task":true}' : null };
-  assert.deepEqual(loadA2uiState(storage, 'one', { task: false, another: false }), { task: true, another: false });
-  assert.deepEqual(loadA2uiState(storage, 'two', { task: false }), { task: false });
+test('repairA2uiJson recovers trailing commas, smart quotes, and stray wrapper prose', () => {
+  const dirty =
+    'Here is the widget:\n{\u201Ctitle\u201D: \u201CBudget Summary\u201D, \u201Cwidgets\u201D: [{\u201Ctype\u201D: \u201Ccallout\u201D, \u201Ctext\u201D: \u201CAll targets met\u201D,},],}\nEnjoy!';
+  const repaired = repairA2uiJson(dirty);
+  assert.ok(repaired.startsWith('{'));
+  const parsed = parseA2uiBlock('a2ui', dirty);
+  assert.ok(parsed);
+  assert.equal(parsed.title, 'Budget Summary');
+  assert.equal(parsed.widgets[0].type, 'callout');
 });
+

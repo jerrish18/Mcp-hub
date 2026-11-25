@@ -1,5 +1,3 @@
-import type { CanvasEditLink } from '../utils/canvasArtifacts';
-import type { ProTaskPlan } from '../utils/proTaskPlan';
 import { z } from 'zod';
 
 export const AuthTypeSchema = z.enum([
@@ -262,30 +260,70 @@ export interface RunTraceToolCall {
   truncated?: boolean;
 }
 
-export type RunTraceStepKind = 'model_call' | 'tool_call' | 'approval_wait' | 'rag' | 'fallback' | 'injection_warning';
-export type RunTraceStepStatus = 'running' | 'success' | 'error' | 'warning' | 'denied' | 'cancelled';
-
-export interface RunTraceStep {
-  id: string;
-  type: RunTraceStepKind;
-  label: string;
-  startOffsetMs: number;
-  durationMs: number;
-  status: RunTraceStepStatus;
-  modelId?: string;
-  estimatedInputTokens?: number;
-  estimatedOutputTokens?: number;
-  serverId?: string;
-  serverName?: string;
-  toolName?: string;
-  toolCallId?: string;
-  decision?: ToolPermissionPolicy;
-  originalChars?: number;
-  keptChars?: number;
-  retryCount?: number;
-  argumentsPreview?: string;
-  resultPreview?: string;
-}
+export type RunTraceStep =
+  | {
+      kind: 'model_call';
+      id: string;
+      startedAt: number;
+      durationMs: number;
+      modelId: string;
+      status: 'running' | 'ok' | 'error';
+      estimatedTokens?: number;
+      error?: string;
+    }
+  | {
+      kind: 'tool_call';
+      id: string;
+      startedAt: number;
+      durationMs: number;
+      serverId?: string;
+      serverName: string;
+      toolName: string;
+      isReadOnly?: boolean;
+      status: ToolCallStatus;
+      truncated?: boolean;
+      argsPreview?: string;
+      fullArgsJson?: string;
+      resultPreview?: string;
+      error?: string;
+    }
+  | {
+      kind: 'approval_wait';
+      id: string;
+      startedAt: number;
+      durationMs: number;
+      serverId?: string;
+      serverName: string;
+      toolName: string;
+      decision: ApprovalDecision | 'pending';
+      reason?: string;
+    }
+  | {
+      kind: 'rag';
+      id: string;
+      startedAt: number;
+      durationMs: number;
+      chunksCount: number;
+      sourceChars: number;
+    }
+  | {
+      kind: 'fallback';
+      id: string;
+      startedAt: number;
+      durationMs: number;
+      from: string;
+      to: string;
+      reason: string;
+    }
+  | {
+      kind: 'injection_warning';
+      id: string;
+      startedAt: number;
+      durationMs: number;
+      serverName: string;
+      toolName: string;
+      signals: string[];
+    };
 
 export interface RunTrace {
   startedAt: number;
@@ -296,6 +334,7 @@ export interface RunTrace {
   fallbacks: RunTraceFallback[];
   toolCalls: RunTraceToolCall[];
   steps?: RunTraceStep[];
+  isLive?: boolean;
   estimatedPromptTokens: number;
   stepsExecuted: number;
   ragUsed?: boolean;
@@ -310,6 +349,40 @@ export interface SavedPrompt {
   template: string;
   category?: string;
   updatedAt: number;
+}
+
+export type A2uiMode = 'off' | 'smart' | 'always';
+
+export interface A2uiWidgetState {
+  hidden?: boolean;
+  checklist?: Record<string, boolean>;
+  formValues?: Record<string, string | number | boolean>;
+  usedActions?: string[];
+}
+
+export interface ProjectPinnedFile {
+  id: string;
+  name: string;
+  size: number;
+  textContent: string;
+}
+
+export interface ProjectProfile {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  pinnedFiles: ProjectPinnedFile[];
+  defaultAgentId?: string;
+  allowedServerIds?: string[] | null;
+  updatedAt: number;
+}
+
+export interface MessageVerification {
+  modelId: string;
+  verdict: 'verified' | 'caution' | 'issues';
+  summary: string;
+  checkedAt: number;
 }
 
 export interface ChatMessage {
@@ -328,16 +401,14 @@ export interface ChatMessage {
   agentId?: string;
   effort?: EffortLevel;
   runTrace?: RunTrace;
-  a2uiMaxWidgets?: number;
-  proTaskPlan?: ProTaskPlan;
-  canvasEdit?: CanvasEditLink;
+  a2uiWidgetState?: A2uiWidgetState;
+  verification?: MessageVerification;
   createdAt: number;
   isStreaming?: boolean;
   error?: string;
 }
 
 export interface Conversation {
-  forkedFrom?: { conversationId: string; messageId?: string };
   id: string;
   title: string;
   agentId: string;
@@ -346,6 +417,7 @@ export interface Conversation {
   chatMode: ChatMode;
   knowledgeSource: KnowledgeSourceMode;
   studyInstructions: string;
+  projectId?: string | null;
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
@@ -377,21 +449,17 @@ export interface PendingApproval {
   description?: string;
   isDestructive?: boolean;
   injectionWarning?: string;
-  lockedArguments?: boolean;
-  agentId?: string;
   resolve: (result: ApprovalDecision | ApprovalResolution) => void;
 }
 
 export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'monochrome';
 
-export type A2uiMode = 'off' | 'smart' | 'always';
-
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   accentTheme: PixelAccentTheme;
   oledDark: boolean;
-  a2uiMode: A2uiMode;
-  a2uiEnabled?: boolean;
+  a2uiEnabled: boolean;
+  a2uiMode?: A2uiMode;
   confirmBeforeWrite: boolean;
   maxAgentSteps: number;
   toolOutputBudgetChars?: number;

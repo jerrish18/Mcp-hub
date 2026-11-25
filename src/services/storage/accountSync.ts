@@ -1,4 +1,3 @@
-import { readA2uiMode } from '../../utils/a2ui';
 import {
   collection,
   deleteDoc,
@@ -18,6 +17,7 @@ import type {
   Conversation,
   McpServerConfig,
   ModelConfig,
+  ProjectProfile,
   SavedPrompt,
 } from '../../types';
 import type { SavedStudyNote } from '../../utils/studyTools';
@@ -32,6 +32,7 @@ import {
   FIRESTORE_BATCH_LIMIT,
   sanitizeConversationForSync,
   sanitizeDocId,
+  sanitizeProjectsForSync,
   sanitizeSavedPromptsForSync,
   sanitizeServersForSync,
   sanitizeSettingsForSync,
@@ -63,6 +64,7 @@ export interface WorkspaceSnapshot {
   dynamicModels: ModelConfig[];
   dismissedDefaultServerIds: string[];
   savedPrompts?: SavedPrompt[];
+  projects?: ProjectProfile[];
   conversations: Conversation[];
   savedStudyNotes: SavedStudyNote[];
   updatedAt: number;
@@ -116,7 +118,6 @@ export function mergeWorkspaceSnapshots(
     ...DEFAULT_SETTINGS,
     ...(preferRemote ? local.settings : remote.settings),
     ...(preferRemote ? remote.settings : local.settings),
-    a2uiMode: readA2uiMode((preferRemote ? remote.settings : local.settings) ?? local.settings),
     onboardingCompleted: Boolean(
       local.settings.onboardingCompleted || remote.settings?.onboardingCompleted
     ),
@@ -202,6 +203,21 @@ export function mergeWorkspaceSnapshots(
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, 100);
 
+  // Merge projects by id (newest updatedAt wins)
+  const projectMap = new Map<string, ProjectProfile>();
+  for (const proj of local.projects ?? []) {
+    projectMap.set(proj.id, proj);
+  }
+  for (const proj of remote.projects ?? []) {
+    const existing = projectMap.get(proj.id);
+    if (!existing || (proj.updatedAt ?? 0) >= (existing.updatedAt ?? 0)) {
+      projectMap.set(proj.id, proj);
+    }
+  }
+  const projects = Array.from(projectMap.values())
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 50);
+
   return {
     settings,
     agents: Array.from(agentMap.values()),
@@ -209,6 +225,7 @@ export function mergeWorkspaceSnapshots(
     dynamicModels: Array.from(modelMap.values()),
     dismissedDefaultServerIds: Array.from(dismissedSet),
     savedPrompts,
+    projects,
     conversations,
     savedStudyNotes,
     updatedAt: Math.max(localUpdated, remoteUpdated, Date.now()),
@@ -285,12 +302,7 @@ export async function fetchRemoteWorkspace(
       chatMode: (data.chatMode ?? 'professional') as Conversation['chatMode'],
       knowledgeSource: (data.knowledgeSource ?? 'auto') as Conversation['knowledgeSource'],
       studyInstructions: String(data.studyInstructions ?? ''),
-      ...(typeof data.forkedFrom?.conversationId === 'string' ? {
-        forkedFrom: {
-          conversationId: data.forkedFrom.conversationId,
-          messageId: typeof data.forkedFrom.messageId === 'string' ? data.forkedFrom.messageId : undefined,
-        },
-      } : {}),
+      projectId: typeof data.projectId === 'string' ? data.projectId : undefined,
       messages: Array.isArray(data.messages) ? (data.messages as Conversation['messages']) : [],
       createdAt: Number(data.clientCreatedAt ?? Date.now()),
       updatedAt: Number(data.clientUpdatedAt ?? Date.now()),
@@ -320,7 +332,6 @@ export async function fetchRemoteWorkspace(
       settings: sanitizeSettingsForSync({
         ...DEFAULT_SETTINGS,
         ...((stateData.settings as Partial<AppSettings>) ?? {}),
-        a2uiMode: readA2uiMode(stateData.settings as Partial<AppSettings> | undefined),
       }),
       agents: stripUndefined(
         (Array.isArray(stateData.agents) ? (stateData.agents as AgentProfile[]) : []).slice(0, 50)
@@ -340,6 +351,11 @@ export async function fetchRemoteWorkspace(
       ...(Array.isArray(stateData.savedPrompts)
         ? {
             savedPrompts: sanitizeSavedPromptsForSync(stateData.savedPrompts as SavedPrompt[]),
+          }
+        : {}),
+      ...(Array.isArray(stateData.projects)
+        ? {
+            projects: sanitizeProjectsForSync(stateData.projects as ProjectProfile[]),
           }
         : {}),
     });
@@ -369,6 +385,9 @@ export async function fetchRemoteWorkspace(
     savedPrompts: Array.isArray(stateData?.savedPrompts)
       ? (stateData.savedPrompts as SavedPrompt[])
       : undefined,
+    projects: Array.isArray(stateData?.projects)
+      ? (stateData.projects as ProjectProfile[])
+      : undefined,
     conversations,
     savedStudyNotes,
     updatedAt: updatedAtMillis,
@@ -393,6 +412,7 @@ export async function pushRemoteWorkspace(
     dynamicModels: stripUndefined(snapshot.dynamicModels.slice(0, 100)),
     dismissedDefaultServerIds: snapshot.dismissedDefaultServerIds.slice(0, 50),
     savedPrompts: sanitizeSavedPromptsForSync(snapshot.savedPrompts ?? []),
+    projects: sanitizeProjectsForSync(snapshot.projects ?? []),
     conversations: snapshot.conversations.slice(0, 150).map(sanitizeConversationForSync),
     savedStudyNotes: snapshot.savedStudyNotes.slice(0, 80).map(sanitizeStudyNoteForSync),
   };
@@ -436,6 +456,7 @@ export async function pushRemoteWorkspace(
       dynamicModels: cleanPayload.dynamicModels,
       dismissedDefaultServerIds: cleanPayload.dismissedDefaultServerIds,
       savedPrompts: cleanPayload.savedPrompts,
+      projects: cleanPayload.projects,
       updatedAt: serverTimestamp(),
     };
     writeItems.push({
@@ -455,7 +476,7 @@ export async function pushRemoteWorkspace(
   for (const item of plan.dirtyConversations) {
     const conv = item.conv;
     const convRef = doc(db, 'users', uid, 'conversations', conv.id);
-    const mutableFields = {
+    const mutableFields: Record<string, unknown> = {
       title: conv.title,
       agentId: conv.agentId,
       modelId: conv.modelId,
@@ -463,11 +484,15 @@ export async function pushRemoteWorkspace(
       chatMode: conv.chatMode,
       knowledgeSource: conv.knowledgeSource,
       studyInstructions: conv.studyInstructions,
-      ...(conv.forkedFrom ? { forkedFrom: conv.forkedFrom } : {}),
       messages: conv.messages,
       clientUpdatedAt: conv.updatedAt || Date.now(),
       updatedAt: serverTimestamp(),
     };
+    if (conv.projectId) {
+      mutableFields.projectId = conv.projectId;
+    } else {
+      mutableFields.projectId = null;
+    }
     writeItems.push({
       op: item.op,
       ref: convRef,

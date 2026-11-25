@@ -143,15 +143,18 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
       const parts: Array<Record<string, unknown>> = [];
       if (msg.text) parts.push({ text: msg.text });
       if (msg.toolCalls) {
-        for (const tc of msg.toolCalls) {
+        msg.toolCalls.forEach((tc, tcIdx) => {
+          const sig =
+            tc.thoughtSignature ||
+            (tcIdx === 0 ? 'skip_thought_signature_validator' : undefined);
           parts.push({
             functionCall: {
               name: tc.name,
               args: tc.parsedArguments ?? {},
             },
-            ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+            ...(sig ? { thoughtSignature: sig } : {}),
           });
-        }
+        });
       }
       if (parts.length > 0) contents.push({ role: 'model', parts });
     } else if (msg.role === 'tool') {
@@ -341,7 +344,12 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
           onEvent({ type: 'text_delta', delta: part.text });
         }
         if (partSig && !part.functionCall) {
-          pendingThoughtSignature = partSig;
+          const firstUnsigned = collectedCalls.find((c) => !c.thoughtSignature);
+          if (firstUnsigned) {
+            firstUnsigned.thoughtSignature = partSig;
+          } else {
+            pendingThoughtSignature = partSig;
+          }
         }
         if (part.functionCall) {
           const argsObj = part.functionCall.args ?? {};

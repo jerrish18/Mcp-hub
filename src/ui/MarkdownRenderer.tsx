@@ -18,6 +18,7 @@ import {
   Sigma,
   Sparkles,
 } from 'lucide-react';
+import type { A2uiWidgetState } from '../types';
 import { parseA2uiBlock } from '../utils/a2ui';
 import {
   downloadAppBundle,
@@ -31,6 +32,10 @@ import {
   type DocumentSpec,
 } from '../utils/docExport';
 import {
+  parseDelimitedDataset,
+  type DatasetArtifactSpec,
+} from '../utils/dataAnalysis';
+import {
   parseInlineTokens,
   parseMarkdownBlocks,
   type CalloutKind,
@@ -42,18 +47,22 @@ import { KatexMath } from './KatexMath';
 import { MermaidDiagramCard } from './MermaidDiagramCard';
 import { StudyImageCard } from './StudyImageCard';
 
-export type MarkdownCanvasRequest = import('../utils/canvasArtifacts').CanvasSource;
+export type MarkdownCanvasRequest =
+  | { kind: 'code'; title: string; language: string; code: string }
+  | { kind: 'document'; title: string; spec: DocumentSpec; rawJson: string }
+  | { kind: 'app'; title: string; spec: AppArtifactSpec; rawJson: string }
+  | { kind: 'dataset'; title: string; spec: DatasetArtifactSpec };
 
 interface MarkdownRendererProps {
   content: string;
   a2uiEnabled?: boolean;
-  a2uiStorageKey?: string;
-  isStreaming?: boolean;
-  a2uiMaxWidgets?: number;
+  a2uiWidgetState?: A2uiWidgetState;
+  onUpdateA2uiWidgetState?: (patch: Partial<A2uiWidgetState>) => void;
+  onToggleA2ui?: () => void;
   onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
-  onOpenInCanvas?: (payload: MarkdownCanvasRequest, block: number) => void;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
 }
 
 const CANVAS_CODE_LANGS = new Set([
@@ -443,9 +452,9 @@ function CodeBlock({
   code,
   isUnclosed,
   a2uiEnabled = true,
-  a2uiStorageKey,
-  isStreaming,
-  a2uiMaxWidgets,
+  a2uiWidgetState,
+  onUpdateA2uiWidgetState,
+  onToggleA2ui,
   onA2UIAction,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
@@ -455,9 +464,9 @@ function CodeBlock({
   code: string;
   isUnclosed?: boolean;
   a2uiEnabled?: boolean;
-  a2uiStorageKey?: string;
-  isStreaming?: boolean;
-  a2uiMaxWidgets?: number;
+  a2uiWidgetState?: A2uiWidgetState;
+  onUpdateA2uiWidgetState?: (patch: Partial<A2uiWidgetState>) => void;
+  onToggleA2ui?: () => void;
   onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
@@ -468,40 +477,60 @@ function CodeBlock({
   const normalizedLang = language.toLowerCase().trim();
 
   if (normalizedLang === 'a2ui' || normalizedLang === 'artifact-a2ui') {
-    if (!a2uiEnabled) return null;
-    const parsedUi = isUnclosed ? null : parseA2uiBlock(normalizedLang, code, a2uiMaxWidgets);
-    if (parsedUi) {
-      return (
-        <A2UIRenderer
-          spec={parsedUi}
-          key={a2uiStorageKey}
-          storageKey={a2uiStorageKey}
-          onAction={onA2UIAction}
-        />
-      );
-    }
-    if (isUnclosed && isStreaming) {
+    if (isUnclosed) {
       return (
         <div
+          data-testid="a2ui-streaming-skeleton"
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="my-3 rounded-2xl border p-4 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300"
+          className="my-3 rounded-2xl border p-4 space-y-3 animate-pulse"
         >
-          <LayoutGrid style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
-          <div role="status" className="flex-1">
-            <span className="sr-only">Loading interactive widget</span>
-            <div aria-hidden="true" className="h-3 w-1/3 rounded bg-slate-200 dark:bg-slate-700 motion-safe:animate-pulse" />
-            <div aria-hidden="true" className="mt-2 h-8 w-full rounded bg-slate-100 dark:bg-slate-800 motion-safe:animate-pulse" />
+          <div className="flex items-center gap-2.5">
+            <LayoutGrid style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
+            <div className="h-3.5 w-44 rounded-full bg-slate-200 dark:bg-slate-700" />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="h-12 rounded-xl bg-slate-200/80 dark:bg-slate-800" />
+            <div className="h-12 rounded-xl bg-slate-200/80 dark:bg-slate-800" />
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+            <span>Building interactive widget…</span>
           </div>
         </div>
       );
     }
+
+    const parsedUi = parseA2uiBlock(normalizedLang, code);
+    if (parsedUi) {
+      return (
+        <A2UIRenderer
+          spec={parsedUi}
+          enabled={a2uiEnabled}
+          widgetState={a2uiWidgetState}
+          onUpdateWidgetState={onUpdateA2uiWidgetState}
+          onToggleEnabled={onToggleA2ui}
+          onAction={onA2UIAction}
+        />
+      );
+    }
+
     return (
-      <details className="rounded-xl border border-slate-300 dark:border-slate-700">
-        <summary className="min-h-[44px] p-3 cursor-pointer text-sm">Invalid widget data</summary>
-        <pre className="overflow-auto p-3 text-xs"><code>{code}</code></pre>
+      <details
+        data-testid="a2ui-invalid-fallback"
+        style={{
+          backgroundColor: 'var(--m3-surface-container)',
+          borderColor: 'var(--m3-outline)',
+        }}
+        className="my-3 rounded-2xl border px-3.5 py-2.5 text-xs text-slate-600 dark:text-slate-300"
+      >
+        <summary className="cursor-pointer font-medium select-none">
+          Interactive widget JSON (collapsed — could not parse cleanly)
+        </summary>
+        <pre className="mt-2 p-2.5 rounded-xl bg-slate-950 text-slate-100 overflow-x-auto font-mono text-[11px] leading-relaxed">
+          <code>{code}</code>
+        </pre>
       </details>
     );
   }
@@ -695,13 +724,37 @@ function CodeBlock({
     }
   };
 
-  const canOpenInCanvas = Boolean(!(isUnclosed && isStreaming) && onOpenInCanvas && (CANVAS_CODE_LANGS.has(normalizedLang) || code.length > 80));
+  const canOpenInCanvas = Boolean(onOpenInCanvas && (CANVAS_CODE_LANGS.has(normalizedLang) || code.length > 80));
+  const parsedDataset = useMemo(
+    () =>
+      normalizedLang === 'csv' || normalizedLang === 'tsv'
+        ? parseDelimitedDataset(code, normalizedLang === 'tsv' ? 'snippet.tsv' : 'snippet.csv')
+        : null,
+    [code, normalizedLang]
+  );
 
   return (
     <div className="my-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100">
       <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-800 bg-slate-900/90 text-xs text-slate-400 gap-2">
         <span className="font-mono lowercase">{language || 'text'}</span>
         <div className="flex items-center gap-1">
+          {parsedDataset && onOpenInCanvas && (
+            <button
+              type="button"
+              onClick={() =>
+                onOpenInCanvas({
+                  kind: 'dataset',
+                  title: parsedDataset.title,
+                  spec: parsedDataset,
+                })
+              }
+              aria-label="Analyze dataset in Canvas"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-emerald-300 hover:text-white hover:bg-slate-800 transition-colors whitespace-nowrap"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>Analyze</span>
+            </button>
+          )}
           {canOpenInCanvas && onOpenInCanvas && (
             <button
               type="button"
@@ -807,13 +860,13 @@ function renderBlock(
   block: MarkdownBlock,
   key: number,
   a2uiEnabled?: boolean,
-  a2uiStorageKey?: string,
-  isStreaming?: boolean,
-  a2uiMaxWidgets?: number,
+  a2uiWidgetState?: A2uiWidgetState,
+  onUpdateA2uiWidgetState?: (patch: Partial<A2uiWidgetState>) => void,
+  onToggleA2ui?: () => void,
   onA2UIAction?: (prompt: string, displayLabel?: string) => void,
   onOpenInteractiveFlashcards?: () => void,
   onOpenInteractiveQuiz?: () => void,
-  onOpenInCanvas?: (payload: MarkdownCanvasRequest, block: number) => void
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void
 ): React.ReactNode {
   switch (block.type) {
     case 'code':
@@ -824,13 +877,13 @@ function renderBlock(
           code={block.code}
           isUnclosed={block.isUnclosed}
           a2uiEnabled={a2uiEnabled}
-          a2uiStorageKey={a2uiStorageKey ? `${a2uiStorageKey}:${key}` : undefined}
-          isStreaming={isStreaming}
-          a2uiMaxWidgets={a2uiMaxWidgets}
+          a2uiWidgetState={a2uiWidgetState}
+          onUpdateA2uiWidgetState={onUpdateA2uiWidgetState}
+          onToggleA2ui={onToggleA2ui}
           onA2UIAction={onA2UIAction}
           onOpenInteractiveFlashcards={onOpenInteractiveFlashcards}
           onOpenInteractiveQuiz={onOpenInteractiveQuiz}
-          onOpenInCanvas={onOpenInCanvas ? (payload) => onOpenInCanvas(payload, key) : undefined}
+          onOpenInCanvas={onOpenInCanvas}
         />
       );
 
@@ -995,9 +1048,9 @@ function renderBlock(
 export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
   a2uiEnabled = true,
-  a2uiStorageKey,
-  isStreaming,
-  a2uiMaxWidgets,
+  a2uiWidgetState,
+  onUpdateA2uiWidgetState,
+  onToggleA2ui,
   onA2UIAction,
   onOpenInteractiveFlashcards,
   onOpenInteractiveQuiz,
@@ -1013,9 +1066,9 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
           block,
           i,
           a2uiEnabled,
-          a2uiStorageKey,
-          isStreaming,
-          a2uiMaxWidgets,
+          a2uiWidgetState,
+          onUpdateA2uiWidgetState,
+          onToggleA2ui,
           onA2UIAction,
           onOpenInteractiveFlashcards,
           onOpenInteractiveQuiz,

@@ -1,22 +1,28 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowUpDown,
+  BarChart3,
   Check,
   ChevronLeft,
   ChevronRight,
   Code2,
   Copy,
   Download,
+  Edit3,
   Eye,
+  FileArchive,
   FileCode2,
   FileSpreadsheet,
   FileText,
   GitBranch,
   History,
-  ChartNoAxesColumnIncreasing,
   Layers,
   Monitor,
   Presentation,
+  RefreshCw,
+  RotateCcw,
+  Search,
   Smartphone,
   Sparkles,
   Tablet,
@@ -24,28 +30,76 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
-import { validateCanvasPublish, type CanvasPublishRequest, type CanvasPublishResult } from '../../services/mcp/canvasPublish';
-import { CanvasDataAnalysis } from './CanvasDataAnalysis';
-import { CanvasVersions } from './CanvasVersions';
-import { canvasProjectFiles, canvasProjectZip, canvasSelectionRequest, type CanvasArtifact, type CanvasRevision } from '../../utils/canvasArtifacts';
-import { CanvasPreviewFrame, type CanvasRuntimeLog } from './CanvasPreviewFrame';
-import { canvasPushBlockReason, openCanvasPreviewInNewTab, type CanvasPreviewStatus } from '../../utils/canvasPreview';
 import { MermaidDiagramCard } from '../../ui/MermaidDiagramCard';
 import {
   buildAppPreviewSrcDoc,
+  buildGitHubSyncPrompt,
+  CANVAS_IFRAME_SANDBOX,
   downloadAppBundle,
   suggestRepoSlug,
-  validateAppExport,
   type AppArtifactSpec,
   type AppFileEntry,
 } from '../../utils/appArtifact';
+
+export { CANVAS_IFRAME_SANDBOX };
+import {
+  buildDatasetSandboxPreviewHtml,
+  filterAndSortDatasetRows,
+  type DatasetArtifactSpec,
+} from '../../utils/dataAnalysis';
 import {
   downloadDocumentSpec,
   parseArtifactBlock,
   sanitizeFilename,
   type DocFormat,
+  type DocumentSpec,
   type PptxSlideSpec,
 } from '../../utils/docExport';
+import { computeLineDiff } from '../../utils/proFeatures';
+import { downloadAppZipArchive } from '../../utils/zipBuilder';
+
+export type CanvasArtifact =
+  | {
+      kind: 'code';
+      id: string;
+      title: string;
+      language: string;
+      code: string;
+    }
+  | {
+      kind: 'document';
+      id: string;
+      title: string;
+      spec: DocumentSpec;
+      rawJson: string;
+    }
+  | {
+      kind: 'app';
+      id: string;
+      title: string;
+      spec: AppArtifactSpec;
+      rawJson: string;
+    }
+  | {
+      kind: 'dataset';
+      id: string;
+      title: string;
+      spec: DatasetArtifactSpec;
+    };
+
+interface CanvasVersionEntry {
+  id: string;
+  label: string;
+  timestamp: number;
+  serialized: string;
+  snapshot: CanvasArtifact;
+}
+
+function serializeArtifactSnapshot(artifact: CanvasArtifact): string {
+  if (artifact.kind === 'code') return artifact.code;
+  if (artifact.kind === 'dataset') return JSON.stringify(artifact.spec, null, 2);
+  return artifact.rawJson;
+}
 
 interface ProCanvasPanelProps {
   open: boolean;
@@ -54,14 +108,14 @@ interface ProCanvasPanelProps {
   githubConnected?: boolean;
   onRequestConnectGithub?: () => void;
   onChangeArtifact: (next: CanvasArtifact) => void;
-  revisions: CanvasRevision[];
-  historyError?: string;
-  onSaveRevision: () => void;
-  onRestoreRevision: (version: CanvasRevision) => void;
-  onAskCanvasEdit: (prompt: string, label: string) => void;
-  onPublish: (request: CanvasPublishRequest) => Promise<CanvasPublishResult>;
-  onAskCanvasAction: (prompt: string, displayLabel: string, requireWriteApproval?: boolean) => void;
+  onAskCanvasAction: (prompt: string, displayLabel: string) => void;
   onClose: () => void;
+}
+
+interface RuntimeLogEntry {
+  level: 'error' | 'warn';
+  message: string;
+  timestamp: number;
 }
 
 function renderRichLeadText(text: string) {
@@ -264,35 +318,16 @@ export function ProCanvasPanel({
   githubConnected = false,
   onRequestConnectGithub,
   onChangeArtifact,
-  revisions,
-  historyError,
-  onSaveRevision,
-  onRestoreRevision,
-  onAskCanvasEdit,
-  onPublish,
   onAskCanvasAction,
   onClose,
 }: ProCanvasPanelProps) {
-  const [desktopLayout, setDesktopLayout] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
-  const [tab, setTab] = useState<'preview' | 'source' | 'analysis'>('preview');
-  const [analysisOpened, setAnalysisOpened] = useState(false);
+  const [tab, setTab] = useState<'preview' | 'source'>('preview');
   const [slideIdx, setSlideIdx] = useState(0);
   const [sheetIdx, setSheetIdx] = useState(0);
   const [activeFileIdx, setActiveFileIdx] = useState(0);
   const [viewport, setViewport] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [consoleOpen, setConsoleOpen] = useState(false);
-  const [versionsOpen, setVersionsOpen] = useState(false);
-  const [selection, setSelection] = useState<{ path: string; text: string }>();
-  const [editingSelection, setEditingSelection] = useState(false);
-  const [selectionInstruction, setSelectionInstruction] = useState('');
-  const [zipError, setZipError] = useState('');
-  const [previewCheck, setPreviewCheck] = useState<{
-    revision: string;
-    status: CanvasPreviewStatus;
-    logs: CanvasRuntimeLog[];
-    error?: string;
-  }>();
-  const [reviewedRevision, setReviewedRevision] = useState('');
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
 
   // GitHub Sync Panel state
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
@@ -301,37 +336,39 @@ export function ProCanvasPanel({
   const [commitMessage, setCommitMessage] = useState('feat: sync Pro Canvas app from MCP Hub');
   const [isNewRepo, setIsNewRepo] = useState(true);
   const [isPrivateRepo, setIsPrivateRepo] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-  const [publishResult, setPublishResult] = useState<CanvasPublishResult>();
 
   const [jsonError, setJsonError] = useState('');
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [canvasReady, setCanvasReady] = useState(false);
+  const [previewTimedOut, setPreviewTimedOut] = useState(false);
+  const [previewEpoch, setPreviewEpoch] = useState(0);
 
-  useEffect(() => {
-    const media = window.matchMedia('(min-width: 1024px)');
-    const onChange = () => setDesktopLayout(media.matches);
-    media.addEventListener('change', onChange);
-    return () => media.removeEventListener('change', onChange);
-  }, []);
+  // Version History & Selection Ask AI
+  const [versionsByArtifactId, setVersionsByArtifactId] = useState<
+    Record<string, CanvasVersionEntry[]>
+  >({});
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [compareVersionId, setCompareVersionId] = useState<string | null>(null);
+  const [selectedSnippet, setSelectedSnippet] = useState('');
+  const [selectionInstruction, setSelectionInstruction] = useState('');
 
-  useEffect(() => {
-    setActiveFileIdx(0);
-    setAnalysisOpened(false);
-    setTab('preview');
-    setSlideIdx(0);
-    setSheetIdx(0);
-    setConsoleOpen(false);
-    setJsonError('');
-    setSyncPanelOpen(false);
-    setVersionsOpen(false);
-    setZipError('');
-    setPublishResult(undefined);
-    if (artifact) {
-      setRepoName(suggestRepoSlug(artifact.title));
-      setCommitMessage(`feat: add ${artifact.title}`);
-    }
-  }, [artifact?.id]);
+  // Document Studio inline edit mode
+  const [docEditMode, setDocEditMode] = useState(false);
+
+  // Sandboxed Data Explorer state
+  const [dataQuery, setDataQuery] = useState('');
+  const [dataSortCol, setDataSortCol] = useState<number | null>(null);
+  const [dataSortAsc, setDataSortAsc] = useState(true);
+  const [dataSandboxOpen, setDataSandboxOpen] = useState(false);
+  const [dataLabelCol, setDataLabelCol] = useState(0);
+  const [dataValueCol, setDataValueCol] = useState(1);
+  const [dataTransformExpr, setDataTransformExpr] = useState('');
+
+  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const frameHasRenderedRef = useRef(false);
+  const lastRenderedKeyRef = useRef<string | null>(null);
 
   const codeLanguage = artifact?.kind === 'code' ? artifact.language.toLowerCase() : '';
   const isHtmlPreview = codeLanguage === 'html' || codeLanguage === 'htm';
@@ -343,56 +380,210 @@ export function ProCanvasPanel({
       ? artifact.spec.files[Math.min(activeFileIdx, Math.max(0, artifact.spec.files.length - 1))]
       : undefined;
 
-  useEffect(() => {
-    setSelection(undefined);
-    setEditingSelection(false);
-  }, [artifact?.id, activeAppFile?.path, tab, open]);
+  const appSrcDoc = useMemo(() => {
+    if (!artifact || artifact.kind !== 'app') return '';
+    return buildAppPreviewSrcDoc(artifact.spec, { includeRuntimeBridge: true });
+  }, [artifact]);
 
-  const previewSpec = useMemo<AppArtifactSpec | null>(() => {
-    if (artifact?.kind === 'app') return artifact.spec;
-    if (!isHtmlPreview || artifact?.kind !== 'code') return null;
-    return {
-      title: artifact.title,
-      entryFile: 'index.html',
-      files: [{ path: 'index.html', language: 'html', content: artifact.code }],
-    };
+  const singleHtmlSrcDoc = useMemo(() => {
+    if (!artifact || artifact.kind !== 'code' || !isHtmlPreview) return '';
+    return buildAppPreviewSrcDoc(
+      {
+        title: artifact.title,
+        entryFile: 'index.html',
+        files: [{ path: 'index.html', language: 'html', content: artifact.code }],
+      },
+      { includeRuntimeBridge: true }
+    );
   }, [artifact, isHtmlPreview]);
-  const previewHtml = useMemo(() => previewSpec ? buildAppPreviewSrcDoc(previewSpec) : '', [previewSpec]);
-  const exportIssues = useMemo(() => previewSpec ? validateAppExport(previewSpec) : [], [previewSpec]);
-  const revision = useMemo(() => JSON.stringify([artifact?.id, previewSpec]), [artifact?.id, previewSpec]);
-  const currentCheck = previewCheck?.revision === revision ? previewCheck : undefined;
-  const previewStatus = currentCheck?.status ?? 'loading';
-  const runtimeLogs = currentCheck?.logs ?? [];
-  const requiresPreview = previewSpec?.files.some((file) => /\.html?$/i.test(file.path)) ?? false;
-  const pushBlockReason = canvasPushBlockReason({
-    exportIssues,
-    requiresPreview,
-    status: previewStatus,
-    runtimeError: currentCheck?.error,
-    reviewed: reviewedRevision === revision,
-  });
 
-  const updatePreviewStatus = (status: CanvasPreviewStatus) => {
-    setPreviewCheck((previous) => ({
-      ...(previous?.revision === revision ? previous : { revision, logs: [] }),
-      status,
-    }));
-  };
+  const datasetSandboxHtml = useMemo(() => {
+    if (!artifact || artifact.kind !== 'dataset' || !dataSandboxOpen) return '';
+    return buildDatasetSandboxPreviewHtml({
+      spec: artifact.spec,
+      labelColIdx: Math.min(dataLabelCol, Math.max(0, artifact.spec.columns.length - 1)),
+      valueColIdx: Math.min(dataValueCol, Math.max(0, artifact.spec.columns.length - 1)),
+      customExpression: dataTransformExpr,
+    });
+  }, [artifact, dataSandboxOpen, dataLabelCol, dataValueCol, dataTransformExpr]);
 
-  const addPreviewLog = (entry: CanvasRuntimeLog) => {
-    setPreviewCheck((previous) => {
-      const check = previous?.revision === revision
-        ? previous
-        : { revision, logs: [], status: 'loading' as const };
-      if (check.logs.some((log) => log.message === entry.message)) return check;
+  const activePreviewHtml =
+    artifact?.kind === 'app'
+      ? appSrcDoc
+      : isHtmlPreview
+        ? singleHtmlSrcDoc
+        : artifact?.kind === 'dataset' && dataSandboxOpen
+          ? datasetSandboxHtml
+          : '';
+
+  const exportableHtml = useMemo(() => {
+    if (!artifact) return '';
+    if (artifact.kind === 'app') {
+      return buildAppPreviewSrcDoc(artifact.spec, { includeRuntimeBridge: false });
+    }
+    if (artifact.kind === 'code' && isHtmlPreview) {
+      return buildAppPreviewSrcDoc(
+        {
+          title: artifact.title,
+          entryFile: 'index.html',
+          files: [{ path: 'index.html', language: 'html', content: artifact.code }],
+        },
+        { includeRuntimeBridge: false }
+      );
+    }
+    return '';
+  }, [artifact, isHtmlPreview]);
+
+  const previewBlobUrl = useMemo(() => {
+    if (!previewTimedOut || !exportableHtml || typeof URL === 'undefined') return '';
+    return URL.createObjectURL(new Blob([exportableHtml], { type: 'text/html;charset=utf-8' }));
+  }, [previewTimedOut, exportableHtml]);
+
+  useEffect(() => {
+    return () => {
+      if (previewBlobUrl) URL.revokeObjectURL(previewBlobUrl);
+    };
+  }, [previewBlobUrl]);
+
+  const isInteractivePreviewActive =
+    Boolean(open && artifact && tab === 'preview') &&
+    (artifact?.kind === 'app' ||
+      (artifact?.kind === 'code' && isHtmlPreview) ||
+      (artifact?.kind === 'dataset' && dataSandboxOpen));
+
+  useEffect(() => {
+    setActiveFileIdx(0);
+    setSlideIdx(0);
+    setSheetIdx(0);
+    setRuntimeLogs([]);
+    setConsoleOpen(false);
+    setJsonError('');
+    setSyncPanelOpen(false);
+    setHistoryOpen(false);
+    setCompareVersionId(null);
+    setSelectedSnippet('');
+    setSelectionInstruction('');
+    setDocEditMode(false);
+    setDataQuery('');
+    setDataSortCol(null);
+    setDataSortAsc(true);
+    setDataSandboxOpen(false);
+    setDataLabelCol(0);
+    setDataValueCol(
+      artifact?.kind === 'dataset'
+        ? Math.max(
+            0,
+            artifact.spec.summaries.findIndex((s) => s.kind === 'number')
+          ) || Math.min(1, Math.max(0, (artifact.spec.columns.length ?? 1) - 1))
+        : 1
+    );
+    setDataTransformExpr('');
+    frameHasRenderedRef.current = false;
+    lastRenderedKeyRef.current = null;
+    setCanvasReady(false);
+    setPreviewTimedOut(false);
+    setPreviewEpoch((e) => e + 1);
+    if (artifact) {
+      setRepoName(suggestRepoSlug(artifact.title));
+      setCommitMessage(`feat: add ${artifact.title}`);
+    }
+  }, [artifact?.id]);
+
+  // Record version snapshots cleanly when artifact content changes meaningfully
+  useEffect(() => {
+    if (!artifact) return;
+    const serialized = serializeArtifactSnapshot(artifact);
+    setVersionsByArtifactId((prev) => {
+      const list = prev[artifact.id] ?? [];
+      if (list.length > 0 && list[list.length - 1].serialized === serialized) {
+        return prev;
+      }
+      const nextEntry: CanvasVersionEntry = {
+        id: `ver_${Date.now()}_${list.length + 1}`,
+        label: list.length === 0 ? 'Initial version' : `Edit v${list.length + 1}`,
+        timestamp: Date.now(),
+        serialized,
+        snapshot: artifact,
+      };
       return {
-        ...check,
-        logs: [...check.logs.slice(-19), entry],
-        error: check.error ?? (entry.blocking ? entry.message : undefined),
+        ...prev,
+        [artifact.id]: [...list.slice(-11), nextEntry],
       };
     });
-    if (entry.level === 'error') setConsoleOpen(true);
-  };
+  }, [artifact]);
+
+  useEffect(() => {
+    if (!isInteractivePreviewActive) {
+      frameHasRenderedRef.current = false;
+      lastRenderedKeyRef.current = null;
+      setCanvasReady(false);
+      setPreviewTimedOut(false);
+    }
+  }, [isInteractivePreviewActive]);
+
+  // Listen strictly to messages originating from our sandboxed preview iframe
+  useEffect(() => {
+    const handleMessage = (ev: MessageEvent) => {
+      if (!previewIframeRef.current || ev.source !== previewIframeRef.current.contentWindow) {
+        return;
+      }
+      const data = ev.data as {
+        type?: string;
+        source?: string;
+        level?: string;
+        message?: string;
+        timestamp?: number;
+      } | null;
+      if (!data) return;
+
+      if (data.type === 'mcphub-canvas-ready') {
+        frameHasRenderedRef.current = false;
+        setCanvasReady(true);
+        setPreviewTimedOut(false);
+        return;
+      }
+
+      if (data.source !== 'mcphub-canvas-runtime' || !data.message) return;
+      const level = data.level === 'warn' ? 'warn' : 'error';
+      setRuntimeLogs((prev) => [
+        ...prev.slice(-19),
+        { level, message: data.message!, timestamp: data.timestamp ?? Date.now() },
+      ]);
+      if (level === 'error') {
+        setConsoleOpen(true);
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  // Push updated HTML once per ready iframe epoch; remount loader cleanly when HTML updates later
+  useEffect(() => {
+    if (!isInteractivePreviewActive || !canvasReady || !activePreviewHtml) return;
+    const renderKey = `${previewEpoch}:${activePreviewHtml}`;
+    if (lastRenderedKeyRef.current === renderKey) return;
+    if (frameHasRenderedRef.current) {
+      frameHasRenderedRef.current = false;
+      setCanvasReady(false);
+      setPreviewEpoch((e) => e + 1);
+      return;
+    }
+    frameHasRenderedRef.current = true;
+    lastRenderedKeyRef.current = renderKey;
+    previewIframeRef.current?.contentWindow?.postMessage(
+      { type: 'mcphub-canvas-render', html: activePreviewHtml },
+      '*'
+    );
+  }, [isInteractivePreviewActive, canvasReady, activePreviewHtml, previewEpoch]);
+
+  // 3-second readiness watchdog for blocked/failed preview frames
+  useEffect(() => {
+    if (!isInteractivePreviewActive || canvasReady) return;
+    const timer = window.setTimeout(() => {
+      setPreviewTimedOut(true);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [isInteractivePreviewActive, canvasReady, artifact?.id, previewEpoch]);
 
   const svgSrcDoc = useMemo(() => {
     if (!artifact || artifact.kind !== 'code' || !isSvgPreview) return '';
@@ -404,21 +595,18 @@ export function ProCanvasPanel({
   const supportsResponsivePreview =
     tab === 'preview' && (artifact.kind === 'app' || (artifact.kind === 'code' && isHtmlPreview));
 
-  const projectFiles = artifact.kind === 'document' ? [] : canvasProjectFiles(artifact);
-
-  const downloadZip = () => {
-    try {
-      const url = URL.createObjectURL(new Blob([canvasProjectZip(projectFiles)], { type: 'application/zip' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${suggestRepoSlug(artifact.title)}.zip`;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setZipError('');
-    } catch (error) {
-      setZipError(error instanceof Error ? error.message : 'ZIP export failed.');
-    }
-  };
+  const projectFiles: AppFileEntry[] =
+    artifact.kind === 'app'
+      ? artifact.spec.files
+      : artifact.kind === 'code'
+        ? [
+            {
+              path: `${suggestRepoSlug(artifact.title)}.${EXT_BY_LANG[codeLanguage] ?? 'txt'}`,
+              language: codeLanguage || 'text',
+              content: artifact.code,
+            },
+          ]
+        : [];
 
   const handleCopy = async () => {
     const text =
@@ -426,7 +614,12 @@ export function ProCanvasPanel({
         ? artifact.code
         : artifact.kind === 'app'
           ? activeAppFile?.content ?? artifact.rawJson
-          : artifact.rawJson;
+          : artifact.kind === 'dataset'
+            ? [
+                artifact.spec.columns.join(','),
+                ...artifact.spec.rows.map((r) => r.join(',')),
+              ].join('\n')
+            : artifact.rawJson;
     try {
       await navigator.clipboard?.writeText(text);
       setCopied(true);
@@ -450,6 +643,26 @@ export function ProCanvasPanel({
       downloadAppBundle(artifact.spec);
       return;
     }
+    if (artifact.kind === 'dataset') {
+      const csvBody = [
+        artifact.spec.columns.map((c) => `"${c.replace(/"/g, '""')}"`).join(','),
+        ...artifact.spec.rows.map((row) =>
+          row.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')
+        ),
+      ].join('\n');
+      const blob = new Blob([csvBody], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = artifact.spec.fileName.endsWith('.csv')
+        ? artifact.spec.fileName
+        : `${suggestRepoSlug(artifact.title)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      return;
+    }
     const ext = EXT_BY_LANG[codeLanguage] ?? 'txt';
     const filename = sanitizeFilename(artifact.title, 'pdf').replace(/\.pdf$/, `.${ext}`);
     const blob = new Blob([artifact.code], { type: 'text/plain;charset=utf-8' });
@@ -461,6 +674,41 @@ export function ProCanvasPanel({
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
+  };
+
+  const handleDownloadZip = () => {
+    if (projectFiles.length === 0) return;
+    downloadAppZipArchive(artifact.title, projectFiles);
+  };
+
+  const handleSaveManualSnapshot = () => {
+    const serialized = serializeArtifactSnapshot(artifact);
+    setVersionsByArtifactId((prev) => {
+      const list = prev[artifact.id] ?? [];
+      const nextEntry: CanvasVersionEntry = {
+        id: `ver_${Date.now()}_${list.length + 1}`,
+        label: `Checkpoint #${list.length + 1}`,
+        timestamp: Date.now(),
+        serialized,
+        snapshot: artifact,
+      };
+      return {
+        ...prev,
+        [artifact.id]: [...list.slice(-11), nextEntry],
+      };
+    });
+  };
+
+  const handleUpdateDocumentSpec = (nextSpec: DocumentSpec) => {
+    if (artifact.kind !== 'document') return;
+    const rawJson = JSON.stringify(nextSpec, null, 2);
+    setJsonError('');
+    onChangeArtifact({
+      ...artifact,
+      title: nextSpec.title,
+      spec: nextSpec,
+      rawJson,
+    });
   };
 
   const handleUpdateDocumentJson = (nextRaw: string) => {
@@ -489,11 +737,37 @@ export function ProCanvasPanel({
         : f
     );
     const nextSpec: AppArtifactSpec = { ...artifact.spec, files: nextFiles };
+    setRuntimeLogs([]);
     onChangeArtifact({
       ...artifact,
       spec: nextSpec,
       rawJson: JSON.stringify(nextSpec, null, 2),
     });
+  };
+
+  const handleSourceTextareaSelection = () => {
+    const el = sourceTextareaRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    if (end > start) {
+      const slice = el.value.slice(start, end).trim();
+      setSelectedSnippet(slice.slice(0, 1200));
+    } else {
+      setSelectedSnippet('');
+    }
+  };
+
+  const handleAskSelectionChange = () => {
+    if (!selectedSnippet) return;
+    const instruction = selectionInstruction.trim() || 'Improve and refine this selected section cleanly.';
+    const targetPath = artifact.kind === 'app' && activeAppFile ? ` in \`${activeAppFile.path}\`` : '';
+    onAskCanvasAction(
+      `Update ONLY the highlighted snippet${targetPath} according to this instruction: "${instruction}"\n\nSelected snippet:\n\`\`\`\n${selectedSnippet}\n\`\`\`\n\nFull context:\n${buildCodeContextForPrompt()}`,
+      `Edit selection in ${artifact.title}`
+    );
+    setSelectedSnippet('');
+    setSelectionInstruction('');
   };
 
   const handleTriggerGithubSyncClick = () => {
@@ -508,35 +782,21 @@ export function ProCanvasPanel({
     setSyncPanelOpen((v) => !v);
   };
 
-  const handleSubmitGithubSync = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (pushBlockReason || publishing || isRunning) return;
-    const request: CanvasPublishRequest = {
-      repository: repoName.trim(),
-      branch: repoBranch.trim() || 'main',
-      message: commitMessage.trim(),
+  const handleSubmitGithubSync = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (projectFiles.length === 0) return;
+    const prompt = buildGitHubSyncPrompt({
+      title: artifact.title,
       description: artifact.kind === 'app' ? artifact.spec.description : undefined,
-      createRepository: isNewRepo,
-      privateRepository: isPrivateRepo,
+      repoName: repoName.trim() || suggestRepoSlug(artifact.title),
+      branch: repoBranch.trim() || 'main',
+      commitMessage: commitMessage.trim() || `feat: sync ${artifact.title}`,
+      isNewRepo,
+      isPrivate: isPrivateRepo,
       files: projectFiles,
-    };
-    try {
-      validateCanvasPublish(request);
-    } catch (error) {
-      setPublishResult({ error: error instanceof Error ? error.message : 'Review the repository and files.' });
-      return;
-    }
-    setPublishing(true);
-    try {
-      const result = await onPublish(request);
-      setPublishResult(result);
-      if (result.createdRepository && result.repository) {
-        setRepoName(result.repository);
-        setIsNewRepo(false);
-      }
-    } finally {
-      setPublishing(false);
-    }
+    });
+    setSyncPanelOpen(false);
+    onAskCanvasAction(prompt, `Sync ${artifact.title} to GitHub (${repoName || 'repo'})`);
   };
 
   const buildCodeContextForPrompt = (): string => {
@@ -552,6 +812,7 @@ export function ProCanvasPanel({
   };
 
   const renderHeaderGlyph = () => {
+    if (artifact.kind === 'dataset') return <FileSpreadsheet className="w-4 h-4" />;
     if (artifact.kind === 'document') {
       if (artifact.spec.format === 'pptx') return <Presentation className="w-4 h-4" />;
       if (artifact.spec.format === 'xlsx') return <FileSpreadsheet className="w-4 h-4" />;
@@ -560,6 +821,12 @@ export function ProCanvasPanel({
     if (artifact.kind === 'app') return <Layers className="w-4 h-4" />;
     return <Code2 className="w-4 h-4" />;
   };
+
+  const artifactVersions = versionsByArtifactId[artifact.id] ?? [];
+  const selectedCompareVersion =
+    artifactVersions.find((v) => v.id === compareVersionId) ??
+    (artifactVersions.length >= 2 ? artifactVersions[artifactVersions.length - 2] : artifactVersions[0]);
+  const currentSerialized = serializeArtifactSnapshot(artifact);
 
   const viewportWidthClass =
     viewport === 'mobile'
@@ -600,55 +867,108 @@ export function ProCanvasPanel({
               {artifact.title}
             </h2>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate tabular-nums">
-              {artifact.kind === 'document'
-                ? `${artifact.spec.format.toUpperCase()} Document Studio`
-                : artifact.kind === 'app'
-                  ? `${artifact.spec.files.length} files · ${artifact.spec.framework || 'App IDE'}`
-                  : `${artifact.language.toUpperCase()} Canvas`}
+              {artifact.kind === 'dataset'
+                ? `${artifact.spec.rows.length} rows · ${artifact.spec.columns.length} cols`
+                : artifact.kind === 'document'
+                  ? `${artifact.spec.format.toUpperCase()} Document Studio`
+                  : artifact.kind === 'app'
+                    ? `${artifact.spec.files.length} files · ${artifact.spec.framework || 'App IDE'}`
+                    : `${artifact.language.toUpperCase()} Canvas`}
             </p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-1.5 w-full sm:w-auto shrink-0">
-          <div
-            style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
-            className="inline-flex items-center p-0.5 rounded-full"
-          >
+        <div className="flex items-center justify-between sm:justify-end gap-1.5 w-full sm:w-auto shrink-0 flex-wrap">
+          {artifact.kind !== 'dataset' && (
+            <div
+              style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
+              className="inline-flex items-center p-0.5 rounded-full"
+            >
+              <button
+                type="button"
+                onClick={() => setTab('preview')}
+                data-testid="canvas-tab-preview"
+                style={
+                  tab === 'preview'
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                      }
+                    : undefined
+                }
+                className="min-h-[30px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Preview</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('source')}
+                data-testid="canvas-tab-source"
+                style={
+                  tab === 'source'
+                    ? {
+                        backgroundColor: 'var(--m3-primary-container)',
+                        color: 'var(--m3-on-primary-container)',
+                      }
+                    : undefined
+                }
+                className="min-h-[30px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+              >
+                <Code2 className="w-3.5 h-3.5" />
+                <span>{artifact.kind === 'document' ? 'Spec' : 'Code'}</span>
+              </button>
+            </div>
+          )}
+
+          {artifact.kind === 'document' && artifact.spec.format !== 'xlsx' && tab === 'preview' && (
             <button
               type="button"
-              onClick={() => setTab('preview')}
-              data-testid="canvas-tab-preview"
+              data-testid="canvas-doc-edit-toggle"
+              onClick={() => setDocEditMode((v) => !v)}
               style={
-                tab === 'preview'
+                docEditMode
                   ? {
                       backgroundColor: 'var(--m3-primary-container)',
                       color: 'var(--m3-on-primary-container)',
+                      borderColor: 'var(--m3-primary)',
                     }
-                  : undefined
+                  : {
+                      backgroundColor: 'var(--m3-surface)',
+                      borderColor: 'var(--m3-outline)',
+                    }
               }
-              className="min-h-[44px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+              className="min-h-[34px] px-2.5 rounded-full border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
             >
-              <Eye className="w-3.5 h-3.5" />
-              <span>Preview</span>
+              <Edit3 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{docEditMode ? 'Editing' : 'Edit'}</span>
             </button>
+          )}
+
+          {artifact.kind !== 'dataset' && (
             <button
               type="button"
-              onClick={() => setTab('source')}
-              data-testid="canvas-tab-source"
+              data-testid="canvas-history-btn"
+              onClick={() => setHistoryOpen((v) => !v)}
+              aria-label="Version history"
               style={
-                tab === 'source'
+                historyOpen
                   ? {
                       backgroundColor: 'var(--m3-primary-container)',
                       color: 'var(--m3-on-primary-container)',
+                      borderColor: 'var(--m3-primary)',
                     }
-                  : undefined
+                  : {
+                      backgroundColor: 'var(--m3-surface)',
+                      borderColor: 'var(--m3-outline)',
+                    }
               }
-              className="min-h-[44px] px-2.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+              className="min-h-[34px] px-2.5 rounded-full border text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap tabular-nums"
             >
-              <Code2 className="w-3.5 h-3.5" />
-              <span>{artifact.kind === 'document' ? 'Spec' : 'Code'}</span>
+              <History className="w-3.5 h-3.5" />
+              <span>{artifactVersions.length}</span>
             </button>
-          </div>
+          )}
 
           {(artifact.kind === 'app' || artifact.kind === 'code') && !isRunning && (
             <button
@@ -667,7 +987,7 @@ export function ProCanvasPanel({
                       borderColor: 'var(--m3-outline)',
                     }
               }
-              className="min-h-[44px] px-3 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90 disabled:opacity-50"
+              className="min-h-[34px] px-3 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
             >
               <GitBranch className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
@@ -676,23 +996,28 @@ export function ProCanvasPanel({
             </button>
           )}
 
-          <button type="button" aria-label="Data analysis" aria-pressed={tab === 'analysis'}
-            onClick={() => { setAnalysisOpened(true); setTab('analysis'); }}
-            className="min-h-[44px] min-w-[44px] rounded-full border border-slate-300 dark:border-slate-700 inline-flex items-center justify-center">
-            <ChartNoAxesColumnIncreasing className="h-4 w-4" />
-          </button>
-
-          <button type="button" onClick={() => setVersionsOpen((shown) => !shown)}
-            aria-label="Canvas version history" aria-expanded={versionsOpen}
-            className="min-h-[44px] min-w-[44px] rounded-full border border-slate-300 dark:border-slate-700 inline-flex items-center justify-center">
-            <History className="h-4 w-4" />
-          </button>
+          {artifact.kind === 'app' && (
+            <button
+              type="button"
+              data-testid="canvas-download-zip-btn"
+              onClick={handleDownloadZip}
+              style={{
+                backgroundColor: 'var(--m3-surface)',
+                borderColor: 'var(--m3-outline)',
+              }}
+              aria-label="Download project ZIP archive"
+              className="min-h-[34px] px-2.5 rounded-full border text-xs font-semibold text-slate-800 dark:text-slate-100 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+            >
+              <FileArchive className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">.ZIP</span>
+            </button>
+          )}
 
           <button
             type="button"
             onClick={() => void handleCopy()}
             aria-label="Copy artifact source"
-            className="min-h-[44px] min-w-[44px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
+            className="min-h-[34px] min-w-[34px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
           >
             {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
           </button>
@@ -706,7 +1031,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-primary)',
               color: 'var(--m3-on-primary)',
             }}
-            className="min-h-[44px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+            className="min-h-[34px] px-3 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
           >
             <Download className="w-3.5 h-3.5" />
             <span>
@@ -714,9 +1039,11 @@ export function ProCanvasPanel({
                 ? downloading
                   ? 'Saving…'
                   : `.${artifact.spec.format.toUpperCase()}`
-                : artifact.kind === 'app'
-                  ? 'Export'
-                  : 'Save'}
+                : artifact.kind === 'dataset'
+                  ? '.CSV'
+                  : artifact.kind === 'app'
+                    ? 'Export'
+                    : 'Save'}
             </span>
           </button>
 
@@ -724,20 +1051,128 @@ export function ProCanvasPanel({
             type="button"
             onClick={onClose}
             aria-label="Close Canvas"
-            className="min-h-[44px] min-w-[44px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
+            className="min-h-[34px] min-w-[34px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
       </header>
 
-      {versionsOpen && <CanvasVersions key={artifact.id} artifact={artifact} revisions={revisions}
-        onSave={onSaveRevision} onRestore={onRestoreRevision} />}
-      {historyError && <p role="alert" className="p-2 text-xs text-rose-700 dark:text-rose-300">{historyError}</p>}
-      {zipError && <p role="alert" className="p-2 text-xs text-rose-700 dark:text-rose-300">{zipError}</p>}
-      {artifact.kind === 'app' && (
-        <div className="flex justify-end px-3">
-          <button type="button" onClick={downloadZip} className="min-h-[44px] px-2 text-xs underline">Download ZIP</button>
+      {/* Version History & Diff Drawer */}
+      {historyOpen && (
+        <div
+          data-testid="canvas-history-drawer"
+          style={{
+            backgroundColor: 'var(--m3-surface-container)',
+            borderColor: 'var(--m3-outline)',
+          }}
+          className="shrink-0 border-b px-3.5 py-3 space-y-2.5 max-h-64 overflow-y-auto"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+              <History className="w-3.5 h-3.5" />
+              Version History ({artifactVersions.length})
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSaveManualSnapshot}
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[28px] px-2.5 rounded-full border text-[11px] font-semibold text-slate-700 dark:text-slate-200"
+              >
+                + Checkpoint
+              </button>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(false)}
+                aria-label="Close history"
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+            {artifactVersions.map((ver, vi) => {
+              const active = selectedCompareVersion?.id === ver.id;
+              return (
+                <button
+                  key={ver.id}
+                  type="button"
+                  onClick={() => setCompareVersionId(ver.id)}
+                  style={
+                    active
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="px-2.5 py-1.5 rounded-xl border text-left shrink-0 text-[11px]"
+                >
+                  <div className="font-semibold">
+                    #{vi + 1} · {ver.label}
+                  </div>
+                  <div className="text-[10px] opacity-75 tabular-nums">
+                    {new Date(ver.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {selectedCompareVersion && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-slate-500 dark:text-slate-400">
+                  Diff: {selectedCompareVersion.label} → Current
+                </span>
+                {selectedCompareVersion.serialized !== currentSerialized && (
+                  <button
+                    type="button"
+                    data-testid="canvas-restore-version-btn"
+                    onClick={() => {
+                      onChangeArtifact(selectedCompareVersion.snapshot);
+                      setHistoryOpen(false);
+                    }}
+                    style={{
+                      backgroundColor: 'var(--m3-primary)',
+                      color: 'var(--m3-on-primary)',
+                    }}
+                    className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold inline-flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Restore this version</span>
+                  </button>
+                )}
+              </div>
+              <pre className="max-h-28 overflow-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-2 text-[10px] font-mono leading-relaxed">
+                {computeLineDiff(selectedCompareVersion.serialized, currentSerialized, 60).map((d, di) => (
+                  <div
+                    key={di}
+                    className={
+                      d.kind === 'added'
+                        ? 'text-emerald-400'
+                        : d.kind === 'removed'
+                          ? 'text-rose-400'
+                          : 'text-slate-400'
+                    }
+                  >
+                    {d.kind === 'added' ? '+ ' : d.kind === 'removed' ? '- ' : '  '}
+                    {d.text}
+                  </div>
+                ))}
+              </pre>
+            </div>
+          )}
         </div>
       )}
 
@@ -776,7 +1211,7 @@ export function ProCanvasPanel({
                         borderColor: 'var(--m3-outline)',
                       }
                 }
-                className="min-h-[44px] px-2.5 rounded-xl border text-[11px] font-mono font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                className="min-h-[30px] px-2.5 rounded-xl border text-[11px] font-mono font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 <FileCode2 className="w-3.5 h-3.5 shrink-0" />
                 <span>{file.path}</span>
@@ -822,7 +1257,7 @@ export function ProCanvasPanel({
                         }
                       : undefined
                   }
-                  className="min-h-[44px] px-2.5 rounded-full text-[11px] font-medium text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 whitespace-nowrap"
+                  className="min-h-[28px] px-2.5 rounded-full text-[11px] font-medium text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   <Icon className="w-3 h-3" />
                   <span className="hidden sm:inline">{label}</span>
@@ -836,7 +1271,7 @@ export function ProCanvasPanel({
       {/* Collapsible GitHub Sync Drawer */}
       {syncPanelOpen && (artifact.kind === 'app' || artifact.kind === 'code') && (
         <form
-          onSubmit={(event) => void handleSubmitGithubSync(event)}
+          onSubmit={handleSubmitGithubSync}
           data-testid="canvas-github-sync-drawer"
           style={{
             backgroundColor: 'var(--m3-surface-container)',
@@ -871,7 +1306,7 @@ export function ProCanvasPanel({
                     }
                   : undefined
               }
-              className="min-h-[44px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
+              className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
             >
               Create New Repo
             </button>
@@ -886,7 +1321,7 @@ export function ProCanvasPanel({
                     }
                   : undefined
               }
-              className="min-h-[44px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
+              className="min-h-[28px] px-3 rounded-full text-[11px] font-semibold whitespace-nowrap"
             >
               Existing Repo
             </button>
@@ -908,7 +1343,7 @@ export function ProCanvasPanel({
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="w-full min-h-[44px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
+                className="w-full min-h-[38px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
               />
             </div>
 
@@ -927,7 +1362,7 @@ export function ProCanvasPanel({
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="w-full min-h-[44px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
+                className="w-full min-h-[38px] px-3 rounded-xl border text-xs font-mono text-slate-900 dark:text-white"
               />
             </div>
           </div>
@@ -947,12 +1382,12 @@ export function ProCanvasPanel({
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="w-full min-h-[44px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                className="w-full min-h-[38px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
               />
             </div>
 
             {isNewRepo && (
-              <label className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer shrink-0">
+              <label className="min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer shrink-0">
                 <input
                   type="checkbox"
                   checked={isPrivateRepo}
@@ -965,46 +1400,272 @@ export function ProCanvasPanel({
             <button
               type="submit"
               data-testid="canvas-github-push-submit"
-              disabled={Boolean(pushBlockReason) || isRunning || publishing}
               style={{
                 backgroundColor: 'var(--m3-primary)',
                 color: 'var(--m3-on-primary)',
               }}
-              className="min-h-[44px] px-4 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
+              className="min-h-[38px] px-4 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-90"
             >
               <GitBranch className="w-3.5 h-3.5" />
-              <span>{publishing ? 'Publishing…' : 'Review and publish'}</span>
+              <span>Push to GitHub</span>
             </button>
           </div>
-          {publishResult && (
-            <div role="status" className="mt-2 text-xs text-slate-700 dark:text-slate-200">
-              {publishResult.commitUrl ? (
-                <a href={publishResult.commitUrl} target="_blank" rel="noreferrer" className="inline-flex min-h-[44px] items-center underline">View GitHub commit</a>
-              ) : (
-                <p>
-                  {publishResult.error ?? (publishResult.cancelled ? 'Publishing cancelled.' : '')}
-                  {publishResult.createdRepository && ` ${publishResult.repository} was created. You can retry as an existing repository.`}
-                </p>
-              )}
-            </div>
-          )}
-          {pushBlockReason && <p role="status" className="mt-2 text-xs text-amber-800 dark:text-amber-200 break-words">{pushBlockReason}</p>}
         </form>
       )}
 
       {/* Main Canvas Body */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3.5 sm:p-4">
-        {analysisOpened && <div hidden={tab !== 'analysis'}>
-          <CanvasDataAnalysis key={artifact.id} initialScript={artifact.kind === 'code' && ['javascript', 'js'].includes(codeLanguage) ? artifact.code : undefined} />
-        </div>}
-        {tab === 'analysis' ? null : tab === 'source' ? (
+        {artifact.kind === 'dataset' ? (
+          (() => {
+            const ds = artifact.spec;
+            const filteredRows = filterAndSortDatasetRows({
+              columns: ds.columns,
+              rows: ds.rows,
+              query: dataQuery,
+              sortColIdx: dataSortCol,
+              sortAsc: dataSortAsc,
+            });
+            return (
+              <div className="space-y-3" data-testid="canvas-dataset-explorer">
+                {/* Summary Stat Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {ds.summaries.slice(0, 6).map((col) => (
+                    <div
+                      key={col.name}
+                      style={{
+                        backgroundColor: 'var(--m3-surface-container)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="rounded-2xl border p-2.5 space-y-0.5"
+                    >
+                      <div className="text-[11px] font-semibold text-slate-900 dark:text-white truncate">
+                        {col.name}
+                      </div>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400 tabular-nums">
+                        {col.kind === 'number'
+                          ? `min ${col.min} · max ${col.max} · avg ${col.mean}`
+                          : `${col.nonEmptyCount} values · ${col.nullCount} empty`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Filter + Chart Sandbox Toolbar */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative flex-1 min-w-[160px]">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="search"
+                      value={dataQuery}
+                      onChange={(e) => setDataQuery(e.target.value)}
+                      placeholder="Filter rows..."
+                      style={{
+                        backgroundColor: 'var(--m3-surface-container)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="w-full min-h-[38px] pl-8 pr-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="canvas-dataset-sandbox-toggle"
+                    onClick={() => setDataSandboxOpen((v) => !v)}
+                    style={
+                      dataSandboxOpen
+                        ? {
+                            backgroundColor: 'var(--m3-primary-container)',
+                            color: 'var(--m3-on-primary-container)',
+                            borderColor: 'var(--m3-primary)',
+                          }
+                        : {
+                            backgroundColor: 'var(--m3-surface-container)',
+                            borderColor: 'var(--m3-outline)',
+                          }
+                    }
+                    className="min-h-[38px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                    <span>{dataSandboxOpen ? 'Hide Chart & JS Sandbox' : 'Chart & JS Sandbox'}</span>
+                  </button>
+                </div>
+
+                {dataSandboxOpen && (
+                  <div
+                    style={{
+                      backgroundColor: 'var(--m3-surface-container)',
+                      borderColor: 'var(--m3-outline)',
+                    }}
+                    className="rounded-2xl border p-3 space-y-2.5"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <label className="space-y-1">
+                        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                          Label column
+                        </span>
+                        <select
+                          value={dataLabelCol}
+                          onChange={(e) => setDataLabelCol(Number(e.target.value))}
+                          style={{
+                            backgroundColor: 'var(--m3-surface)',
+                            borderColor: 'var(--m3-outline)',
+                          }}
+                          className="w-full min-h-[36px] px-2.5 rounded-xl border text-xs text-slate-900 dark:text-white"
+                        >
+                          {ds.columns.map((c, idx) => (
+                            <option key={c + idx} value={idx}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-1">
+                        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                          Numeric value column
+                        </span>
+                        <select
+                          value={dataValueCol}
+                          onChange={(e) => setDataValueCol(Number(e.target.value))}
+                          style={{
+                            backgroundColor: 'var(--m3-surface)',
+                            borderColor: 'var(--m3-outline)',
+                          }}
+                          className="w-full min-h-[36px] px-2.5 rounded-xl border text-xs text-slate-900 dark:text-white"
+                        >
+                          {ds.columns.map((c, idx) => (
+                            <option key={c + idx} value={idx}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <label className="block space-y-1">
+                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                        Sandboxed JS expression on <code className="font-mono">rows</code> (optional)
+                      </span>
+                      <input
+                        type="text"
+                        value={dataTransformExpr}
+                        onChange={(e) => setDataTransformExpr(e.target.value)}
+                        placeholder="e.g. rows.slice(0, 5)"
+                        style={{
+                          backgroundColor: 'var(--m3-surface)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="w-full min-h-[36px] px-3 rounded-xl border font-mono text-xs text-slate-900 dark:text-white"
+                      />
+                    </label>
+                    <iframe
+                      key={`ds_${previewEpoch}`}
+                      ref={previewIframeRef}
+                      title={`${ds.title} Sandbox`}
+                      data-testid="canvas-dataset-iframe"
+                      sandbox={CANVAS_IFRAME_SANDBOX}
+                      src="/__canvas-preview"
+                      className="w-full h-[260px] rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950"
+                    />
+                  </div>
+                )}
+
+                {/* Sortable Data Table */}
+                <div
+                  style={{ borderColor: 'var(--m3-outline)' }}
+                  className="overflow-x-auto rounded-2xl border bg-white dark:bg-slate-950"
+                >
+                  <table className="w-full text-left border-collapse text-xs tabular-nums">
+                    <thead>
+                      <tr
+                        style={{
+                          backgroundColor: 'var(--m3-surface-container)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="border-b"
+                      >
+                        <th className="px-2.5 py-2 text-[11px] text-slate-400">#</th>
+                        {ds.columns.map((col, ci) => (
+                          <th key={col + ci} className="px-2.5 py-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (dataSortCol === ci) {
+                                  setDataSortAsc((a) => !a);
+                                } else {
+                                  setDataSortCol(ci);
+                                  setDataSortAsc(true);
+                                }
+                              }}
+                              className="inline-flex items-center gap-1 font-semibold text-slate-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400 whitespace-nowrap"
+                            >
+                              <span>{col}</span>
+                              <ArrowUpDown className="w-3 h-3 opacity-60" />
+                            </button>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800">
+                      {filteredRows.slice(0, 120).map((row, ri) => (
+                        <tr key={ri} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/40">
+                          <td className="px-2.5 py-1.5 text-[11px] text-slate-400">{ri + 1}</td>
+                          {row.map((cell, ci) => (
+                            <td
+                              key={ci}
+                              className="px-2.5 py-1.5 text-slate-700 dark:text-slate-300 whitespace-nowrap"
+                            >
+                              {cell}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()
+        ) : tab === 'source' ? (
           <div className="h-full flex flex-col gap-2">
             {jsonError && (
               <div className="rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
                 {jsonError}
               </div>
             )}
+            {selectedSnippet && !isRunning && (
+              <div
+                data-testid="canvas-selection-ask-bar"
+                style={{
+                  backgroundColor: 'var(--m3-surface-container)',
+                  borderColor: 'var(--m3-primary)',
+                }}
+                className="rounded-2xl border p-2.5 flex flex-col sm:flex-row sm:items-center gap-2"
+              >
+                <input
+                  type="text"
+                  value={selectionInstruction}
+                  onChange={(e) => setSelectionInstruction(e.target.value)}
+                  placeholder={`Selected ${selectedSnippet.length} chars — tell AI what to change...`}
+                  style={{
+                    backgroundColor: 'var(--m3-surface)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="flex-1 min-h-[36px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                />
+                <button
+                  type="button"
+                  onClick={handleAskSelectionChange}
+                  style={{
+                    backgroundColor: 'var(--m3-primary)',
+                    color: 'var(--m3-on-primary)',
+                  }}
+                  className="min-h-[36px] px-3.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Ask AI to change this</span>
+                </button>
+              </div>
+            )}
             <textarea
+              ref={sourceTextareaRef}
               aria-label="Canvas source editor"
               data-testid="canvas-source-editor"
               value={
@@ -1014,16 +1675,10 @@ export function ProCanvasPanel({
                     ? activeAppFile?.content ?? ''
                     : artifact.rawJson
               }
-              onSelect={(event) => {
-                const editor = event.currentTarget;
-                const text = editor.value.slice(editor.selectionStart, editor.selectionEnd);
-                const path = activeAppFile?.path ?? canvasProjectFiles(artifact)[0].path;
-                if (text) setSelection({ text, path });
-                else if (!editingSelection) setSelection(undefined);
-              }}
+              onSelect={handleSourceTextareaSelection}
+              onKeyUp={handleSourceTextareaSelection}
+              onMouseUp={handleSourceTextareaSelection}
               onChange={(e) => {
-                setSelection(undefined);
-                setEditingSelection(false);
                 if (artifact.kind === 'code') {
                   onChangeArtifact({ ...artifact, code: e.target.value });
                 } else if (artifact.kind === 'app') {
@@ -1034,67 +1689,46 @@ export function ProCanvasPanel({
               }}
               className="flex-1 w-full min-h-[320px] p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed resize-none focus:outline-none"
             />
-            {selection && !editingSelection && (
-              <button type="button" disabled={isRunning} onClick={() => { setSelectionInstruction(''); setEditingSelection(true); }}
-                className="min-h-[44px] rounded-lg border border-slate-300 px-3 text-xs dark:border-slate-700">
-                Ask AI to change this
-              </button>
-            )}
-            {selection && editingSelection && (
-              <form className="space-y-2" onSubmit={(event) => {
-                event.preventDefault();
-                if (!selectionInstruction.trim() || isRunning) return;
-                onAskCanvasEdit(canvasSelectionRequest(artifact, selection.path, selection.text, selectionInstruction.trim()), `Edit selection in ${selection.path}`);
-                setEditingSelection(false);
-              }}>
-                <label className="block text-xs">
-                  How should the selection change?
-                  <input required autoFocus maxLength={1000} value={selectionInstruction}
-                    onChange={(event) => setSelectionInstruction(event.target.value)}
-                    className="mt-1 min-h-[44px] w-full rounded-lg border border-slate-300 bg-transparent px-3 dark:border-slate-700" />
-                </label>
-                <div className="flex gap-2">
-                  <button type="submit" disabled={isRunning} className="min-h-[44px] rounded-lg bg-blue-700 px-3 text-xs text-white">Send edit request</button>
-                  <button type="button" onClick={() => setEditingSelection(false)} className="min-h-[44px] px-3 text-xs">Cancel</button>
-                </div>
-              </form>
-            )}
           </div>
-        ) : artifact.kind === 'app' || (artifact.kind === 'code' && previewSpec) ? (
+        ) : artifact.kind === 'app' || (artifact.kind === 'code' && isHtmlPreview) ? (
           <div className="h-full flex flex-col min-h-[380px] gap-2">
-            {previewStatus === 'failed' && (
-              <div role="alert" className="rounded-xl border border-amber-300 dark:border-amber-800 p-3 text-sm text-amber-900 dark:text-amber-100">
-                <p>Preview blocked or failed to load</p>
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" onClick={() => { if (previewSpec) downloadAppBundle(previewSpec); }} className="min-h-[44px] rounded-lg border px-3">
+            {previewTimedOut && (
+              <div
+                data-testid="canvas-preview-timeout-banner"
+                className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900 dark:text-amber-200"
+              >
+                <span className="font-medium inline-flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>Preview blocked or failed to load</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleDownloadPrimary()}
+                    className="min-h-[32px] px-3 rounded-full border border-amber-400/70 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:opacity-90"
+                  >
                     Download HTML
                   </button>
-                  <button type="button" onClick={() => openCanvasPreviewInNewTab(previewHtml)} className="min-h-[44px] rounded-lg border px-3">
-                    Open in new tab
-                  </button>
+                  {previewBlobUrl && (
+                    <a
+                      href={previewBlobUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="min-h-[32px] px-3 rounded-full bg-blue-600 text-white text-xs font-semibold inline-flex items-center hover:opacity-90"
+                    >
+                      Open in new tab
+                    </a>
+                  )}
                 </div>
               </div>
             )}
-            {requiresPreview && previewStatus === 'loaded' && !currentCheck?.error && !exportIssues.length && (
-              <label className="min-h-[44px] flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
-                <input type="checkbox" checked={reviewedRevision === revision}
-                  onChange={(event) => setReviewedRevision(event.target.checked ? revision : '')} />
-                <span>Ready for review. I tested the main flow in this preview.</span>
-              </label>
-            )}
-            {(currentCheck?.error || exportIssues[0]) && (
-              <p role="status" className="text-xs text-rose-700 dark:text-rose-300 break-words">
-                {currentCheck?.error ?? exportIssues[0]}
-              </p>
-            )}
-            <CanvasPreviewFrame
-              key={JSON.stringify([revision, activeAppFile?.path])}
+            <iframe
+              key={`app_${previewEpoch}`}
+              ref={previewIframeRef}
               title={artifact.title}
-              testId={artifact.kind === 'app' ? 'canvas-app-iframe' : 'canvas-html-iframe'}
-              html={previewHtml}
-              onLoaded={() => updatePreviewStatus('loaded')}
-              onFailed={() => updatePreviewStatus('failed')}
-              onLog={addPreviewLog}
+              data-testid={artifact.kind === 'app' ? 'canvas-app-iframe' : 'canvas-html-iframe'}
+              sandbox={CANVAS_IFRAME_SANDBOX}
+              src="/__canvas-preview"
               className={`${viewportWidthClass} flex-1 min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white transition-all`}
             />
           </div>
@@ -1143,7 +1777,7 @@ export function ProCanvasPanel({
                       backgroundColor: 'var(--m3-surface-container)',
                       borderColor: 'var(--m3-outline)',
                     }}
-                    className="min-h-[44px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
+                    className="min-h-[38px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
                   >
                     <ChevronLeft className="w-4 h-4" />
                     <span>Prev</span>
@@ -1161,12 +1795,103 @@ export function ProCanvasPanel({
                       backgroundColor: 'var(--m3-surface-container)',
                       borderColor: 'var(--m3-outline)',
                     }}
-                    className="min-h-[44px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
+                    className="min-h-[38px] px-3 rounded-full border text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-40"
                   >
                     <span>Next</span>
                     <ChevronRight className="w-4 h-4" />
                   </button>
                 </div>
+
+                {!isRunning && (
+                  <div className="flex items-center justify-end">
+                    <button
+                      type="button"
+                      data-testid="canvas-regenerate-slide-btn"
+                      onClick={() =>
+                        onAskCanvasAction(
+                          `Regenerate ONLY Slide #${safeIdx + 1} ("${currentSlide.title}") to be sharper, clearer, and more insightful while returning the full updated \`\`\`artifact-pptx JSON:\n\n\`\`\`artifact-pptx\n${artifact.rawJson}\n\`\`\``,
+                          `Regenerate Slide #${safeIdx + 1} in ${artifact.title}`
+                        )
+                      }
+                      style={{
+                        backgroundColor: 'var(--m3-surface-container)',
+                        borderColor: 'var(--m3-outline)',
+                      }}
+                      className="min-h-[34px] px-3 rounded-full border text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Regenerate Slide #{safeIdx + 1}</span>
+                    </button>
+                  </div>
+                )}
+
+                {docEditMode && (
+                  <div
+                    data-testid="canvas-slide-inline-editor"
+                    style={{
+                      backgroundColor: 'var(--m3-surface-container)',
+                      borderColor: 'var(--m3-outline)',
+                    }}
+                    className="rounded-2xl border p-3.5 space-y-2.5 text-xs"
+                  >
+                    <div className="font-semibold text-slate-900 dark:text-white">
+                      Inline Slide #{safeIdx + 1} Editor
+                    </div>
+                    <input
+                      type="text"
+                      value={currentSlide.title}
+                      onChange={(e) => {
+                        const nextSlides = slides.map((s, idx) =>
+                          idx === safeIdx ? { ...s, title: e.target.value } : s
+                        );
+                        handleUpdateDocumentSpec({ ...artifact.spec, format: 'pptx', slides: nextSlides });
+                      }}
+                      placeholder="Slide title"
+                      style={{ backgroundColor: 'var(--m3-surface)', borderColor: 'var(--m3-outline)' }}
+                      className="w-full min-h-[36px] px-3 rounded-xl border text-slate-900 dark:text-white font-medium"
+                    />
+                    <input
+                      type="text"
+                      value={currentSlide.subtitle ?? ''}
+                      onChange={(e) => {
+                        const nextSlides = slides.map((s, idx) =>
+                          idx === safeIdx ? { ...s, subtitle: e.target.value || undefined } : s
+                        );
+                        handleUpdateDocumentSpec({ ...artifact.spec, format: 'pptx', slides: nextSlides });
+                      }}
+                      placeholder="Subtitle (optional)"
+                      style={{ backgroundColor: 'var(--m3-surface)', borderColor: 'var(--m3-outline)' }}
+                      className="w-full min-h-[36px] px-3 rounded-xl border text-slate-900 dark:text-white"
+                    />
+                    <textarea
+                      rows={3}
+                      value={(currentSlide.bullets ?? []).join('\n')}
+                      onChange={(e) => {
+                        const bullets = e.target.value.split(/\r?\n/).filter((l) => l.trim().length > 0);
+                        const nextSlides = slides.map((s, idx) =>
+                          idx === safeIdx ? { ...s, bullets } : s
+                        );
+                        handleUpdateDocumentSpec({ ...artifact.spec, format: 'pptx', slides: nextSlides });
+                      }}
+                      placeholder="Bullets (one per line)"
+                      style={{ backgroundColor: 'var(--m3-surface)', borderColor: 'var(--m3-outline)' }}
+                      className="w-full p-2.5 rounded-xl border text-slate-900 dark:text-white"
+                    />
+                    <textarea
+                      rows={2}
+                      value={currentSlide.speakerNotes ?? ''}
+                      onChange={(e) => {
+                        const nextSlides = slides.map((s, idx) =>
+                          idx === safeIdx ? { ...s, speakerNotes: e.target.value || undefined } : s
+                        );
+                        handleUpdateDocumentSpec({ ...artifact.spec, format: 'pptx', slides: nextSlides });
+                      }}
+                      placeholder="Speaker notes..."
+                      style={{ backgroundColor: 'var(--m3-surface)', borderColor: 'var(--m3-outline)' }}
+                      className="w-full p-2.5 rounded-xl border text-slate-900 dark:text-white"
+                    />
+                  </div>
+                )}
 
                 {/* Slide Selector Strip */}
                 <div className="flex gap-1.5 overflow-x-auto pb-1">
@@ -1246,7 +1971,7 @@ export function ProCanvasPanel({
                                 borderColor: 'var(--m3-outline)',
                               }
                         }
-                        className="min-h-[44px] px-3 rounded-full border text-xs font-semibold whitespace-nowrap"
+                        className="min-h-[34px] px-3 rounded-full border text-xs font-semibold whitespace-nowrap"
                       >
                         {sh.name}
                       </button>
@@ -1310,16 +2035,39 @@ export function ProCanvasPanel({
             const docAuthor = 'author' in artifact.spec ? artifact.spec.author : undefined;
             const docDate = 'dateLabel' in artifact.spec ? artifact.spec.dateLabel : undefined;
 
+            const docSpec = artifact.spec as Extract<DocumentSpec, { format: 'pdf' | 'docx' }>;
             return (
               <div className="rounded-2xl border border-slate-200 bg-white text-slate-900 overflow-hidden shadow-xs">
                 <div style={{ backgroundColor: accentHex }} className="h-1.5 w-full" />
                 <div className="p-5 sm:p-6 space-y-4">
-                  <div className="border-b border-slate-200 pb-3 space-y-1">
-                    <h3 className="font-display text-lg font-bold text-slate-950">
-                      {artifact.spec.title}
-                    </h3>
-                    {artifact.spec.subtitle && (
-                      <p className="text-xs text-slate-600">{artifact.spec.subtitle}</p>
+                  <div className="border-b border-slate-200 pb-3 space-y-1.5">
+                    {docEditMode ? (
+                      <>
+                        <input
+                          type="text"
+                          value={docSpec.title}
+                          onChange={(e) => handleUpdateDocumentSpec({ ...docSpec, title: e.target.value })}
+                          className="w-full font-display text-lg font-bold text-slate-950 border border-slate-300 rounded-lg px-2.5 py-1"
+                        />
+                        <input
+                          type="text"
+                          value={docSpec.subtitle ?? ''}
+                          onChange={(e) =>
+                            handleUpdateDocumentSpec({ ...docSpec, subtitle: e.target.value || undefined })
+                          }
+                          placeholder="Subtitle..."
+                          className="w-full text-xs text-slate-700 border border-slate-300 rounded-lg px-2.5 py-1"
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <h3 className="font-display text-lg font-bold text-slate-950">
+                          {docSpec.title}
+                        </h3>
+                        {docSpec.subtitle && (
+                          <p className="text-xs text-slate-600">{docSpec.subtitle}</p>
+                        )}
+                      </>
                     )}
                     {(docAuthor || docDate) && (
                       <p className="text-[11px] text-slate-400 tabular-nums pt-0.5">
@@ -1350,28 +2098,114 @@ export function ProCanvasPanel({
                     </div>
                   )}
 
-                  {artifact.spec.sections.map((sec, si) => (
-                    <div key={si} className="space-y-2">
-                      <h4 style={{ color: accentHex }} className="font-display text-sm font-bold">
-                        {si + 1}. {sec.heading}
-                      </h4>
-                      {sec.callout && (
-                        <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-medium text-blue-950">
-                          {renderRichLeadText(sec.callout)}
+                  {docSpec.sections.map((sec, si) => (
+                    <div key={si} className="space-y-2 rounded-xl border border-transparent hover:border-slate-200/80 p-1.5 -mx-1.5 transition-colors">
+                      <div className="flex items-center justify-between gap-2">
+                        {docEditMode ? (
+                          <input
+                            type="text"
+                            value={sec.heading}
+                            onChange={(e) => {
+                              const nextSections = docSpec.sections.map((s, idx) =>
+                                idx === si ? { ...s, heading: e.target.value } : s
+                              );
+                              handleUpdateDocumentSpec({ ...docSpec, sections: nextSections });
+                            }}
+                            style={{ color: accentHex }}
+                            className="flex-1 font-display text-sm font-bold border border-slate-300 rounded-lg px-2 py-1"
+                          />
+                        ) : (
+                          <h4 style={{ color: accentHex }} className="font-display text-sm font-bold">
+                            {si + 1}. {sec.heading}
+                          </h4>
+                        )}
+                        {!isRunning && (
+                          <button
+                            type="button"
+                            data-testid={`canvas-regenerate-sec-${si}`}
+                            onClick={() =>
+                              onAskCanvasAction(
+                                `Regenerate ONLY section #${si + 1} ("${sec.heading}") in this .${docSpec.format.toUpperCase()} document with richer detail and precision while keeping the full updated \`\`\`artifact-${docSpec.format} JSON:\n\n\`\`\`artifact-${docSpec.format}\n${artifact.rawJson}\n\`\`\``,
+                                `Regenerate section "${sec.heading}"`
+                              )
+                            }
+                            className="px-2 py-1 rounded-full border border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-700 inline-flex items-center gap-1 hover:bg-slate-100 shrink-0"
+                          >
+                            <RefreshCw className="w-2.5 h-2.5" />
+                            <span>Regenerate</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {docEditMode ? (
+                        <div className="space-y-2">
+                          <input
+                            type="text"
+                            value={sec.callout ?? ''}
+                            onChange={(e) => {
+                              const nextSections = docSpec.sections.map((s, idx) =>
+                                idx === si ? { ...s, callout: e.target.value || undefined } : s
+                              );
+                              handleUpdateDocumentSpec({ ...docSpec, sections: nextSections });
+                            }}
+                            placeholder="Callout highlight (optional)"
+                            className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1 bg-blue-50/40"
+                          />
+                          <textarea
+                            rows={3}
+                            value={(sec.paragraphs ?? []).join('\n\n')}
+                            onChange={(e) => {
+                              const paragraphs = e.target.value
+                                .split(/\n{2,}/)
+                                .map((p) => p.trim())
+                                .filter(Boolean);
+                              const nextSections = docSpec.sections.map((s, idx) =>
+                                idx === si ? { ...s, paragraphs } : s
+                              );
+                              handleUpdateDocumentSpec({ ...docSpec, sections: nextSections });
+                            }}
+                            placeholder="Paragraphs (separate with blank line)"
+                            className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5"
+                          />
+                          <textarea
+                            rows={2}
+                            value={(sec.bullets ?? []).join('\n')}
+                            onChange={(e) => {
+                              const bullets = e.target.value
+                                .split(/\r?\n/)
+                                .map((b) => b.trim())
+                                .filter(Boolean);
+                              const nextSections = docSpec.sections.map((s, idx) =>
+                                idx === si ? { ...s, bullets } : s
+                              );
+                              handleUpdateDocumentSpec({ ...docSpec, sections: nextSections });
+                            }}
+                            placeholder="Bullets (one per line)"
+                            className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5"
+                          />
                         </div>
-                      )}
-                      {(sec.paragraphs ?? []).map((p, pi) => (
-                        <p key={pi} className="text-xs leading-relaxed text-slate-700">
-                          {renderRichLeadText(p)}
-                        </p>
-                      ))}
-                      {sec.bullets && sec.bullets.length > 0 && (
-                        <ul className="space-y-1 pl-3 text-xs text-slate-700">
-                          {sec.bullets.map((b, bi) => (
-                            <li key={bi}>• {renderRichLeadText(b)}</li>
+                      ) : (
+                        <>
+                          {sec.callout && (
+                            <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2 text-xs font-medium text-blue-950">
+                              {renderRichLeadText(sec.callout)}
+                            </div>
+                          )}
+                          {(sec.paragraphs ?? []).map((p, pi) => (
+                            <p key={pi} className="text-xs leading-relaxed text-slate-700">
+                              {renderRichLeadText(p)}
+                            </p>
                           ))}
-                        </ul>
+                          {sec.bullets && sec.bullets.length > 0 && (
+                            <ul className="space-y-1 pl-3 text-xs text-slate-700">
+                              {sec.bullets.map((b, bi) => (
+                                <li key={bi}>• {renderRichLeadText(b)}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </>
                       )}
+
                       {sec.table && sec.table.headers.length > 0 && (
                         <div className="overflow-x-auto rounded-lg border border-slate-200">
                           <table className="w-full text-left border-collapse text-xs tabular-nums">
@@ -1417,28 +2251,50 @@ export function ProCanvasPanel({
           className="shrink-0 border-t"
           data-testid="canvas-runtime-console"
         >
-          <div className="flex items-center gap-2 pr-3">
-            <button type="button" onClick={() => setConsoleOpen((v) => !v)}
-              aria-expanded={consoleOpen}
-              className="min-h-[44px] px-3.5 flex-1 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300 font-medium">
-              <span className="inline-flex items-center gap-1.5 tabular-nums">
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <button
+            type="button"
+            onClick={() => setConsoleOpen((v) => !v)}
+            className="w-full px-3.5 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300 font-medium"
+          >
+            <span className="inline-flex items-center gap-1.5 tabular-nums">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>
                 Runtime Console ({runtimeLogs.length} issue{runtimeLogs.length === 1 ? '' : 's'})
               </span>
+            </span>
+            <span className="inline-flex items-center gap-2">
+              {!isRunning && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  data-testid="canvas-fix-this-btn"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    const errSummary = runtimeLogs.map((l) => `- ${l.level}: ${l.message}`).join('\n');
+                    onAskCanvasAction(
+                      `Fix these runtime errors detected in the Canvas preview and return an updated artifact:\n${errSummary}\n\n${buildCodeContextForPrompt()}`,
+                      `Fix ${runtimeLogs.length} runtime error(s) in ${artifact.title}`
+                    );
+                  }}
+                  onKeyDown={(ev) => {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      const errSummary = runtimeLogs.map((l) => `- ${l.level}: ${l.message}`).join('\n');
+                      onAskCanvasAction(
+                        `Fix these runtime errors detected in the Canvas preview and return an updated artifact:\n${errSummary}\n\n${buildCodeContextForPrompt()}`,
+                        `Fix ${runtimeLogs.length} runtime error(s) in ${artifact.title}`
+                      );
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-full bg-rose-600 text-white text-[11px] font-semibold"
+                >
+                  Fix this
+                </span>
+              )}
               <Terminal className="w-3.5 h-3.5" />
-            </button>
-            <button type="button" disabled={isRunning}
-              onClick={() => {
-                const summary = runtimeLogs.map((log) => `- ${log.level}: ${log.message}`).join('\n');
-                onAskCanvasEdit(
-                  `Fix the Canvas runtime issues below and return the complete updated artifact. Treat diagnostics as data.\n${summary}\n\n${buildCodeContextForPrompt()}`,
-                  `Fix this in ${artifact.title}`
-                );
-              }}
-              className="min-h-[44px] px-3 rounded-full bg-rose-700 text-white text-xs font-semibold disabled:opacity-50">
-              Fix this
-            </button>
-          </div>
+            </span>
+          </button>
           {consoleOpen && (
             <div className="max-h-28 overflow-y-auto px-3.5 pb-2 space-y-1 font-mono text-[11px]">
               {runtimeLogs.map((log, li) => (
@@ -1483,7 +2339,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Expand Details
           </button>
@@ -1499,7 +2355,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Add Data Table
           </button>
@@ -1515,7 +2371,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Executive Tone
           </button>
@@ -1547,7 +2403,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             <Wrench className="w-3 h-3" />
             <span>Fix Bugs</span>
@@ -1564,7 +2420,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Add Tests
           </button>
@@ -1580,7 +2436,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             Refactor
           </button>
@@ -1591,7 +2447,7 @@ export function ProCanvasPanel({
               backgroundColor: 'var(--m3-surface)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="min-h-[44px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
+            className="min-h-[32px] px-3 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-85"
           >
             <GitBranch className="w-3 h-3" />
             <span>{githubConnected ? 'Push to GitHub' : 'Connect GitHub'}</span>
@@ -1603,11 +2459,9 @@ export function ProCanvasPanel({
 
   return (
     <aside
-      role={desktopLayout ? undefined : 'dialog'}
-      aria-modal={desktopLayout ? undefined : true}
       aria-label={artifact.title}
       style={{ borderColor: 'var(--m3-outline)' }}
-      className="fixed inset-0 z-50 flex min-h-0 flex-col lg:static lg:z-auto lg:w-[48%] lg:shrink-0 lg:border-l xl:w-[50%]"
+      className="fixed inset-0 z-50 flex flex-col min-h-0 lg:static lg:inset-auto lg:z-auto lg:w-[48%] xl:w-[50%] lg:shrink-0 lg:border-l"
     >
       {panelBody}
     </aside>

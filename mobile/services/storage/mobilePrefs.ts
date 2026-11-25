@@ -15,6 +15,19 @@ export interface MobilePrefs {
 
 type PrefsListener = (prefs: MobilePrefs) => void;
 const listeners = new Set<PrefsListener>();
+type FlushHandler = () => Promise<void> | void;
+const flushHandlers = new Set<FlushHandler>();
+
+export function registerMobileFlushHandler(handler: FlushHandler): () => void {
+  flushHandlers.add(handler);
+  return () => {
+    flushHandlers.delete(handler);
+  };
+}
+
+export async function flushMobileStateNow(): Promise<void> {
+  await Promise.allSettled(Array.from(flushHandlers).map((fn) => Promise.resolve(fn())));
+}
 
 export function subscribeMobilePrefs(listener: PrefsListener): () => void {
   listeners.add(listener);

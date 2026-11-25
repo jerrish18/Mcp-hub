@@ -26,6 +26,15 @@ function openDatabase(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
 
   dbPromise = new Promise((resolve) => {
+    let settled = false;
+    const finish = (db: IDBDatabase | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!db) dbPromise = null;
+      resolve(db);
+    };
+    const timer = setTimeout(() => finish(null), 1500);
     try {
       const req = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = () => {
@@ -50,18 +59,12 @@ function openDatabase(): Promise<IDBDatabase | null> {
         db.onclose = () => {
           dbPromise = null;
         };
-        resolve(db);
+        finish(db);
       };
-      req.onerror = () => {
-        dbPromise = null;
-        resolve(null);
-      };
-      req.onblocked = () => {
-        resolve(null);
-      };
+      req.onerror = () => finish(null);
+      req.onblocked = () => finish(null);
     } catch {
-      dbPromise = null;
-      resolve(null);
+      finish(null);
     }
   });
   return dbPromise;

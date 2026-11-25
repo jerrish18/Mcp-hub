@@ -75,6 +75,7 @@ test('workspaceRouter enforces auth, isolates accounts, and rejects traversal ID
         settings: { theme: 'dark', a2uiEnabled: false },
         conversations: [{ id: 'conv_a1', title: 'Alpha Study' }],
         savedStudyNotes: [{ id: 'note_a1', title: 'Alpha Note' }],
+        projects: [{ id: 'proj_a1', name: 'Launch Ops', instructions: 'Use TypeScript' }],
       }),
     });
     assert.equal(putA.status, 200);
@@ -98,12 +99,15 @@ test('workspaceRouter enforces auth, isolates accounts, and rejects traversal ID
         settings: { a2uiEnabled: boolean };
         conversations: Array<{ id: string }>;
         savedStudyNotes: Array<{ id: string }>;
+        projects?: Array<{ id: string; name: string }>;
       };
     };
     assert.equal(jsonA.workspace.ownerId, 'user_alpha_1');
     assert.equal(jsonA.workspace.settings.a2uiEnabled, false);
     assert.equal(jsonA.workspace.conversations[0].id, 'conv_a1');
     assert.equal(jsonA.workspace.savedStudyNotes[0].id, 'note_a1');
+    assert.equal(jsonA.workspace.projects?.[0]?.id, 'proj_a1');
+    assert.equal(jsonA.workspace.projects?.[0]?.name, 'Launch Ops');
   } finally {
     cleanup();
   }

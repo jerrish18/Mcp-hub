@@ -1,83 +1,4 @@
-import type { A2uiMode, AppSettings, ChatMode } from '../types';
-
-export const A2UI_MODES: A2uiMode[] = ['off', 'smart', 'always'];
-
-export function readA2uiMode(settings?: Partial<Pick<AppSettings, 'a2uiMode' | 'a2uiEnabled'>>): A2uiMode {
-  if (settings?.a2uiMode && A2UI_MODES.includes(settings.a2uiMode)) return settings.a2uiMode;
-  return settings?.a2uiEnabled === false ? 'off' : 'smart';
-}
-
-const PLAIN_OUTPUT = /\b(?:(?:plain text|(?:raw )?json|code) only|only (?:respond with |provide |return |the )?(?:code|raw json|plain text)|(?:no|without) (?:widgets?|a2ui|markdown|explanations?))\b/i;
-const GREETING = /^(?:hi|hello|hey|good (?:morning|afternoon|evening)|thank(?:s| you))[!.\s]*$/i;
-const WIDGET_INTENT = /\b(?:compare|versus|vs|trade-?offs|checklist|to-?do list|step by step|steps|plan|roadmap|schedule|timeline|milestones|metrics|kpis?|budget|forecast|(?:bar )?chart|table of (?:numbers|results)|rank|form|next steps)\b/i;
-const SUPPORTING_INTENT = /\b(?:plan|process|recap|review|progress|status|options|results)\b/i;
-
-export function requestsPlainA2uiOutput(text: string): boolean {
-  return PLAIN_OUTPUT.test(text) || GREETING.test(text.trim());
-}
-
-export function shouldOfferA2ui(
-  userText: string, chatMode: ChatMode, a2uiMode: A2uiMode, lastAssistantHadA2ui: boolean
-): boolean {
-  if (a2uiMode === 'always') return true;
-  if (a2uiMode === 'off') return false;
-  const text = userText.trim();
-  if (!text || requestsPlainA2uiOutput(text)) return false;
-  if (WIDGET_INTENT.test(text)) return true;
-  return chatMode !== 'general' && !lastAssistantHadA2ui && SUPPORTING_INTENT.test(text);
-}
-
-// Keep other fenced languages intact, including examples containing an A2UI fence.
-export function limitA2uiFences(text: string, allow: boolean): string {
-  if (!/a2ui/i.test(text)) return text;
-  let fence: { marker: string; skip: boolean } | undefined;
-  let seen = false;
-  return text.split('\n').filter((line) => {
-    const trimmed = line.trim();
-    if (fence) {
-      const { skip, marker } = fence;
-      if (trimmed.length >= marker.length && [...trimmed].every((char) => char === marker[0])) {
-        fence = undefined;
-      }
-      return !skip;
-    }
-    const opening = /^(`{3,}|~{3,})\s*([\w+-]*)\s*$/.exec(trimmed);
-    if (!opening) return true;
-    const isWidget = /^(?:artifact-)?a2ui$/i.test(opening[2]);
-    fence = { marker: opening[1], skip: isWidget && (!allow || seen) };
-    if (isWidget) seen = true;
-    return !fence.skip;
-  }).join('\n');
-}
-
-function repairA2uiJson(code: string): string {
-  let repaired = '';
-  let closingQuote = '';
-  let escaped = false;
-  for (let i = 0; i < code.length; i++) {
-    const char = code[i];
-    if (closingQuote) {
-      if (escaped) {
-        repaired += char;
-        escaped = false;
-      } else if (char === '\\') {
-        repaired += char;
-        escaped = true;
-      } else if (char === closingQuote) {
-        repaired += '"';
-        closingQuote = '';
-      } else {
-        repaired += char === '"' ? '\\"' : char;
-      }
-    } else if (char === '"' || char === '“' || char === '”') {
-      closingQuote = char === '“' ? '”' : char;
-      repaired += '"';
-    } else if (char !== ',' || !/^\s*[}\]]/.test(code.slice(i + 1))) {
-      repaired += char;
-    }
-  }
-  return repaired;
-}
+import type { A2uiMode, ChatMode } from '../types';
 
 export type A2UIWidget =
   | {
@@ -326,7 +247,83 @@ function parseWidget(raw: unknown): A2UIWidget | null {
   return null;
 }
 
-export function parseA2uiBlock(language: string, code: string, maxWidgets = 8): A2UISurfaceSpec | null {
+const PLAIN_OR_CODE_ONLY_RE =
+  /\b(plain text only|raw json only|code only|just the code|no widget|without a2ui|skip a2ui|only code)\b/i;
+
+const SHORT_GREETING_RE =
+  /^(hi|hello|hey|yo|sup|good morning|good afternoon|good evening|thanks|thank you|thx|ok|okay|cool|great|bye|goodbye)[!.?\s]*$/i;
+
+const SMART_A2UI_INTENT_RE =
+  /\b(compare|comparison|vs\.?|versus|pros and cons|trade-?offs?|steps?|step-by-step|plan|planning|roadmap|schedule|timeline|checklist|to-?do|todo|metrics?|kpi|budget|forecast|numbers?|table of|breakdown|chart|graph|dashboard|form|parameters?|quiz|flashcards?|study plan|review plan|milestones?|analyze|audit)\b/i;
+
+export function resolveA2uiMode(settings?: {
+  a2uiMode?: A2uiMode;
+  a2uiEnabled?: boolean;
+}): A2uiMode {
+  if (
+    settings?.a2uiMode === 'off' ||
+    settings?.a2uiMode === 'smart' ||
+    settings?.a2uiMode === 'always'
+  ) {
+    return settings.a2uiMode;
+  }
+  if (settings?.a2uiEnabled === false) return 'off';
+  return 'smart';
+}
+
+export function shouldOfferA2ui(
+  userText: string,
+  chatMode: ChatMode,
+  a2uiMode: A2uiMode,
+  lastAssistantHadA2ui: boolean
+): boolean {
+  if (a2uiMode === 'off') return false;
+  if (a2uiMode === 'always') return true;
+
+  const trimmed = userText.trim();
+  if (!trimmed) return false;
+  if (PLAIN_OR_CODE_ONLY_RE.test(trimmed)) return false;
+  if (SHORT_GREETING_RE.test(trimmed)) return false;
+
+  const hasIntent = SMART_A2UI_INTENT_RE.test(trimmed);
+  if (chatMode === 'general') {
+    if (!hasIntent) return false;
+    if (lastAssistantHadA2ui && trimmed.split(/\s+/).length < 6) {
+      return false;
+    }
+    return true;
+  }
+
+  if (hasIntent) return true;
+
+  // In Pro & Study modes, skip short conversational prompts when there is no structured/numeric/planning signal
+  const wordCount = trimmed.split(/\s+/).length;
+  if (wordCount < 6) return false;
+
+  // Avoid consecutive unsolicited A2UI widgets if the previous turn already rendered one without explicit intent
+  if (lastAssistantHadA2ui) return false;
+
+  return chatMode === 'professional' && /\b(pptx|xlsx|docx|pdf|build|create|report|notes?)\b/i.test(trimmed);
+}
+
+export function repairA2uiJson(raw: string): string {
+  let text = raw.trim();
+  // Strip outer markdown fence remnants if accidentally included
+  text = text.replace(/^```(?:a2ui|artifact-a2ui|json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  // Replace curly smart quotes with straight quotes
+  text = text.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  // Trim leading/trailing non-JSON prose outside the outermost braces
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    text = text.slice(firstBrace, lastBrace + 1);
+  }
+  // Remove trailing commas before } or ]
+  text = text.replace(/,\s*([}\]])/g, '$1');
+  return text;
+}
+
+export function parseA2uiBlock(language: string, code: string): A2UISurfaceSpec | null {
   const norm = language.trim().toLowerCase();
   if (norm !== 'a2ui' && norm !== 'artifact-a2ui') {
     return null;
@@ -335,8 +332,11 @@ export function parseA2uiBlock(language: string, code: string, maxWidgets = 8): 
   try {
     parsed = JSON.parse(code);
   } catch {
-    try { parsed = JSON.parse(repairA2uiJson(code)); }
-    catch { return null; }
+    try {
+      parsed = JSON.parse(repairA2uiJson(code));
+    } catch {
+      return null;
+    }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return null;
@@ -346,7 +346,7 @@ export function parseA2uiBlock(language: string, code: string, maxWidgets = 8): 
   const widgets = rawWidgets
     .map(parseWidget)
     .filter((w): w is A2UIWidget => Boolean(w))
-    .slice(0, maxWidgets);
+    .slice(0, 8);
   if (widgets.length === 0) return null;
 
   return {
@@ -356,16 +356,4 @@ export function parseA2uiBlock(language: string, code: string, maxWidgets = 8): 
     themeColor: asTrimmedString(obj.themeColor, 16) || undefined,
     widgets,
   };
-}
-
-export function loadA2uiState<T extends boolean | Record<string, unknown>>(
-  storage: Pick<Storage, 'getItem'>, key: string, fallback: T
-): T {
-  try {
-    const value: unknown = JSON.parse(storage.getItem(key) ?? 'null');
-    if (typeof fallback === 'boolean') return typeof value === 'boolean' ? value as T : fallback;
-    return value && typeof value === 'object' && !Array.isArray(value) ? { ...(fallback as Record<string, unknown>), ...value } as T : fallback;
-  } catch {
-    return fallback;
-  }
 }

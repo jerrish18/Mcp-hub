@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   KeyboardAvoidingView,
@@ -12,6 +12,7 @@ import {
   useColorScheme,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import { useLocalSearchParams } from 'expo-router';
 import { getModelById } from '@core/config/models';
 import { runAgentLoop } from '@core/services/llm/agentLoop';
 import type { LlmConversationItem } from '@core/services/llm/types';
@@ -29,8 +30,42 @@ import type {
   PendingApproval,
   ToolCallRecord,
 } from '@core/types';
-import { loadMobilePrefs, saveMobilePrefs, subscribeMobilePrefs } from '../../services/storage/mobilePrefs';
+import {
+  scheduleApprovalNeededNotification,
+  scheduleRunCompleteNotification,
+} from '../../services/notifications';
+import {
+  loadMobilePrefs,
+  registerMobileFlushHandler,
+  saveMobilePrefs,
+  subscribeMobilePrefs,
+} from '../../services/storage/mobilePrefs';
 import { sqliteHistoryDb } from '../../services/storage/sqliteHistory';
+
+interface ExpoSpeechRecognitionLike {
+  getPermissionsAsync?: () => Promise<{ granted: boolean }>;
+  requestPermissionsAsync?: () => Promise<{ granted: boolean }>;
+  addListener?: (
+    event: 'result' | 'error' | 'end',
+    listener: (ev: { results?: Array<{ transcript?: string }>; error?: string }) => void
+  ) => { remove: () => void };
+  start: (opts: { lang?: string; interimResults?: boolean; continuous?: boolean }) => void;
+  stop: () => void;
+}
+
+async function tryLoadSpeechRecognitionModule(): Promise<ExpoSpeechRecognitionLike | null> {
+  if (Platform.OS === 'web') return null;
+  try {
+    const pkgName = 'expo-speech-recognition';
+    const mod = (await import(pkgName)) as {
+      ExpoSpeechRecognitionModule?: ExpoSpeechRecognitionLike;
+      default?: ExpoSpeechRecognitionLike;
+    };
+    return mod.ExpoSpeechRecognitionModule ?? mod.default ?? null;
+  } catch {
+    return null;
+  }
+}
 
 function buildHistoryFromMessages(msgs: ChatMessage[]): LlmConversationItem[] {
   const items: LlmConversationItem[] = [];
@@ -50,6 +85,7 @@ function buildHistoryFromMessages(msgs: ChatMessage[]): LlmConversationItem[] {
 
 export default function MobileChatScreen() {
   const isDark = useColorScheme() === 'dark';
+  const params = useLocalSearchParams<{ sharedText?: string }>();
   const [agents, setAgents] = useState<AgentProfile[]>(BUILT_IN_AGENTS);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(BUILT_IN_AGENTS[0].id);
   const [servers, setServers] = useState<McpServerConfig[]>([]);
@@ -62,10 +98,67 @@ export default function MobileChatScreen() {
   const [running, setRunning] = useState(false);
   const [abortCtrl, setAbortCtrl] = useState<AbortController | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceHint, setVoiceHint] = useState('');
+  const inputRef = useRef<TextInput | null>(null);
   const approvalResolverRef = useRef<((decision: ApprovalDecision) => void) | null>(null);
+  const lastSharedRef = useRef<string | null>(null);
+  const speechModuleRef = useRef<ExpoSpeechRecognitionLike | null>(null);
+  const speechSubsRef = useRef<Array<{ remove: () => void }>>([]);
+  const latestMessagesRef = useRef<ChatMessage[]>([]);
+
+  latestMessagesRef.current = messages;
 
   const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? BUILT_IN_AGENTS[0];
   const model = getModelById(agent.defaultModelId);
+
+  useEffect(() => {
+    const incoming = typeof params.sharedText === 'string' ? params.sharedText.trim() : '';
+    if (incoming && lastSharedRef.current !== incoming) {
+      lastSharedRef.current = incoming;
+      setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${incoming}` : incoming));
+    }
+  }, [params.sharedText]);
+
+  const persistConvSnapshot = useCallback(
+    async (nextMessages: ChatMessage[], titleSeed?: string) => {
+      const now = Date.now();
+      const existing = conversations.find((c) => c.id === activeConvId);
+      const convId = activeConvId ?? `conv_${now}`;
+      const conv: Conversation = {
+        id: convId,
+        title:
+          existing && existing.title !== 'New Chat'
+            ? existing.title
+            : (titleSeed?.slice(0, 48) || existing?.title || 'New Chat'),
+        agentId: agent.id,
+        modelId: model.id,
+        effort,
+        chatMode: agent.defaultChatMode ?? 'professional',
+        knowledgeSource: 'auto',
+        studyInstructions: agent.studyInstructions ?? '',
+        messages: nextMessages,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      await sqliteHistoryDb.saveConversation(conv);
+      setConversations((prev) => [conv, ...prev.filter((c) => c.id !== conv.id)]);
+      if (!activeConvId) {
+        setActiveConvId(conv.id);
+        await saveMobilePrefs({ activeConversationId: conv.id });
+      }
+    },
+    [activeConvId, agent, conversations, effort, model.id]
+  );
+
+  useEffect(() => {
+    const unregFlush = registerMobileFlushHandler(async () => {
+      if (activeConvId && latestMessagesRef.current.length > 0) {
+        await persistConvSnapshot(latestMessagesRef.current);
+      }
+    });
+    return unregFlush;
+  }, [activeConvId, persistConvSnapshot]);
 
   useEffect(() => {
     let mounted = true;
@@ -146,8 +239,76 @@ export default function MobileChatScreen() {
   useEffect(() => {
     return () => {
       abortCtrl?.abort();
+      for (const s of speechSubsRef.current) s.remove();
+      speechSubsRef.current = [];
+      speechModuleRef.current?.stop();
     };
   }, [abortCtrl]);
+
+  const handleToggleVoice = async () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setVoiceHint('');
+
+    if (isListening && speechModuleRef.current) {
+      speechModuleRef.current.stop();
+      setIsListening(false);
+      return;
+    }
+
+    const speechMod = await tryLoadSpeechRecognitionModule();
+    if (!speechMod) {
+      inputRef.current?.focus();
+      setVoiceHint(
+        Platform.OS === 'ios'
+          ? 'Tap the microphone key on your iOS keyboard to dictate directly.'
+          : 'Tap the Gboard microphone key on your Android keyboard to dictate directly.'
+      );
+      return;
+    }
+
+    try {
+      const currentPerm = speechMod.getPermissionsAsync ? await speechMod.getPermissionsAsync() : { granted: true };
+      const granted = currentPerm.granted
+        ? true
+        : speechMod.requestPermissionsAsync
+          ? (await speechMod.requestPermissionsAsync()).granted
+          : false;
+      if (!granted) {
+        setVoiceHint('Microphone permission denied. Enable it in Settings or use your keyboard mic.');
+        return;
+      }
+
+      for (const s of speechSubsRef.current) s.remove();
+      speechSubsRef.current = [];
+      const baseText = input.trim();
+
+      if (speechMod.addListener) {
+        speechSubsRef.current.push(
+          speechMod.addListener('result', (ev) => {
+            const transcript = ev.results?.[0]?.transcript?.trim() ?? '';
+            if (transcript) {
+              setInput(baseText ? `${baseText} ${transcript}` : transcript);
+            }
+          }),
+          speechMod.addListener('error', () => {
+            setIsListening(false);
+            setVoiceHint('Speech recognition ended. You can also use your keyboard mic.');
+          }),
+          speechMod.addListener('end', () => {
+            setIsListening(false);
+          })
+        );
+      }
+
+      speechModuleRef.current = speechMod;
+      setIsListening(true);
+      speechMod.start({ lang: 'en-US', interimResults: true, continuous: false });
+    } catch {
+      setIsListening(false);
+      inputRef.current?.focus();
+      setVoiceHint('Native STT unavailable on this device build; use your keyboard mic.');
+    }
+  };
 
   const handleNewChat = async () => {
     if (running) return;
@@ -177,34 +338,6 @@ export default function MobileChatScreen() {
     const nextAgent = agents[(idx + 1) % agents.length];
     setSelectedAgentId(nextAgent.id);
     await saveMobilePrefs({ selectedAgentId: nextAgent.id });
-  };
-
-  const persistConvSnapshot = async (nextMessages: ChatMessage[], titleSeed?: string) => {
-    const now = Date.now();
-    const existing = conversations.find((c) => c.id === activeConvId);
-    const convId = activeConvId ?? `conv_${now}`;
-    const conv: Conversation = {
-      id: convId,
-      title:
-        existing && existing.title !== 'New Chat'
-          ? existing.title
-          : (titleSeed?.slice(0, 48) || existing?.title || 'New Chat'),
-      agentId: agent.id,
-      modelId: model.id,
-      effort,
-      chatMode: agent.defaultChatMode ?? 'professional',
-      knowledgeSource: 'auto',
-      studyInstructions: agent.studyInstructions ?? '',
-      messages: nextMessages,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-    };
-    await sqliteHistoryDb.saveConversation(conv);
-    setConversations((prev) => [conv, ...prev.filter((c) => c.id !== conv.id)]);
-    if (!activeConvId) {
-      setActiveConvId(conv.id);
-      await saveMobilePrefs({ activeConversationId: conv.id });
-    }
   };
 
   const resolveApproval = (decision: ApprovalDecision) => {
@@ -276,11 +409,13 @@ export default function MobileChatScreen() {
             setMessages(latestMessages);
           },
           onFallbackNotice: () => {},
-          requestApproval: (req) =>
-            new Promise<ApprovalDecision>((resolve) => {
+          requestApproval: (req) => {
+            void scheduleApprovalNeededNotification(req.serverName, req.toolName);
+            return new Promise<ApprovalDecision>((resolve) => {
               approvalResolverRef.current = resolve;
               setPendingApproval(req);
-            }),
+            });
+          },
           onAlwaysAllowTool: (qualifiedKey) => {
             const updatedAllowed = Array.from(
               new Set([...settings.alwaysAllowedTools, qualifiedKey])
@@ -299,14 +434,17 @@ export default function MobileChatScreen() {
       );
       setMessages(finalized);
       await persistConvSnapshot(finalized, trimmed);
+      void scheduleRunCompleteNotification(res.finalText);
     } finally {
       setRunning(false);
       setAbortCtrl(null);
     }
   };
 
+  const bgSurface = isDark ? (settings.oledDark ? '#000000' : '#020617') : '#F8FAFC';
+
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? '#020617' : '#F8FAFC' }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: bgSurface }}>
       <View
         style={{
           flexDirection: 'row',
@@ -321,14 +459,14 @@ export default function MobileChatScreen() {
       >
         <Pressable
           onPress={() => void handleCycleAgent()}
-          style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
+          style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
         >
           <Text style={{ fontWeight: '600', color: isDark ? '#F8FAFC' : '#0F172A' }}>{agent.name}</Text>
         </Pressable>
         <View style={{ flexDirection: 'row', gap: 6 }}>
           <Pressable
             onPress={() => void handleNewChat()}
-            style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
+            style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
           >
             <Text style={{ fontWeight: '600', color: isDark ? '#F8FAFC' : '#0F172A' }}>New</Text>
           </Pressable>
@@ -337,7 +475,7 @@ export default function MobileChatScreen() {
               const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
               setEffort((e) => next[e]);
             }}
-            style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#2563EB' }}
+            style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#2563EB' }}
           >
             <Text style={{ fontWeight: '600', color: '#FFFFFF' }}>Effort: {effort}</Text>
           </Pressable>
@@ -371,11 +509,17 @@ export default function MobileChatScreen() {
       />
 
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {voiceHint ? (
+          <View style={{ paddingHorizontal: 14, paddingTop: 6 }}>
+            <Text style={{ fontSize: 11, color: isDark ? '#93C5FD' : '#1D4ED8' }}>{voiceHint}</Text>
+          </View>
+        ) : null}
         <View style={{ flexDirection: 'row', padding: 12, gap: 8 }}>
           <TextInput
+            ref={inputRef}
             value={input}
             onChangeText={setInput}
-            placeholder={`Message ${agent.name}...`}
+            placeholder={isListening ? 'Listening...' : `Message ${agent.name}...`}
             placeholderTextColor="#94A3B8"
             style={{
               flex: 1,
@@ -388,6 +532,22 @@ export default function MobileChatScreen() {
               borderColor: isDark ? '#1E293B' : '#CBD5E1',
             }}
           />
+          <Pressable
+            onPress={() => void handleToggleVoice()}
+            style={{
+              minWidth: 44,
+              minHeight: 44,
+              borderRadius: 16,
+              backgroundColor: isListening ? '#DC2626' : isDark ? '#1E293B' : '#E2E8F0',
+              justifyContent: 'center',
+              alignItems: 'center',
+              paddingHorizontal: 12,
+            }}
+          >
+            <Text style={{ color: isListening ? '#FFFFFF' : isDark ? '#F8FAFC' : '#0F172A', fontWeight: '600', fontSize: 12 }}>
+              {isListening ? 'Stop Mic' : 'Mic'}
+            </Text>
+          </Pressable>
           <Pressable
             onPress={running ? () => abortCtrl?.abort() : () => void handleSend()}
             style={{
@@ -445,19 +605,19 @@ export default function MobileChatScreen() {
             <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
               <Pressable
                 onPress={() => resolveApproval('deny')}
-                style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: '#DC2626' }}
+                style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#DC2626' }}
               >
                 <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Deny</Text>
               </Pressable>
               <Pressable
                 onPress={() => resolveApproval('always_allow')}
-                style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: '#0F766E' }}
+                style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#0F766E' }}
               >
                 <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Always</Text>
               </Pressable>
               <Pressable
                 onPress={() => resolveApproval('approve')}
-                style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, backgroundColor: '#2563EB' }}
+                style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#2563EB' }}
               >
                 <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Approve</Text>
               </Pressable>

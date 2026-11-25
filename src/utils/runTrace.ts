@@ -1,112 +1,283 @@
-import type { RunTrace, RunTraceStep, RunTraceStepStatus } from '../types';
+import { getModelById, getShortModelName } from '../config/models';
+import type { ModelConfig, RunTrace, RunTraceStep } from '../types';
 import { redactSecrets } from './redact';
 
-export const MAX_TRACE_STEPS = 64;
-const MAX_TRACE_PREVIEW = 700;
-const SENSITIVE_FIELD = /^(?:authorization|cookie|setcookie|password|passwd|secret|clientsecret|token|accesstoken|refreshtoken|apikey|privatekey|headers)$/i;
+export const SLOW_STEP_THRESHOLD_MS = 3000;
 
-export function tracePreview(value: unknown, secrets: string[] = []): string {
-  if (value === undefined) return '';
-  let text: string;
-  try {
-    let data = value;
-    if (typeof value === 'string' && /^\s*[{[]/.test(value)) {
-      try { data = JSON.parse(value); } catch { /* Keep original when the result is text. */ }
+export function redactAndPreview(
+  value: unknown,
+  maxLen = 280,
+  knownSecrets: string[] = []
+): string {
+  if (value == null) return '';
+  let raw: string;
+  if (typeof value === 'string') {
+    raw = value;
+  } else {
+    try {
+      raw = JSON.stringify(value, null, 2);
+    } catch {
+      raw = String(value);
     }
-    text = typeof data === 'string' ? data : JSON.stringify(data, (key, entry) =>
-      SENSITIVE_FIELD.test(key.replaceAll(/[-_]/g, '')) ? '[REDACTED]' : entry, 2);
-  } catch {
-    return 'Preview unavailable';
   }
-  const redacted = redactSecrets(text ?? '', secrets);
-  return redacted.length > MAX_TRACE_PREVIEW
-    ? redacted.slice(0, MAX_TRACE_PREVIEW - 1) + '…'
-    : redacted;
+  const redacted = redactSecrets(raw, knownSecrets).trim();
+  if (redacted.length <= maxLen) return redacted;
+  return `${redacted.slice(0, Math.max(20, maxLen - 1))}…`;
 }
 
-type StepFields = Omit<RunTraceStep, 'id' | 'startOffsetMs' | 'durationMs' | 'status'>;
-type StepUpdate = Partial<Omit<StepFields, 'type' | 'label'>>;
+export function normalizeTraceSteps(trace: RunTrace): RunTraceStep[] {
+  if (trace.steps && trace.steps.length > 0) {
+    return trace.steps;
+  }
 
-export function createRunTraceRecorder(startedAt: number, onChange: () => void, clock = Date.now) {
-  const steps: RunTraceStep[] = [];
-  let nextId = 0;
+  const synthetic: RunTraceStep[] = [];
+  let cursor = trace.startedAt;
 
-  const start = (fields: StepFields) => {
-    const startOffsetMs = Math.max(0, clock() - startedAt);
-    const step: RunTraceStep = { ...fields, id: String(++nextId), startOffsetMs, durationMs: 0, status: 'running' };
-    if (steps.length >= MAX_TRACE_STEPS) return () => {};
-    steps.push(step);
-    onChange();
-    return (status: RunTraceStepStatus, update?: StepUpdate) => {
-      if (step.status !== 'running') return;
-      Object.assign(step, update, { status, durationMs: Math.max(0, clock() - startedAt - startOffsetMs) });
-      onChange();
-    };
-  };
+  if (trace.ragUsed) {
+    synthetic.push({
+      kind: 'rag',
+      id: `rag_legacy_${trace.startedAt}`,
+      startedAt: cursor,
+      durationMs: 12,
+      chunksCount: trace.ragChunksCount ?? 0,
+      sourceChars: 0,
+    });
+    cursor += 12;
+  }
+
+  for (let i = 0; i < trace.fallbacks.length; i++) {
+    const fb = trace.fallbacks[i];
+    synthetic.push({
+      kind: 'fallback',
+      id: `fb_legacy_${i}`,
+      startedAt: fb.at || cursor,
+      durationMs: 0,
+      from: fb.from,
+      to: fb.to,
+      reason: fb.reason,
+    });
+  }
+
+  for (let i = 0; i < trace.toolCalls.length; i++) {
+    const tc = trace.toolCalls[i];
+    const dur = Math.max(0, tc.durationMs || 0);
+    synthetic.push({
+      kind: 'tool_call',
+      id: tc.id || `tc_legacy_${i}`,
+      startedAt: cursor,
+      durationMs: dur,
+      serverName: tc.serverName,
+      toolName: tc.toolName,
+      status: tc.status,
+      truncated: tc.truncated,
+    });
+    cursor += dur;
+  }
+
+  if (trace.stepsExecuted > 0) {
+    const toolsSum = trace.toolCalls.reduce((s, t) => s + (t.durationMs || 0), 0);
+    const modelDur = Math.max(0, trace.durationMs - toolsSum);
+    synthetic.unshift({
+      kind: 'model_call',
+      id: `model_legacy_${trace.startedAt}`,
+      startedAt: trace.startedAt,
+      durationMs: modelDur,
+      modelId: trace.usedModelId || trace.primaryModelId,
+      status: trace.error ? 'error' : 'ok',
+      estimatedTokens: trace.estimatedPromptTokens,
+      error: trace.error,
+    });
+  }
+
+  return synthetic;
+}
+
+export function formatDurationCompact(ms: number): string {
+  const safe = Math.max(0, Math.round(ms));
+  if (safe >= 1000) return `${(safe / 1000).toFixed(1)}s`;
+  return `${safe}ms`;
+}
+
+export function countTraceIssues(trace: RunTrace): {
+  errors: number;
+  warnings: number;
+  toolCount: number;
+} {
+  const steps = normalizeTraceSteps(trace);
+  let errors = trace.error ? 1 : 0;
+  let warnings = trace.fallbacks.length + (trace.stoppedByUser ? 1 : 0);
+
+  for (const s of steps) {
+    if (s.kind === 'tool_call' && (s.status === 'error' || s.status === 'denied')) {
+      errors++;
+    } else if (s.kind === 'model_call' && s.status === 'error') {
+      errors++;
+    } else if (s.kind === 'injection_warning') {
+      warnings++;
+    } else if (s.kind === 'approval_wait' && s.decision === 'deny') {
+      warnings++;
+    }
+  }
 
   return {
-    start,
-    snapshot: (stopped = false) => steps.map((step) =>
-      stopped && step.status === 'running'
-        ? { ...step, status: 'cancelled' as const, durationMs: Math.max(0, clock() - startedAt - step.startOffsetMs) }
-        : { ...step }),
+    errors,
+    warnings,
+    toolCount: trace.toolCalls.length,
   };
 }
 
-export function traceSteps(trace: RunTrace): RunTraceStep[] {
-  if (trace.steps?.length) return trace.steps;
-  return [
-    ...trace.fallbacks.map((fallback, index): RunTraceStep => ({
-      id: `fallback-${index}`, type: 'fallback', status: 'warning', durationMs: 0,
-      label: `${fallback.from} → ${fallback.to}`, startOffsetMs: Math.max(0, fallback.at - trace.startedAt),
-      resultPreview: tracePreview(fallback.reason),
-    })),
-    ...trace.toolCalls.map((call): RunTraceStep => ({
-      id: call.id, type: 'tool_call', toolCallId: call.id, toolName: call.toolName, serverName: call.serverName,
-      label: `${call.serverName} · ${call.toolName}`, startOffsetMs: 0, durationMs: call.durationMs,
-      status: call.status === 'success' || call.status === 'error' || call.status === 'denied' ? call.status : 'cancelled',
-    })),
+export function buildTraceSummaryChipText(
+  trace: RunTrace,
+  dynamicModels?: ModelConfig[]
+): string {
+  const model = getModelById(trace.usedModelId || trace.primaryModelId, dynamicModels);
+  const shortModel = getShortModelName(model);
+  const steps = normalizeTraceSteps(trace);
+
+  if (trace.isLive) {
+    const runningTool = [...steps]
+      .reverse()
+      .find((s) => (s.kind === 'tool_call' && s.status === 'running') || (s.kind === 'approval_wait' && s.decision === 'pending'));
+    if (runningTool?.kind === 'tool_call') {
+      return `Live · Running ${runningTool.toolName} · ${shortModel}`;
+    }
+    if (runningTool?.kind === 'approval_wait') {
+      return `Live · Waiting approval (${runningTool.toolName})`;
+    }
+    return `Live · Step ${Math.max(1, trace.stepsExecuted)} · ${shortModel}`;
+  }
+
+  const { errors, warnings, toolCount } = countTraceIssues(trace);
+  const parts: string[] = [];
+  if (toolCount > 0) {
+    parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`);
+  } else {
+    parts.push('Direct');
+  }
+  parts.push(formatDurationCompact(trace.durationMs));
+  parts.push(shortModel);
+
+  const issueCount = errors + warnings;
+  if (issueCount > 0) {
+    parts.push(`${issueCount} ${errors > 0 ? 'issue' : 'warning'}${issueCount === 1 ? '' : 's'}`);
+  }
+  return parts.join(' · ');
+}
+
+export type TraceStepFilter = 'all' | 'tools' | 'models' | 'errors';
+
+export function filterTraceSteps(steps: RunTraceStep[], filter: TraceStepFilter): RunTraceStep[] {
+  switch (filter) {
+    case 'tools':
+      return steps.filter((s) => s.kind === 'tool_call' || s.kind === 'approval_wait');
+    case 'models':
+      return steps.filter((s) => s.kind === 'model_call' || s.kind === 'fallback' || s.kind === 'rag');
+    case 'errors':
+      return steps.filter(
+        (s) =>
+          (s.kind === 'tool_call' && (s.status === 'error' || s.status === 'denied' || s.status === 'cancelled')) ||
+          (s.kind === 'model_call' && s.status === 'error') ||
+          (s.kind === 'approval_wait' && s.decision === 'deny') ||
+          s.kind === 'injection_warning' ||
+          s.kind === 'fallback' ||
+          s.durationMs >= SLOW_STEP_THRESHOLD_MS
+      );
+    case 'all':
+    default:
+      return steps;
+  }
+}
+
+export function formatTraceAsMarkdown(trace: RunTrace, title = 'Execution Run Trace'): string {
+  const steps = normalizeTraceSteps(trace);
+  const lines: string[] = [
+    `## ${title}`,
+    `- **Duration:** ${formatDurationCompact(trace.durationMs)}`,
+    `- **Model:** ${trace.primaryModelId !== trace.usedModelId ? `${trace.primaryModelId} → ${trace.usedModelId}` : trace.usedModelId}`,
+    `- **Steps Executed:** ${trace.stepsExecuted}`,
+    `- **Est. Prompt Tokens:** ${trace.estimatedPromptTokens.toLocaleString()}`,
+    `- **Local RAG:** ${trace.ragUsed ? `${trace.ragChunksCount ?? 0} chunks` : 'Direct'}`,
   ];
-}
 
-export function traceDuration(ms: number): string {
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-}
+  if (trace.stoppedByUser) {
+    lines.push('- **Status:** Stopped early by user');
+  }
+  if (trace.error) {
+    lines.push(`- **Error:** ${redactSecrets(trace.error)}`);
+  }
 
-export function traceSummary(trace: RunTrace): string {
-  const steps = traceSteps(trace);
-  const calls = steps.filter((step) => step.type === 'tool_call').length;
-  const warnings = steps.filter((step) => step.status === 'warning' || step.status === 'error').length;
-  return [`${calls} tool call${calls === 1 ? '' : 's'}`, traceDuration(trace.durationMs),
-    trace.usedModelId, warnings ? `${warnings} warning${warnings === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
-}
-
-export function traceMarkdown(trace: RunTrace): string {
-  return ['## Run trace', traceSummary(trace), '',
-    ...traceSteps(trace).map((step) => `- ${step.label} · ${step.status} · ${traceDuration(step.durationMs)}`)].join('\n');
-}
-
-export function traceServerStats(traces: RunTrace[]) {
-  const servers = new Map<string, { name: string; calls: number; totalMs: number; errors: number }>();
-  for (const trace of traces) {
-    for (const step of traceSteps(trace)) {
-      if (step.type !== 'tool_call' || !step.serverName || !['success', 'error'].includes(step.status)) continue;
-      const key = step.serverId ?? step.serverName;
-      const stats = servers.get(key) ?? { name: step.serverName, calls: 0, totalMs: 0, errors: 0 };
-      stats.calls++;
-      stats.totalMs += step.durationMs;
-      if (step.status === 'error') stats.errors++;
-      servers.set(key, stats);
+  lines.push('', '### Timeline Steps');
+  if (steps.length === 0) {
+    lines.push('_No recorded timeline steps._');
+  } else {
+    for (const s of steps) {
+      const offsetMs = Math.max(0, s.startedAt - trace.startedAt);
+      const offsetStr = `+${formatDurationCompact(offsetMs)}`;
+      const durStr = formatDurationCompact(s.durationMs);
+      if (s.kind === 'model_call') {
+        lines.push(`- \`${offsetStr}\` **Model** (\`${s.modelId}\`) — ${s.status} (${durStr})`);
+      } else if (s.kind === 'tool_call') {
+        lines.push(
+          `- \`${offsetStr}\` **Tool** \`${s.serverName}/${s.toolName}\` — ${s.status} (${durStr})${s.argsPreview ? `\n  - Args: \`${redactSecrets(s.argsPreview)}\`` : ''}${s.error ? `\n  - Error: ${redactSecrets(s.error)}` : ''}`
+        );
+      } else if (s.kind === 'approval_wait') {
+        lines.push(
+          `- \`${offsetStr}\` **Approval Gate** \`${s.serverName}/${s.toolName}\` — ${s.decision} (${durStr})`
+        );
+      } else if (s.kind === 'rag') {
+        lines.push(
+          `- \`${offsetStr}\` **Local RAG** — retrieved ${s.chunksCount} chunk(s) (${durStr})`
+        );
+      } else if (s.kind === 'fallback') {
+        lines.push(
+          `- \`${offsetStr}\` **Fallback** \`${s.from}\` → \`${s.to}\` (${redactSecrets(s.reason)})`
+        );
+      } else if (s.kind === 'injection_warning') {
+        lines.push(
+          `- \`${offsetStr}\` **Prompt-Injection Guard** \`${s.serverName}/${s.toolName}\` — ${s.signals.join(', ')}`
+        );
+      }
     }
   }
-  return [...servers.values()].map(({ name, calls, totalMs, errors }) => ({
-    name, calls, averageMs: totalMs / calls, errorRate: errors / calls,
-  }));
+
+  return lines.join('\n');
 }
 
-export function tracePercentages(step: RunTraceStep, totalMs: number, elapsed: number) {
-  const total = Math.max(1, totalMs);
-  const start = Math.min(100, step.startOffsetMs / total * 100);
-  const duration = step.status === 'running' ? Math.max(0, elapsed - step.startOffsetMs) : step.durationMs;
-  return { start, width: Math.min(100 - start, duration / total * 100), duration };
+export interface TraceServerStats {
+  serverName: string;
+  calls: number;
+  successes: number;
+  errors: number;
+  successRatePct: number;
+  avgLatencyMs: number;
+}
+
+export function aggregateTraceServerStats(traces: RunTrace[]): TraceServerStats[] {
+  const byServer = new Map<
+    string,
+    { calls: number; successes: number; errors: number; totalMs: number }
+  >();
+
+  for (const trace of traces) {
+    for (const tc of trace.toolCalls) {
+      const key = tc.serverName || 'Unknown Server';
+      const entry = byServer.get(key) ?? { calls: 0, successes: 0, errors: 0, totalMs: 0 };
+      entry.calls++;
+      if (tc.status === 'success') entry.successes++;
+      else if (tc.status === 'error' || tc.status === 'denied') entry.errors++;
+      entry.totalMs += Math.max(0, tc.durationMs || 0);
+      byServer.set(key, entry);
+    }
+  }
+
+  return Array.from(byServer.entries())
+    .map(([serverName, s]) => ({
+      serverName,
+      calls: s.calls,
+      successes: s.successes,
+      errors: s.errors,
+      successRatePct: s.calls > 0 ? Math.round((s.successes / s.calls) * 100) : 100,
+      avgLatencyMs: s.calls > 0 ? Math.round(s.totalMs / s.calls) : 0,
+    }))
+    .sort((a, b) => b.calls - a.calls);
 }

@@ -1,11 +1,11 @@
-import { ApprovalChangePreview, type LoadApprovalBefore } from './ApprovalChangePreview';
 import { useMemo, useState } from 'react';
-import { motion, useIsPresent } from 'motion/react';
+import { motion } from 'motion/react';
 import {
   AlertOctagon,
   AlertTriangle,
   Check,
   Code2,
+  GitCompareArrows,
   ListChecks,
   MessageSquareX,
   Server,
@@ -15,10 +15,10 @@ import {
 } from 'lucide-react';
 import type { AlwaysAllowDuration, ApprovalResolution, PendingApproval } from '../types';
 import { M3_SPRING } from '../utils/motion';
+import { buildApprovalBeforeAfterDiff } from '../utils/proFeatures';
 
 interface WriteApprovalBannerProps {
   approval: PendingApproval;
-  loadBefore?: LoadApprovalBefore;
   onDecision: (result: ApprovalResolution) => void;
 }
 
@@ -35,9 +35,8 @@ function formatKeyLabel(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteApprovalBannerProps) {
-  const isPresent = useIsPresent();
-  const [viewMode, setViewMode] = useState<'fields' | 'json' | 'diff'>('fields');
+export function WriteApprovalBanner({ approval, onDecision }: WriteApprovalBannerProps) {
+  const [viewMode, setViewMode] = useState<'fields' | 'diff' | 'json'>('fields');
   const [draftArgs, setDraftArgs] = useState<Record<string, unknown>>(() => ({
     ...approval.arguments,
   }));
@@ -49,6 +48,10 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
   const [alwaysDuration, setAlwaysDuration] = useState<AlwaysAllowDuration>('24h');
 
   const argEntries = useMemo(() => Object.entries(draftArgs), [draftArgs]);
+  const diffEntries = useMemo(
+    () => buildApprovalBeforeAfterDiff(approval.toolName, draftArgs),
+    [approval.toolName, draftArgs]
+  );
 
   const handleFieldChange = (key: string, nextValue: unknown) => {
     const nextArgs = { ...draftArgs, [key]: nextValue };
@@ -58,9 +61,9 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
     setIsDirty(true);
   };
 
-  const handleSwitchMode = (nextMode: 'fields' | 'json' | 'diff') => {
+  const handleSwitchMode = (nextMode: 'fields' | 'diff' | 'json') => {
     if (nextMode === viewMode) return;
-    if (viewMode === 'json') {
+    if (viewMode === 'json' && nextMode !== 'json') {
       try {
         const parsed = JSON.parse(argsText) as unknown;
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -73,7 +76,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
         setArgsError('Fix invalid JSON syntax before switching to Structured Fields.');
         return;
       }
-    } else if (nextMode === 'json') {
+    } else {
       setArgsText(JSON.stringify(draftArgs, null, 2));
       setArgsError('');
     }
@@ -100,10 +103,6 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
   };
 
   const handleApprove = (decision: 'approve' | 'always_allow') => {
-    if (approval.lockedArguments) {
-      if (decision === 'approve') onDecision({ decision });
-      return;
-    }
     const durationMeta =
       decision === 'always_allow' ? { alwaysAllowDuration: alwaysDuration } : {};
     if (isDirty || viewMode === 'json') {
@@ -125,8 +124,6 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
       exit={{ opacity: 0, y: 8, scale: 0.98 }}
       transition={M3_SPRING}
       role="alertdialog"
-      inert={!isPresent}
-      aria-hidden={!isPresent || undefined}
       aria-label={`Confirm write action ${approval.toolName}`}
       data-testid="write-approval-banner"
       style={{
@@ -190,7 +187,6 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
           style={{ backgroundColor: 'var(--m3-surface)' }}
           className="inline-flex items-center p-0.5 rounded-full border border-slate-200 dark:border-slate-700 shrink-0"
         >
-          {!approval.lockedArguments && <>
           <button
             type="button"
             data-testid="approval-mode-fields"
@@ -203,10 +199,27 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
                   }
                 : undefined
             }
-            className="min-h-[44px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            className="min-h-[30px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
           >
             <ListChecks className="w-3.5 h-3.5" />
             <span>Fields</span>
+          </button>
+          <button
+            type="button"
+            data-testid="approval-mode-diff"
+            onClick={() => handleSwitchMode('diff')}
+            style={
+              viewMode === 'diff'
+                ? {
+                    backgroundColor: 'var(--m3-primary-container)',
+                    color: 'var(--m3-on-primary-container)',
+                  }
+                : undefined
+            }
+            className="min-h-[30px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+          >
+            <GitCompareArrows className="w-3.5 h-3.5" />
+            <span>Diff</span>
           </button>
           <button
             type="button"
@@ -220,16 +233,10 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
                   }
                 : undefined
             }
-            className="min-h-[44px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            className="min-h-[30px] px-2.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
           >
             <Code2 className="w-3.5 h-3.5" />
             <span>Raw JSON</span>
-          </button>
-          </>}
-          <button type="button" aria-pressed={viewMode === 'diff'}
-            onClick={() => handleSwitchMode(viewMode === 'diff' ? 'fields' : 'diff')}
-            className="min-h-[44px] rounded-full px-3 text-xs font-semibold">
-            Preview changes
           </button>
         </div>
       </div>
@@ -250,13 +257,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
         )}
 
         {/* Structured Field-Level Editor or Raw JSON */}
-        {viewMode === 'diff' ? <ApprovalChangePreview approval={approval} args={draftArgs} loadBefore={loadBefore} />
-          : approval.lockedArguments ? (
-          <details className="rounded-xl border p-2 text-xs">
-            <summary className="min-h-[44px] cursor-pointer py-3 font-semibold">Review exact arguments and file contents</summary>
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all text-slate-900 dark:text-slate-100">{argsText}</pre>
-          </details>
-        ) : viewMode === 'fields' ? (
+        {viewMode === 'fields' ? (
           argEntries.length === 0 ? (
             <div
               style={{
@@ -363,6 +364,48 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
               })}
             </div>
           )
+        ) : viewMode === 'diff' ? (
+          <div
+            data-testid="approval-diff-view"
+            className="space-y-2 max-h-60 overflow-y-auto pr-0.5"
+          >
+            {diffEntries.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 px-3 py-2 text-xs text-slate-500">
+                No write payload changes to diff.
+              </div>
+            ) : (
+              diffEntries.map((entry) => (
+                <div
+                  key={entry.field}
+                  className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden bg-slate-950 text-slate-100"
+                >
+                  <div className="px-3 py-1.5 bg-slate-900 border-b border-slate-800 text-[11px] font-mono text-slate-300 flex items-center justify-between">
+                    <span>{entry.field}</span>
+                    <span className="text-[10px] text-slate-400">Before / After</span>
+                  </div>
+                  <div className="p-2 font-mono text-[11px] leading-relaxed overflow-x-auto space-y-0.5">
+                    {entry.lines.map((line, li) => (
+                      <div
+                        key={li}
+                        className={
+                          line.kind === 'added'
+                            ? 'bg-emerald-950/70 text-emerald-300 px-1.5 rounded'
+                            : line.kind === 'removed'
+                              ? 'bg-rose-950/70 text-rose-300 px-1.5 rounded'
+                              : 'text-slate-400 px-1.5'
+                        }
+                      >
+                        <span className="select-none mr-1.5 opacity-70">
+                          {line.kind === 'added' ? '+' : line.kind === 'removed' ? '-' : ' '}
+                        </span>
+                        <span className="whitespace-pre-wrap break-all">{line.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         ) : (
           <textarea
             aria-label="Edit tool arguments JSON"
@@ -420,7 +463,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="flex-1 min-h-[44px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
+                className="flex-1 min-h-[38px] px-3 rounded-xl border text-xs text-slate-900 dark:text-white"
               />
               <button
                 type="button"
@@ -430,7 +473,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
                     denyReason: denyReason.trim() || undefined,
                   })
                 }
-                className="min-h-[44px] px-4 rounded-full bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold whitespace-nowrap"
+                className="min-h-[38px] px-4 rounded-full bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold whitespace-nowrap"
               >
                 Confirm Deny
               </button>
@@ -447,13 +490,13 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
               backgroundColor: isDestructive ? '#e11d48' : 'var(--m3-primary)',
               color: isDestructive ? '#ffffff' : 'var(--m3-on-primary)',
             }}
-            className="min-h-[44px] px-4 py-2 rounded-full text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+            className="min-h-[42px] px-4 py-2 rounded-full text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
           >
             <Check className="w-4 h-4" />
             <span>{isDirty ? 'Approve Edited' : 'Approve & Run'}</span>
           </button>
 
-          {!approval.lockedArguments && !isDestructive && !hasInjectionWarning && (
+          {!isDestructive && !hasInjectionWarning && (
             <div className="inline-flex items-center gap-1.5 flex-wrap">
               <select
                 aria-label="Always allow duration"
@@ -463,7 +506,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="min-h-[44px] px-2.5 rounded-full border text-xs font-medium text-slate-800 dark:text-slate-100"
+                className="min-h-[42px] px-2.5 rounded-full border text-xs font-medium text-slate-800 dark:text-slate-100"
               >
                 <option value="1h">1 hour</option>
                 <option value="24h">24 hours</option>
@@ -478,7 +521,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="min-h-[44px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+                className="min-h-[42px] px-4 py-2 rounded-full border hover:opacity-90 text-slate-900 dark:text-slate-100 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
               >
                 <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 <span>Always allow</span>
@@ -491,7 +534,7 @@ export function WriteApprovalBanner({ approval, loadBefore, onDecision }: WriteA
             data-testid="approval-deny-btn"
             onClick={() => setDenyPanelOpen((v) => !v)}
             style={{ backgroundColor: 'var(--m3-surface)' }}
-            className="min-h-[44px] px-3.5 py-2 rounded-full border border-rose-300 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
+            className="min-h-[42px] px-3.5 py-2 rounded-full border border-rose-300 dark:border-rose-900 hover:bg-rose-50 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs sm:text-sm font-medium inline-flex items-center gap-1.5 transition-transform active:scale-95 whitespace-nowrap"
           >
             {denyPanelOpen ? <X className="w-4 h-4" /> : <MessageSquareX className="w-4 h-4" />}
             <span>{denyPanelOpen ? 'Cancel' : 'Deny'}</span>

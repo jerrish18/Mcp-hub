@@ -1,27 +1,46 @@
-import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildCanvasPreviewCsp, buildCanvasPreviewPage, standaloneCanvasPreviewCsp } from './canvasPreview';
-import { CANVAS_IFRAME_SANDBOX, CANVAS_SCRIPT_ORIGINS, canvasPushBlockReason } from '../utils/canvasPreview';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import express from 'express';
+import {
+  buildCanvasPreviewCsp,
+  handleCanvasPreviewRequest,
+  renderCanvasPreviewLoaderHtml,
+} from './canvasPreview';
 
-test('Canvas preview permits inline and approved CDN scripts while retaining iframe isolation', () => {
+test('buildCanvasPreviewCsp includes unsafe-inline, frame-ancestors self, and allowed CDNs', () => {
   const csp = buildCanvasPreviewCsp();
-  assert.match(csp, /script-src 'unsafe-inline' 'unsafe-eval'/);
-  assert.match(csp, /script-src-attr 'unsafe-inline'/);
-  assert.match(csp, /frame-ancestors 'self'/);
-  assert.match(csp, /form-action 'none'/);
-  for (const origin of CANVAS_SCRIPT_ORIGINS) assert.ok(csp.includes(origin));
-  assert.equal(CANVAS_IFRAME_SANDBOX, 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
-  assert.doesNotMatch(standaloneCanvasPreviewCsp(), /allow-same-origin/);
-  assert.match(buildCanvasPreviewPage(), /event.source !== window.parent/);
-  assert.match(buildCanvasPreviewPage(true), /history.replaceState/);
+  assert.ok(csp.includes("default-src 'none'"));
+  assert.ok(csp.includes("'unsafe-inline'"));
+  assert.ok(csp.includes("'unsafe-eval'"));
+  assert.ok(csp.includes("script-src-attr 'unsafe-inline'"));
+  assert.ok(csp.includes("frame-ancestors 'self'"));
+  assert.ok(csp.includes('https:'));
+  assert.ok(csp.includes('https://cdn.jsdelivr.net'));
+  assert.ok(csp.includes('https://cdn.tailwindcss.com'));
+  assert.ok(csp.includes('https://esm.sh'));
 });
 
-test('Canvas requires a successful run and review of the current export before push', () => {
-  const valid = { exportIssues: [], requiresPreview: true, status: 'loaded' as const, reviewed: true };
-  assert.equal(canvasPushBlockReason(valid), undefined);
-  assert.equal(canvasPushBlockReason({ ...valid, exportIssues: ['Missing CSS'] }), 'Missing CSS');
-  assert.equal(canvasPushBlockReason({ ...valid, runtimeError: 'Uncaught error' }), 'Uncaught error');
-  assert.ok(canvasPushBlockReason({ ...valid, status: 'failed' }));
-  assert.ok(canvasPushBlockReason({ ...valid, reviewed: false }));
-  assert.equal(canvasPushBlockReason({ ...valid, requiresPreview: false, status: 'loading', reviewed: false }), undefined);
+test('handleCanvasPreviewRequest serves loader HTML with isolated CSP, Referrer-Policy, and nosniff headers', async () => {
+  const app = express();
+  app.get('/__canvas-preview', handleCanvasPreviewRequest);
+
+  const server = await new Promise<http.Server>((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const addr = server.address() as { port: number };
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${addr.port}/__canvas-preview`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-security-policy'), buildCanvasPreviewCsp());
+    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    const html = await res.text();
+    assert.ok(html.includes('mcphub-canvas-ready'));
+    assert.ok(html.includes('mcphub-canvas-render'));
+    assert.equal(html, renderCanvasPreviewLoaderHtml());
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

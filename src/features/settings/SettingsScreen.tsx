@@ -1,4 +1,3 @@
-import { A2UI_MODES, readA2uiMode } from '../../utils/a2ui';
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import {
@@ -23,15 +22,18 @@ import { PROVIDER_INFO } from '../../config/models';
 import { mergeModelCatalog, testModelConnection } from '../../services/llm/provider';
 import { useHubStore } from '../../store/useHubStore';
 import type {
+  A2uiMode,
   PixelAccentTheme,
   ProviderId,
   ProviderKeys,
   ToolPermissionPolicy,
 } from '../../types';
 import { M3Switch } from '../../ui/M3Switch';
+import { resolveA2uiMode } from '../../utils/a2ui';
 import { triggerHaptic } from '../../utils/haptics';
 import { cardStaggerContainer, cardStaggerItem } from '../../utils/motion';
 import { safeErrorMessage } from '../../utils/redact';
+import { getProviderQuotaStatus } from '../../utils/quotaTracker';
 import { PIXEL_PALETTES } from '../../utils/theme';
 import { AppApiKeySection } from './AppApiKeySection';
 
@@ -758,6 +760,91 @@ export function SettingsScreen() {
             </div>
           )}
 
+          {/* Free-Tier Quota Meter */}
+          <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800 space-y-2.5" data-testid="free-tier-quota-meter">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                Free-Tier Rate & Daily Quota Monitor
+              </span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                Tracked locally on this device
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {(['gemini', 'groq', 'openrouter'] as const).map((prov) => {
+                const status = getProviderQuotaStatus(prov);
+                if (!status) return null;
+                const rpmPct = Math.min(100, Math.round((status.rpmUsed / Math.max(1, status.rpmLimit)) * 100));
+                const rpdPct = Math.min(100, Math.round((status.rpdUsed / Math.max(1, status.rpdLimit)) * 100));
+                return (
+                  <div
+                    key={prov}
+                    style={{
+                      backgroundColor: 'var(--m3-surface)',
+                      borderColor: status.rateLimitedRecently
+                        ? '#f43f5e'
+                        : status.nearLimit
+                          ? '#f59e0b'
+                          : 'var(--m3-outline)',
+                    }}
+                    className="rounded-2xl border p-3 space-y-2"
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                        {PROVIDER_INFO[prov].name}
+                      </span>
+                      {status.rateLimitedRecently ? (
+                        <span className="text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                          429 active
+                        </span>
+                      ) : status.nearLimit ? (
+                        <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                          Near limit
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">
+                          Healthy
+                        </span>
+                      )}
+                    </div>
+                    <div className="space-y-1 text-[11px] tabular-nums">
+                      <div className="flex justify-between text-slate-600 dark:text-slate-300">
+                        <span>RPM (60s)</span>
+                        <span>
+                          {status.rpmUsed}/{status.rpmLimit}
+                        </span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${
+                            status.rateLimitedRecently
+                              ? 'bg-rose-500'
+                              : status.nearLimit
+                                ? 'bg-amber-500'
+                                : 'bg-blue-500'
+                          }`}
+                          style={{ width: `${rpmPct}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-slate-500 dark:text-slate-400 pt-0.5">
+                        <span>Today (RPD)</span>
+                        <span>
+                          {status.rpdUsed}/{status.rpdLimit}
+                        </span>
+                      </div>
+                      <div className="h-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-emerald-500"
+                          style={{ width: `${rpdPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Add Custom Model Slug */}
           <form onSubmit={handleAddCustomModel} className="pt-2 border-t border-slate-200/60 dark:border-slate-800 space-y-2">
             <div className="text-xs font-medium text-slate-600 dark:text-slate-400">
@@ -833,21 +920,69 @@ export function SettingsScreen() {
             />
           </div>
 
-          <div className="flex items-center justify-between gap-4 min-h-[44px] pt-2 border-t border-slate-200/60 dark:border-slate-800">
-            <div>
-              <div className="text-sm font-medium text-slate-900 dark:text-white">
-                Interactive A2UI Widgets across chat
+          <div className="space-y-2.5 pt-2 border-t border-slate-200/60 dark:border-slate-800">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium text-slate-900 dark:text-white">
+                  Interactive A2UI Widgets
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  Smart (default) renders cards, checklists & forms only when structured input/output helps — saving tokens on simple chat.
+                </div>
               </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                Smart shows a widget when it helps with a comparison, plan, or other task.
+              <div
+                role="radiogroup"
+                aria-label="Interactive A2UI widget mode"
+                data-testid="settings-a2ui-mode-group"
+                style={{
+                  backgroundColor: 'var(--m3-surface)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="inline-flex rounded-2xl border p-1 gap-1 shrink-0"
+              >
+                {(
+                  [
+                    { id: 'off', label: 'Off' },
+                    { id: 'smart', label: 'Smart' },
+                    { id: 'always', label: 'Always' },
+                  ] as Array<{ id: A2uiMode; label: string }>
+                ).map((opt) => {
+                  const currentA2uiMode = resolveA2uiMode(settings);
+                  const active = currentA2uiMode === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      data-testid={`settings-a2ui-${opt.id}`}
+                      onClick={() => {
+                        triggerHaptic(settings.hapticsEnabled, 'light');
+                        updateSettings({
+                          a2uiMode: opt.id,
+                          a2uiEnabled: opt.id !== 'off',
+                        });
+                      }}
+                      style={
+                        active
+                          ? {
+                              backgroundColor: 'var(--m3-primary-container)',
+                              color: 'var(--m3-on-primary-container)',
+                            }
+                          : undefined
+                      }
+                      className={`min-h-[44px] px-3.5 rounded-xl text-xs font-semibold transition-colors ${
+                        active
+                          ? 'shadow-xs'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
-            <select aria-label="Interactive A2UI mode" data-testid="a2ui-mode"
-              value={settings.a2uiMode}
-              onChange={(event) => updateSettings({ a2uiMode: readA2uiMode({ a2uiMode: event.target.value as typeof settings.a2uiMode }) })}
-              className="min-h-[44px] rounded-xl border px-3 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-white border-slate-300 dark:border-slate-700">
-              {A2UI_MODES.map((mode) => <option key={mode} value={mode}>{mode[0].toUpperCase() + mode.slice(1)}</option>)}
-            </select>
           </div>
 
           <div className="flex items-center justify-between gap-4 min-h-[44px] pt-2 border-t border-slate-200/60 dark:border-slate-800">

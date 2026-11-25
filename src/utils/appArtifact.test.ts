@@ -4,12 +4,23 @@ import assert from 'node:assert/strict';
 import {
   buildAppPreviewSrcDoc,
   buildGitHubSyncPrompt,
+  CANVAS_IFRAME_SANDBOX,
   inferFileLanguage,
   parseAppArtifactBlock,
+  STORAGE_SHIM_SCRIPT,
   suggestRepoSlug,
   validateAppExport,
   type AppArtifactSpec,
 } from './appArtifact';
+
+test('CANVAS_IFRAME_SANDBOX never includes allow-same-origin', () => {
+  assert.equal(CANVAS_IFRAME_SANDBOX.includes('allow-same-origin'), false);
+  assert.ok(CANVAS_IFRAME_SANDBOX.includes('allow-scripts'));
+  assert.ok(CANVAS_IFRAME_SANDBOX.includes('allow-forms'));
+  assert.ok(CANVAS_IFRAME_SANDBOX.includes('allow-modals'));
+  assert.ok(CANVAS_IFRAME_SANDBOX.includes('allow-popups'));
+  assert.ok(CANVAS_IFRAME_SANDBOX.includes('allow-downloads'));
+});
 
 test('inferFileLanguage detects common web and backend extensions', () => {
   assert.equal(inferFileLanguage('index.html'), 'html');
@@ -48,7 +59,7 @@ test('parseAppArtifactBlock validates and normalizes multi-file artifact-app spe
   assert.equal(parsed.files[2].language, 'javascript');
 });
 
-test('buildAppPreviewSrcDoc inlines local CSS/JS, injects unreferenced files, and attaches runtime bridge', () => {
+test('buildAppPreviewSrcDoc inlines local CSS/JS, injects storage shim before app scripts, and attaches extended runtime bridge', () => {
   const spec: AppArtifactSpec = {
     title: 'Sample App',
     entryFile: 'index.html',
@@ -68,6 +79,15 @@ test('buildAppPreviewSrcDoc inlines local CSS/JS, injects unreferenced files, an
 
   const docWithBridge = buildAppPreviewSrcDoc(spec, { includeRuntimeBridge: true });
   assert.ok(docWithBridge.includes('mcphub-canvas-runtime'));
+  assert.ok(docWithBridge.includes('securitypolicyviolation'));
+  assert.ok(docWithBridge.includes('data-mcphub-shim="storage"'));
+  assert.ok(STORAGE_SHIM_SCRIPT.includes('localStorage'));
+  assert.ok(STORAGE_SHIM_SCRIPT.includes('sessionStorage'));
+  assert.ok(STORAGE_SHIM_SCRIPT.includes('cookie'));
+  assert.ok(
+    docWithBridge.indexOf('data-mcphub-shim="storage"') <
+      docWithBridge.indexOf('window.appLoaded = true;')
+  );
   assert.ok(docWithBridge.includes('<style data-file="styles.css">\nh1 { color: red; }\n</style>'));
   assert.ok(docWithBridge.includes('<style data-file="extra.css">\nbody { margin: 0; }\n</style>'));
   assert.ok(docWithBridge.includes('<script  data-file="app.js">\nwindow.appLoaded = true;\n</script>'));
@@ -75,6 +95,7 @@ test('buildAppPreviewSrcDoc inlines local CSS/JS, injects unreferenced files, an
 
   const exportDoc = buildAppPreviewSrcDoc(spec, { includeRuntimeBridge: false });
   assert.equal(exportDoc.includes('mcphub-canvas-runtime'), false);
+  assert.ok(exportDoc.includes('data-mcphub-shim="storage"'));
 });
 
 test('buildAppPreviewSrcDoc synthesizes clean project overview when no HTML entry exists', () => {

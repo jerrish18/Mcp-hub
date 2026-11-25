@@ -9,6 +9,7 @@ import {
   RateLimitError,
   type StreamCompletionRequest,
 } from './types';
+import { recordProvider429, recordProviderRequest } from '../../utils/quotaTracker';
 
 export function buildEffortAugmentedPrompt(basePrompt: string, effort: EffortLevel, model: ModelConfig): string {
   if (model.supportsThinkingLevel || model.supportsReasoningEffort) {
@@ -93,13 +94,21 @@ export function getFallbackModelCandidates(
 
 export async function dispatchStreamCompletion(req: StreamCompletionRequest): Promise<void> {
   const { model } = req;
-  if (model.provider === 'demo') {
-    return streamDemoCompletion(req);
+  recordProviderRequest(model.provider);
+  try {
+    if (model.provider === 'demo') {
+      return await streamDemoCompletion(req);
+    }
+    if (model.provider === 'gemini') {
+      return await streamGeminiCompletion(req);
+    }
+    return await streamOpenAiCompatibleCompletion(req);
+  } catch (err) {
+    if (err instanceof RateLimitError) {
+      recordProvider429(model.provider);
+    }
+    throw err;
   }
-  if (model.provider === 'gemini') {
-    return streamGeminiCompletion(req);
-  }
-  return streamOpenAiCompatibleCompletion(req);
 }
 
 export async function streamWithRateLimitFallback(params: {

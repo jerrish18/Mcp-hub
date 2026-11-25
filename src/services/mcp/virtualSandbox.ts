@@ -60,7 +60,8 @@ const SANDBOX_TOOLS: McpTool[] = [
   },
   {
     name: 'workspace_create_note',
-    description: 'Create or update a workspace note in the sandbox store.',
+    description:
+      'Create or update a short plain Markdown note inside the sandbox notes store. ONLY use when the user explicitly asks to save or create a note — NEVER call this when generating PDF, DOCX, XLSX, PPTX files or web apps.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -7,7 +7,7 @@ import { parseMcpAddDeepLink } from '@core/config/connectors';
 import { setSecureStorageAdapter } from '@core/services/storage/secureStorage';
 import { closeAllMcpConnections } from '@core/services/mcp/client';
 import { expoSecureStorageAdapter } from '../services/storage/expoSecureStore';
-import { loadMobilePrefs, subscribeMobilePrefs } from '../services/storage/mobilePrefs';
+import { flushMobileStateNow, loadMobilePrefs, subscribeMobilePrefs } from '../services/storage/mobilePrefs';
 
 setSecureStorageAdapter(expoSecureStorageAdapter);
 
@@ -74,6 +74,7 @@ export default function RootLayout() {
         if (backgroundedAtRef.current === null) {
           backgroundedAtRef.current = Date.now();
         }
+        void flushMobileStateNow();
         closeAllMcpConnections();
       } else if (nextState === 'active' && (prevState === 'background' || prevState === 'inactive')) {
         const elapsed =

@@ -4,6 +4,7 @@ import { getShortModelName, PROVIDER_INFO } from '../../config/models';
 import { getApiKeyForProvider, mergeModelCatalog } from '../../services/llm/provider';
 import type { ModelConfig, ProviderId, ProviderKeys } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
+import { getProviderQuotaStatus } from '../../utils/quotaTracker';
 
 interface ModelSwitcherSheetProps {
   open: boolean;
@@ -81,14 +82,31 @@ export function ModelSwitcherSheet({
         </div>
 
         <div className="space-y-5">
-          {grouped.map((group) => (
+          {grouped.map((group) => {
+            const quota = open ? getProviderQuotaStatus(group.provider) : null;
+            return (
             <section key={group.provider} className="space-y-2">
-              <div className="flex items-center justify-between px-1">
-                <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                  {group.title}
-                </h3>
+              <div className="flex items-center justify-between gap-2 px-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 truncate">
+                    {group.title}
+                  </h3>
+                  {quota && (quota.rpmUsed > 0 || quota.rpdUsed > 0 || quota.rateLimitedRecently) && (
+                    <span
+                      className={`text-[10px] font-mono tabular-nums ${
+                        quota.rateLimitedRecently
+                          ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                          : quota.nearLimit
+                            ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                            : 'text-slate-400'
+                      }`}
+                    >
+                      {quota.rpmUsed}/{quota.rpmLimit} RPM
+                    </span>
+                  )}
+                </div>
                 {group.hasKey ? (
-                  <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                  <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0">
                     Connected
                   </span>
                 ) : onOpenSettings ? (
@@ -98,15 +116,20 @@ export function ModelSwitcherSheet({
                       onClose();
                       onOpenSettings();
                     }}
-                    className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 inline-flex items-center gap-1 hover:underline"
+                    className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 inline-flex items-center gap-1 hover:underline shrink-0"
                   >
                     <KeyRound className="w-3 h-3" />
                     Add API key
                   </button>
                 ) : (
-                  <span className="text-[11px] text-slate-400">Key needed</span>
+                  <span className="text-[11px] text-slate-400 shrink-0">Key needed</span>
                 )}
               </div>
+              {quota?.warningText && (
+                <div className="px-2.5 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-[11px] text-amber-800 dark:text-amber-300">
+                  {quota.warningText}
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 {group.items.map((model) => {
@@ -172,7 +195,8 @@ export function ModelSwitcherSheet({
                 })}
               </div>
             </section>
-          ))}
+            );
+          })}
         </div>
       </div>
     </BottomSheet>

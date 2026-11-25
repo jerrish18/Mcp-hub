@@ -69,6 +69,11 @@ export async function processUploadedFiles(files: FileList | File[]): Promise<{
       file.type === 'application/json' ||
       file.type === 'application/xml' ||
       TEXT_EXTENSIONS.has(ext);
+    const isSpreadsheet =
+      ext === 'xlsx' ||
+      ext === 'xls' ||
+      file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      file.type === 'application/vnd.ms-excel';
     const isPdf = file.type === 'application/pdf' || ext === 'pdf';
 
     try {
@@ -86,6 +91,39 @@ export async function processUploadedFiles(files: FileList | File[]): Promise<{
           size: file.size,
           dataBase64,
           previewUrl: dataUrl,
+        });
+        continue;
+      }
+
+      if (isSpreadsheet) {
+        const buffer = await file.arrayBuffer();
+        const { default: ExcelJS } = await import('exceljs');
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+        const sheet = workbook.worksheets[0];
+        const lines: string[] = [];
+        if (sheet) {
+          sheet.eachRow({ includeEmpty: false }, (row) => {
+            if (lines.length >= 500) return;
+            const vals = Array.isArray(row.values) ? row.values.slice(1) : [];
+            const escaped = vals.map((cell) => {
+              const raw =
+                cell && typeof cell === 'object' && 'text' in cell
+                  ? String((cell as { text: unknown }).text ?? '')
+                  : String(cell ?? '');
+              return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+            });
+            lines.push(escaped.join(','));
+          });
+        }
+        const csvText = lines.join('\n').slice(0, MAX_TEXT_CHARS);
+        attachments.push({
+          id,
+          name: file.name,
+          mimeType: 'text/csv',
+          kind: 'file',
+          size: file.size,
+          textContent: csvText || `Empty spreadsheet (${file.name})`,
         });
         continue;
       }
