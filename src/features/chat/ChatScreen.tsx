@@ -975,7 +975,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className={`${canvasOpen ? 'hidden' : 'hidden lg:flex'} w-72 shrink-0 flex-col border-r p-4`}
+        className={`${canvasOpen || settings.chatLayout === 'focus' ? 'hidden' : 'hidden lg:flex'} w-72 shrink-0 flex-col border-r p-4`}
       >
         <div className="mb-3">
           <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
@@ -1075,7 +1075,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 type="button"
                 onClick={() => setHistoryOpen(true)}
                 aria-label="Open chat history"
-                className="lg:hidden min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+                className={`${settings.chatLayout === 'focus' || canvasOpen ? '' : 'lg:hidden'} min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors`}
               >
                 <History className="w-5 h-5" />
               </button>

@@ -36,6 +36,10 @@ export function ProjectsModal({
   const [restrictServers, setRestrictServers] = useState(false);
   const [selectedServerIds, setSelectedServerIds] = useState<string[]>([]);
   const [uploadError, setUploadError] = useState('');
+  const [fileQuery, setFileQuery] = useState('');
+  const [previewFileId, setPreviewFileId] = useState<string | null>(null);
+  const visibleFiles = pinnedFiles.filter(file => !fileQuery.trim() || `${file.name} ${file.textContent}`.toLowerCase().includes(fileQuery.trim().toLowerCase()));
+  const previewFile = pinnedFiles.find(file => file.id === previewFileId);
 
   const resetForm = () => {
     setEditingId(null);
@@ -47,6 +51,8 @@ export function ProjectsModal({
     setRestrictServers(false);
     setSelectedServerIds([]);
     setUploadError('');
+    setFileQuery('');
+    setPreviewFileId(null);
   };
 
   const loadForEdit = (proj: ProjectProfile) => {
@@ -64,6 +70,8 @@ export function ProjectsModal({
       setSelectedServerIds([]);
     }
     setUploadError('');
+    setFileQuery('');
+    setPreviewFileId(null);
   };
 
   const handlePinFiles = async (files: FileList | null) => {
@@ -322,8 +330,11 @@ export function ProjectsModal({
             </div>
             {uploadError && <div className="text-xs text-rose-500">{uploadError}</div>}
             {pinnedFiles.length > 0 && (
+              <div className="space-y-2">
+              <input type="search" aria-label="Search project reference files" placeholder="Search file names or text…" value={fileQuery} onChange={event => setFileQuery(event.target.value)} className="w-full min-h-[40px] rounded-xl border bg-transparent px-3 text-xs" />
+              <p className="text-xs text-slate-500">{visibleFiles.length} of {pinnedFiles.length} files · {pinnedFiles.reduce((sum, file) => sum + file.size, 0).toLocaleString()} bytes</p>
               <div className="flex flex-wrap gap-1.5">
-                {pinnedFiles.map((file) => (
+                {visibleFiles.map((file) => (
                   <span
                     key={file.id}
                     style={{
@@ -333,7 +344,7 @@ export function ProjectsModal({
                     className="px-2.5 py-1 rounded-xl border text-[11px] inline-flex items-center gap-1.5 text-slate-700 dark:text-slate-200"
                   >
                     <FileText className="w-3 h-3 shrink-0" />
-                    <span className="truncate max-w-[140px]">{file.name}</span>
+                    <button type="button" className="truncate max-w-[140px] underline" onClick={() => setPreviewFileId(file.id)}>{file.name}</button>
                     <button
                       type="button"
                       onClick={() => setPinnedFiles((p) => p.filter((f) => f.id !== file.id))}
@@ -344,6 +355,8 @@ export function ProjectsModal({
                     </button>
                   </span>
                 ))}
+              </div>
+              {previewFile && <section className="rounded-xl border p-3 space-y-2"><div className="flex justify-between items-center gap-2"><h4 className="text-xs font-semibold truncate">{previewFile.name}</h4><button type="button" className="text-xs underline" onClick={() => setPreviewFileId(null)}>Close preview</button></div><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{previewFile.textContent.slice(0, 10000)}</pre></section>}
               </div>
             )}
           </div>

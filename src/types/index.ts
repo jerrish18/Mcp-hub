@@ -459,6 +459,7 @@ export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'mo
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   accentTheme: PixelAccentTheme;
+  chatLayout?: 'standard' | 'focus';
   oledDark: boolean;
   a2uiEnabled: boolean;
   a2uiMode?: A2uiMode;

@@ -359,6 +359,13 @@ export function SettingsScreen() {
             })}
           </div>
 
+          <label className="block text-sm font-medium">Desktop chat layout
+            <select value={settings.chatLayout ?? 'standard'} onChange={event => updateSettings({ chatLayout: event.target.value === 'focus' ? 'focus' : 'standard' })} className="block mt-1 min-h-[44px] w-full rounded-xl border bg-transparent px-3 text-xs">
+              <option value="standard">Standard — show conversation sidebar</option>
+              <option value="focus">Focus — hide conversation sidebar</option>
+            </select>
+          </label>
+
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-2 border-t border-slate-200/60 dark:border-slate-800">
             <div>
               <div className="text-sm font-medium text-slate-900 dark:text-white">Theme Mode</div>
