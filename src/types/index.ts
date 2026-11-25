@@ -403,6 +403,7 @@ export interface ChatMessage {
   runTrace?: RunTrace;
   a2uiWidgetState?: A2uiWidgetState;
   verification?: MessageVerification;
+  canvasEdit?: { artifactId: string; kind: string };
   createdAt: number;
   isStreaming?: boolean;
   error?: string;
@@ -418,6 +419,7 @@ export interface Conversation {
   knowledgeSource: KnowledgeSourceMode;
   studyInstructions: string;
   projectId?: string | null;
+  forkedFrom?: { conversationId: string; messageId?: string };
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;

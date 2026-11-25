@@ -96,7 +96,7 @@ export const CANVAS_IFRAME_SANDBOX =
   'allow-scripts allow-forms allow-modals allow-popups allow-downloads';
 
 export const STORAGE_SHIM_SCRIPT = `<script data-mcphub-shim="storage">
-(function(){
+(function installCanvasStorage(){
   function makeMemStorage() {
     var store = Object.create(null);
     return {
@@ -435,4 +435,38 @@ export function downloadAppBundle(spec: AppArtifactSpec): string {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
   return filename;
+}
+
+/** Check portable project paths and local HTML dependencies before exporting. */
+export function validateAppExport(spec: AppArtifactSpec): string[] {
+  const issues: string[] = [];
+  const paths = new Set<string>();
+  for (const file of spec.files) {
+    if (!file.path || file.path.startsWith('/') || file.path.includes('\\') || file.path.split('/').some((part) => !part || part === '.' || part === '..')) {
+      issues.push(`Invalid project file path: ${file.path}`);
+    } else if (paths.has(file.path)) {
+      issues.push(`Duplicate project file path: ${file.path}`);
+    } else {
+      paths.add(file.path);
+    }
+  }
+  if (spec.entryFile && !paths.has(spec.entryFile)) issues.push(`Missing entry file: ${spec.entryFile}`);
+  for (const file of spec.files) {
+    if (!paths.has(file.path) || !/\.html?$/i.test(file.path)) continue;
+    for (const match of file.content.matchAll(/<(?:link|script|img|source)\b[^>]*?\b(?:href|src)\s*=\s*(['"])(.*?)\1/gi)) {
+      const reference = match[2];
+      if (!reference || /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(reference)) continue;
+      const parts = reference.startsWith('/') ? [] : file.path.split('/').slice(0, -1);
+      let valid = true;
+      for (const part of reference.split(/[?#]/)[0].split('/')) {
+        if (!part || part === '.') continue;
+        if (part === '..') {
+          if (!parts.length) { valid = false; break; }
+          parts.pop();
+        } else parts.push(part);
+      }
+      if (!valid || !paths.has(parts.join('/'))) issues.push(`Missing local resource: ${reference} (from ${file.path})`);
+    }
+  }
+  return issues;
 }
