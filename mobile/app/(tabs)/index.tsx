@@ -1,4 +1,5 @@
-import { WorkspaceHeading, useWorkspaceTheme, workspaceBlue } from '../../ui/workspace';
+import { ChatReply } from '../../ui/ChatReply';
+import { useWorkspaceTheme, workspaceBlue } from '../../ui/workspace';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -11,7 +12,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { MessageSquare, Mic, MicOff, Plus } from 'lucide-react-native';
+import { ArrowUp, ChevronDown, MessageSquare, Mic, MicOff, Plus, Square } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams } from 'expo-router';
 import { getModelById } from '@core/config/models';
@@ -101,6 +102,8 @@ export default function MobileChatScreen() {
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
   const inputRef = useRef<TextInput | null>(null);
+  const threadRef = useRef<FlatList<ChatMessage>>(null);
+  const followLatest = useRef(true);
   const approvalResolverRef = useRef<((decision: ApprovalDecision) => void) | null>(null);
   const lastSharedRef = useRef<string | null>(null);
   const speechModuleRef = useRef<ExpoSpeechRecognitionLike | null>(null);
@@ -352,6 +355,7 @@ export default function MobileChatScreen() {
     if (!trimmed || running) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setInput('');
+    followLatest.current = true;
 
     const userMsg: ChatMessage = {
       id: `u_${Date.now()}`,
@@ -446,35 +450,42 @@ export default function MobileChatScreen() {
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1, backgroundColor: theme.background }}>
-      <View style={{ paddingHorizontal: 18, paddingVertical: 12, gap: 10, borderBottomWidth: 1,
-        borderBottomColor: theme.border, backgroundColor: theme.panel }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <WorkspaceHeading title="Chat" />
-          <Pressable accessibilityRole="button" accessibilityLabel="New chat" onPress={() => void handleNewChat()}
-            style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11,
-              borderRadius: 10, backgroundColor: theme.accentSurface }}>
-            <Plus color={theme.onAccentSurface} size={16} />
-            <Text style={{ color: theme.onAccentSurface, fontWeight: '700' }}>New chat</Text>
-          </Pressable>
-        </View>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <Pressable accessibilityRole="button" accessibilityLabel={`Agent ${agent.name}, switch agent`}
-            onPress={() => void handleCycleAgent()} style={{ minHeight: 44, flex: 1, justifyContent: 'center',
-              borderRadius: 10, paddingHorizontal: 10, backgroundColor: theme.mutedPanel }}>
-            <Text numberOfLines={1} style={{ color: theme.text, fontWeight: '600' }}>{agent.name}</Text>
-          </Pressable>
-          <Pressable accessibilityRole="button" onPress={() => {
-            const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
-            setEffort((value) => next[value]);
-          }} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 10, borderRadius: 10,
-            backgroundColor: theme.mutedPanel }}>
-            <Text style={{ color: theme.text, fontWeight: '600' }}>Effort · {effort}</Text>
-          </Pressable>
-        </View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, gap: 8,
+        borderBottomWidth: 1, borderBottomColor: theme.border, backgroundColor: theme.panel }}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Agent ${agent.name}, switch agent`}
+          onPress={() => void handleCycleAgent()} style={{ minHeight: 46, flex: 1, minWidth: 0, flexDirection: 'row',
+            alignItems: 'center', gap: 7, paddingHorizontal: 10, borderRadius: 10, backgroundColor: theme.mutedPanel }}>
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.muted, fontSize: 11 }}>Chat agent</Text>
+            <Text numberOfLines={1} style={{ color: theme.text, fontWeight: '700' }}>{agent.name}</Text>
+          </View>
+          <ChevronDown color={theme.muted} size={15} />
+        </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Reasoning effort: ${effort}, tap to cycle`} onPress={() => {
+          const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
+          setEffort((value) => next[value]);
+        }} style={{ minHeight: 46, justifyContent: 'center', paddingHorizontal: 10, borderRadius: 10,
+          backgroundColor: theme.mutedPanel }}>
+          <Text style={{ color: theme.text, fontWeight: '600', textTransform: 'capitalize' }}>{effort}</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="New chat" onPress={() => void handleNewChat()}
+          style={{ minHeight: 46, minWidth: 46, alignItems: 'center', justifyContent: 'center',
+            borderRadius: 10, backgroundColor: theme.accentSurface }}>
+          <Plus color={theme.onAccentSurface} size={20} />
+        </Pressable>
       </View>
 
       <FlatList
+        ref={threadRef}
         data={messages}
+        keyboardShouldPersistTaps="handled"
+        onScroll={({ nativeEvent: { contentSize, layoutMeasurement, contentOffset } }) => {
+          followLatest.current = contentSize.height - layoutMeasurement.height - contentOffset.y < 64;
+        }}
+        scrollEventThrottle={32}
+        onContentSizeChange={() => {
+          if (followLatest.current && messages.length) threadRef.current?.scrollToEnd({ animated: false });
+        }}
         keyExtractor={(m) => m.id}
         contentContainerStyle={{ flexGrow: 1, padding: 18, gap: 12 }}
         ListEmptyComponent={
@@ -486,28 +497,28 @@ export default function MobileChatScreen() {
             <Text style={{ color: theme.muted, textAlign: 'center' }}>Send a message to {agent.name}.</Text>
           </View>
         }
-        renderItem={({ item }) => (
-          <View
-            style={{
-              alignSelf: item.role === 'user' ? 'flex-end' : 'flex-start',
-              backgroundColor: item.role === 'user' ? workspaceBlue : theme.panel,
-              padding: 12,
-              borderWidth: item.role === 'user' ? 0 : 1,
-              borderColor: theme.border,
-              borderRadius: 14,
-              maxWidth: '88%',
-            }}
-          >
-            {item.toolCalls && item.toolCalls.length > 0 ? (
-              <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 4 }}>
-                Tools: {item.toolCalls.map((t) => `${t.toolName} (${t.status})`).join(', ')}
+        renderItem={({ item }) => {
+          if (item.role === 'user') {
+            return <Text selectable style={{ alignSelf: 'flex-end', maxWidth: '90%', backgroundColor: workspaceBlue,
+              color: '#FFFFFF', padding: 12, borderRadius: 14, fontSize: 15, lineHeight: 22 }}>{item.content}</Text>;
+          }
+          return (
+            <View style={{ backgroundColor: theme.panel, padding: 13, borderWidth: 1, borderColor: theme.border,
+              borderRadius: 15, gap: 10 }}>
+              <Text style={{ color: theme.muted, fontWeight: '600', fontSize: 12 }}>
+                {item.role === 'assistant' ? 'Assistant' : 'Workspace'}
               </Text>
-            ) : null}
-            <Text style={{ color: item.role === 'user' ? '#FFFFFF' : isDark ? '#F1F5F9' : '#0F172A' }}>
-              {item.content || 'Thinking...'}
-            </Text>
-          </View>
-        )}
+              {item.toolCalls && item.toolCalls.length > 0 && (
+                <Text style={{ fontSize: 12, lineHeight: 17, color: theme.muted }}>
+                  {item.toolCalls.map((tool) => `${tool.toolName} (${tool.status})`).join(' · ')}
+                </Text>
+              )}
+              {item.content && <ChatReply content={item.content} theme={theme} />}
+              {item.error && <Text style={{ color: isDark ? '#fca5a5' : '#991b1b', lineHeight: 20 }}>{item.error}</Text>}
+              {!item.content && !item.error && item.isStreaming && <Text style={{ color: theme.muted }}>Thinking…</Text>}
+            </View>
+          );
+        }}
       />
 
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -553,18 +564,22 @@ export default function MobileChatScreen() {
             {isListening ? <MicOff size={18} color="#ffffff" /> : <Mic size={18} color={theme.text} />}
           </Pressable>
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={running ? 'Stop generation' : 'Send message'}
+            disabled={!running && !input.trim()}
             onPress={running ? () => abortCtrl?.abort() : () => void handleSend()}
             style={{
-              minWidth: 64,
+              minWidth: 44,
               minHeight: 44,
               borderRadius: 16,
-              backgroundColor: running ? '#b91c1c' : workspaceBlue,
+              backgroundColor: running ? '#b91c1c' : input.trim() ? workspaceBlue : theme.mutedPanel,
               justifyContent: 'center',
               alignItems: 'center',
               paddingHorizontal: 14,
             }}
           >
-            <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>{running ? 'Stop' : 'Send'}</Text>
+            {running ? <Square size={17} color="#FFFFFF" fill="#FFFFFF" />
+              : <ArrowUp size={21} color={input.trim() ? '#FFFFFF' : theme.muted} />}
           </Pressable>
         </View>
       </KeyboardAvoidingView>

@@ -102,6 +102,7 @@ import {
   type StudyQuizQuestion,
 } from '../../utils/studyTools';
 import { QuickConnectSheet } from '../servers/QuickConnectSheet';
+import { ChatActionGroup } from './ChatActionGroup';
 import { AgentSwitcherSheet } from './AgentSwitcherSheet';
 import { CommandPaletteModal } from './CommandPaletteModal';
 import { CompareModelsPane } from './CompareModelsPane';
@@ -375,6 +376,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [regenPickerMsgId, setRegenPickerMsgId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followLatest = useRef(true);
+  const lastThread = useRef(activeConversationId);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const sourceMenuRef = useRef<HTMLDivElement | null>(null);
@@ -504,12 +507,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (lastThread.current !== activeConversationId) {
+      lastThread.current = activeConversationId;
+      followLatest.current = true;
+    }
+    if (!el || !followLatest.current) return;
     const raf = window.requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight;
+      if (followLatest.current) el.scrollTop = el.scrollHeight;
     });
     return () => window.cancelAnimationFrame(raf);
   }, [
+    activeConversationId,
     activeConv?.messages.length,
     lastMsg?.content,
     lastMsg?.isStreaming,
@@ -604,6 +612,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if ((!input.trim() && attachments.length === 0) || isRunning) return;
+    followLatest.current = true;
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
@@ -765,6 +774,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   const handleQuickPrompt = async (promptText: string, displayText?: string) => {
     if (isRunning) return;
+    followLatest.current = true;
     setStudyPlanOpen(false);
     setSourceMenuOpen(false);
     setMcpPickerMode(null);
@@ -1016,8 +1026,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           className="chat-toolbar shrink-0 px-3 sm:px-5 py-2.5 border-b space-y-2"
         >
           {/* Row 1: Primary Model Picker | Separate Agent Picker | History + New Chat */}
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          <div className="chat-toolbar-top flex items-center justify-between gap-2">
+            <div className="chat-identities flex items-center gap-1.5 min-w-0 flex-1">
               <button
                 type="button"
                 data-testid="model-picker-btn"
@@ -1089,8 +1099,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             </div>
           </div>
 
-          {/* Row 2: Mode Segmented Tabs (left) + Effort / Study Tools (wraps cleanly on narrow mobile) */}
-          <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2">
+          <div className="chat-toolbar-modes">
             <div
               role="tablist"
               aria-label="Chat mode"
@@ -1136,140 +1145,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               })}
             </div>
 
-            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-              {activeChatMode === 'study' && (
-                <>
-                  {/* Compact Pomodoro Timer */}
-                  <div
-                    style={{
-                      backgroundColor: focusRunning
-                        ? 'var(--m3-primary-container)'
-                        : 'var(--m3-surface-container-high)',
-                      borderColor: 'var(--m3-outline)',
-                      color: focusRunning ? 'var(--m3-on-primary-container)' : undefined,
-                    }}
-                    className="min-h-[32px] px-2 rounded-full border inline-flex items-center gap-1 text-[11px] font-medium tabular-nums shrink-0"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerHaptic(settings.hapticsEnabled, 'light');
-                        setFocusRunning((r) => !r);
-                      }}
-                      aria-label={focusRunning ? 'Pause focus timer' : 'Start 25m focus timer'}
-                      className="inline-flex items-center gap-1 text-slate-700 dark:text-slate-200"
-                    >
-                      <Timer className="w-3.5 h-3.5 shrink-0" />
-                      <span>{formatPomodoroTime(focusSecondsLeft)}</span>
-                      {focusRunning ? (
-                        <Pause className="w-3 h-3 shrink-0" />
-                      ) : (
-                        <Play className="w-3 h-3 shrink-0" />
-                      )}
-                    </button>
-                    {focusSecondsLeft !== (focusPhase === 'focus' ? 25 * 60 : 5 * 60) && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setFocusRunning(false);
-                          setFocusPhase('focus');
-                          setFocusSecondsLeft(25 * 60);
-                        }}
-                        aria-label="Reset focus timer"
-                        className="p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-white"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Saved Study Vault */}
-                  <button
-                    type="button"
-                    data-testid="study-vault-btn"
-                    onClick={() => setVaultOpen(true)}
-                    aria-label={`Saved study notes (${savedStudyNotes.length})`}
-                    style={{
-                      backgroundColor: 'var(--m3-surface-container-high)',
-                      borderColor: 'var(--m3-outline)',
-                    }}
-                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-                  >
-                    <Bookmark className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Vault</span>
-                    {savedStudyNotes.length > 0 && (
-                      <span className="text-[11px] font-mono tabular-nums opacity-80">
-                        {savedStudyNotes.length}
-                      </span>
-                    )}
-                  </button>
-
-                  {/* Study Plan Preset Toggle */}
-                  <button
-                    type="button"
-                    data-testid="study-plan-btn"
-                    onClick={() => setStudyPlanOpen((v) => !v)}
-                    aria-expanded={studyPlanOpen}
-                    style={
-                      studyPlanOpen
-                        ? {
-                            backgroundColor: 'var(--m3-primary-container)',
-                            color: 'var(--m3-on-primary-container)',
-                            borderColor: 'var(--m3-primary)',
-                          }
-                        : {
-                            backgroundColor: 'var(--m3-surface-container-high)',
-                            borderColor: 'var(--m3-outline)',
-                          }
-                    }
-                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-                  >
-                    <SlidersHorizontal className="w-3.5 h-3.5" />
-                    <span>Style</span>
-                    {studyPlanOpen ? (
-                      <ChevronUp className="w-3 h-3" />
-                    ) : (
-                      <ChevronDown className="w-3 h-3" />
-                    )}
-                  </button>
-                </>
-              )}
-
-              {activeChatMode === 'professional' && (
-                <button
-                  type="button"
-                  data-testid="pro-plan-toggle"
-                  onClick={() => {
-                    triggerHaptic(settings.hapticsEnabled, 'light');
-                    setPlanMode((v) => !v);
-                  }}
-                  aria-pressed={planMode}
-                  title="Plan-then-execute: draft editable steps before running Pro tasks"
-                  style={
-                    planMode
-                      ? {
-                          backgroundColor: 'var(--m3-primary-container)',
-                          color: 'var(--m3-on-primary-container)',
-                          borderColor: 'var(--m3-primary)',
-                        }
-                      : {
-                          backgroundColor: 'var(--m3-surface-container-high)',
-                          borderColor: 'var(--m3-outline)',
-                        }
-                  }
-                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-                >
-                  <ListChecks className="w-3.5 h-3.5" />
-                  <span>Plan</span>
-                </button>
-              )}
-
+            <div className="chat-toolbar-actions">
               {(activeChatMode === 'professional' || canvasArtifact) && (
                 <button
                   type="button"
                   data-testid="pro-canvas-toggle-btn"
                   disabled={!canvasDraftLoaded}
                   onClick={handleToggleHeaderCanvas}
+                  aria-label="Canvas"
                   aria-pressed={canvasOpen}
                   style={
                     canvasOpen
@@ -1286,110 +1169,239 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
                 >
                   <PanelRight className="w-3.5 h-3.5" />
-                  <span>Canvas</span>
+                  <span className="chat-canvas-label">Canvas</span>
                 </button>
               )}
 
-              {/* Active Project Workspace Pill */}
-              <button
-                type="button"
-                data-testid="project-picker-btn"
-                onClick={() => setProjectsModalOpen(true)}
-                aria-label={`Project workspace: ${activeProject ? activeProject.name : 'None'}`}
-                style={
-                  activeProject
-                    ? {
-                        backgroundColor: 'var(--m3-primary-container)',
-                        color: 'var(--m3-on-primary-container)',
-                        borderColor: 'var(--m3-primary)',
-                      }
-                    : {
+              <ChatActionGroup placement="toolbar" label="Chat tools">
+                {activeChatMode === 'study' && (
+                  <>
+                    {/* Compact Pomodoro Timer */}
+                    <div
+                      style={{
+                        backgroundColor: focusRunning
+                          ? 'var(--m3-primary-container)'
+                          : 'var(--m3-surface-container-high)',
+                        borderColor: 'var(--m3-outline)',
+                        color: focusRunning ? 'var(--m3-on-primary-container)' : undefined,
+                      }}
+                      className="min-h-[32px] px-2 rounded-full border inline-flex items-center gap-1 text-[11px] font-medium tabular-nums shrink-0"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          triggerHaptic(settings.hapticsEnabled, 'light');
+                          setFocusRunning((r) => !r);
+                        }}
+                        aria-label={focusRunning ? 'Pause focus timer' : 'Start 25m focus timer'}
+                        className="inline-flex items-center gap-1 text-slate-700 dark:text-slate-200"
+                      >
+                        <Timer className="w-3.5 h-3.5 shrink-0" />
+                        <span>{formatPomodoroTime(focusSecondsLeft)}</span>
+                        {focusRunning ? (
+                          <Pause className="w-3 h-3 shrink-0" />
+                        ) : (
+                          <Play className="w-3 h-3 shrink-0" />
+                        )}
+                      </button>
+                      {focusSecondsLeft !== (focusPhase === 'focus' ? 25 * 60 : 5 * 60) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFocusRunning(false);
+                            setFocusPhase('focus');
+                            setFocusSecondsLeft(25 * 60);
+                          }}
+                          aria-label="Reset focus timer"
+                          className="p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Saved Study Vault */}
+                    <button
+                      type="button"
+                      data-testid="study-vault-btn"
+                      onClick={() => setVaultOpen(true)}
+                      aria-label={`Saved study notes (${savedStudyNotes.length})`}
+                      style={{
                         backgroundColor: 'var(--m3-surface-container-high)',
                         borderColor: 'var(--m3-outline)',
-                      }
-                }
-                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-              >
-                <FolderKanban className="w-3.5 h-3.5" />
-                <span className="truncate max-w-[104px]">
-                  {activeProject ? activeProject.name : 'Project'}
-                </span>
-              </button>
+                      }}
+                      className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                    >
+                      <Bookmark className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Vault</span>
+                      {savedStudyNotes.length > 0 && (
+                        <span className="text-[11px] font-mono tabular-nums opacity-80">
+                          {savedStudyNotes.length}
+                        </span>
+                      )}
+                    </button>
 
-              {/* Live A2UI Interactive Widgets Mode Cycler (Smart / Always / Off) */}
-              <button
-                type="button"
-                data-testid="a2ui-toggle-btn"
-                aria-pressed={resolvedA2uiMode !== 'off'}
-                aria-label={`Interactive A2UI widgets: ${resolvedA2uiMode}. Tap to switch mode`}
-                title={`A2UI Mode: ${resolvedA2uiMode.toUpperCase()} (tap to cycle Smart → Always → Off)`}
-                onClick={cycleA2uiMode}
-                style={
-                  resolvedA2uiMode !== 'off'
-                    ? {
-                        backgroundColor: 'var(--m3-primary-container)',
-                        color: 'var(--m3-on-primary-container)',
-                        borderColor: 'var(--m3-primary)',
+                    {/* Study Plan Preset Toggle */}
+                    <button
+                      type="button"
+                      data-testid="study-plan-btn"
+                      onClick={() => setStudyPlanOpen((v) => !v)}
+                      aria-expanded={studyPlanOpen}
+                      style={
+                        studyPlanOpen
+                          ? {
+                              backgroundColor: 'var(--m3-primary-container)',
+                              color: 'var(--m3-on-primary-container)',
+                              borderColor: 'var(--m3-primary)',
+                            }
+                          : {
+                              backgroundColor: 'var(--m3-surface-container-high)',
+                              borderColor: 'var(--m3-outline)',
+                            }
                       }
-                    : {
-                        backgroundColor: 'var(--m3-surface-container-high)',
-                        borderColor: 'var(--m3-outline)',
-                      }
-                }
-                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-              >
-                <LayoutGrid className="w-3.5 h-3.5" />
-                <span>
-                  {resolvedA2uiMode === 'smart'
-                    ? 'A2UI · Smart'
-                    : resolvedA2uiMode === 'always'
-                      ? 'A2UI · Always'
-                      : 'A2UI · Off'}
-                </span>
-              </button>
+                      className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      <span>Style</span>
+                      {studyPlanOpen ? (
+                        <ChevronUp className="w-3 h-3" />
+                      ) : (
+                        <ChevronDown className="w-3 h-3" />
+                      )}
+                    </button>
+                  </>
+                )}
 
-              {/* Multi-Model Side-by-Side Compare Toggle */}
-              <button
-                type="button"
-                data-testid="compare-toggle-btn"
-                aria-pressed={compareEnabled}
-                title="Compare 2-3 models side by side"
-                onClick={() => {
-                  triggerHaptic(settings.hapticsEnabled, 'light');
-                  setCompareEnabled((v) => !v);
-                }}
-                style={
-                  compareEnabled
-                    ? {
-                        backgroundColor: 'var(--m3-primary-container)',
-                        color: 'var(--m3-on-primary-container)',
-                        borderColor: 'var(--m3-primary)',
-                      }
-                    : {
-                        backgroundColor: 'var(--m3-surface-container-high)',
-                        borderColor: 'var(--m3-outline)',
-                      }
-                }
-                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-              >
-                <Columns className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Compare</span>
-              </button>
+                {activeChatMode === 'professional' && (
+                  <button
+                    type="button"
+                    data-testid="pro-plan-toggle"
+                    onClick={() => {
+                      triggerHaptic(settings.hapticsEnabled, 'light');
+                      setPlanMode((v) => !v);
+                    }}
+                    aria-pressed={planMode}
+                    title="Plan-then-execute: draft editable steps before running Pro tasks"
+                    style={
+                      planMode
+                        ? {
+                            backgroundColor: 'var(--m3-primary-container)',
+                            color: 'var(--m3-on-primary-container)',
+                            borderColor: 'var(--m3-primary)',
+                          }
+                        : {
+                            backgroundColor: 'var(--m3-surface-container-high)',
+                            borderColor: 'var(--m3-outline)',
+                          }
+                    }
+                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                  >
+                    <ListChecks className="w-3.5 h-3.5" />
+                    <span>Plan</span>
+                  </button>
+                )}
 
-              {/* Effort Cycle Chip */}
-              <button
-                type="button"
-                onClick={handleCycleEffort}
-                aria-label={`Reasoning effort: ${activeEffort}, tap to cycle`}
-                data-testid="effort-chip"
-                style={{
-                  backgroundColor: 'var(--m3-surface-container-high)',
-                  borderColor: 'var(--m3-outline)',
-                }}
-                className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium capitalize text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-90"
-              >
-                {activeEffort}
-              </button>
+                {/* Active Project Workspace Pill */}
+                <button
+                  type="button"
+                  data-testid="project-picker-btn"
+                  onClick={() => setProjectsModalOpen(true)}
+                  aria-label={`Project workspace: ${activeProject ? activeProject.name : 'None'}`}
+                  style={
+                    activeProject
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  <FolderKanban className="w-3.5 h-3.5" />
+                  <span className="truncate max-w-[104px]">
+                    {activeProject ? activeProject.name : 'Project'}
+                  </span>
+                </button>
+
+                {/* Live A2UI Interactive Widgets Mode Cycler (Smart / Always / Off) */}
+                <button
+                  type="button"
+                  data-testid="a2ui-toggle-btn"
+                  aria-pressed={resolvedA2uiMode !== 'off'}
+                  aria-label={`Interactive A2UI widgets: ${resolvedA2uiMode}. Tap to switch mode`}
+                  title={`A2UI Mode: ${resolvedA2uiMode.toUpperCase()} (tap to cycle Smart → Always → Off)`}
+                  onClick={cycleA2uiMode}
+                  style={
+                    resolvedA2uiMode !== 'off'
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>
+                    {resolvedA2uiMode === 'smart'
+                      ? 'A2UI · Smart'
+                      : resolvedA2uiMode === 'always'
+                        ? 'A2UI · Always'
+                        : 'A2UI · Off'}
+                  </span>
+                </button>
+
+                {/* Multi-Model Side-by-Side Compare Toggle */}
+                <button
+                  type="button"
+                  data-testid="compare-toggle-btn"
+                  aria-pressed={compareEnabled}
+                  title="Compare 2-3 models side by side"
+                  onClick={() => {
+                    triggerHaptic(settings.hapticsEnabled, 'light');
+                    setCompareEnabled((v) => !v);
+                  }}
+                  style={
+                    compareEnabled
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  <Columns className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Compare</span>
+                </button>
+
+                {/* Effort Cycle Chip */}
+                <button
+                  type="button"
+                  onClick={handleCycleEffort}
+                  aria-label={`Reasoning effort: ${activeEffort}, tap to cycle`}
+                  data-testid="effort-chip"
+                  style={{
+                    backgroundColor: 'var(--m3-surface-container-high)',
+                    borderColor: 'var(--m3-outline)',
+                  }}
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium capitalize text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  {activeEffort}
+                </button>
+              </ChatActionGroup>
             </div>
           </div>
 
@@ -1400,7 +1412,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 backgroundColor: 'var(--m3-surface)',
                 borderColor: 'var(--m3-outline)',
               }}
-              className="rounded-2xl border p-3 space-y-2.5"
+              className="chat-study-style rounded-2xl border p-3 space-y-2.5"
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-slate-900 dark:text-white">
@@ -1494,7 +1506,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         )}
 
         {/* Scrollable Editorial Message Stream */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 sm:px-6 py-5 space-y-6">
+        <div ref={scrollRef} onScroll={({ currentTarget }) => {
+          followLatest.current = currentTarget.scrollHeight - currentTarget.clientHeight - currentTarget.scrollTop <= 72;
+        }} className="chat-thread flex-1 min-h-0 overflow-y-auto px-3.5 sm:px-6 py-5 space-y-6">
           {(!activeConv || activeConv.messages.length === 0) && (
             <div className="chat-empty max-w-xl mx-auto py-8 sm:py-12 text-center space-y-6">
               <div
@@ -1743,14 +1757,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={M3_EMPHASIZED_EASE}
-                className="max-w-3xl mx-auto space-y-2.5"
+                className="chat-reply max-w-3xl mx-auto min-w-0 space-y-2.5"
               >
-                {/* Quiet Editorial Attribution Line (never static pill sandwiches) */}
-                <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+                <div className="chat-reply-byline flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
                   <div className="flex items-center gap-1.5 min-w-0 truncate">
                     <Sparkles
                       style={{ color: 'var(--m3-primary)' }}
-                      className="w-3.5 h-3.5 shrink-0"
+                      className="chat-reply-mark w-3.5 h-3.5 shrink-0"
                     />
                     <span className="font-semibold text-slate-800 dark:text-slate-200 truncate">
                       {activeAgent.name}
@@ -1799,7 +1812,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
                 {msg.content && (
                   <div className="space-y-3">
-                    {/* Open, uncluttered ChatGPT/Gemini/Claude editorial prose (no outer card box!) */}
                     <article
                       data-testid="assistant-response-card"
                       onClick={(e) => {
@@ -1814,7 +1826,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           });
                         }
                       }}
-                      className={`min-w-0 ${isStudyResponse && !msg.isStreaming ? 'cursor-pointer' : ''}`}
+                      className={`chat-reply-content min-w-0 ${isStudyResponse && !msg.isStreaming ? 'cursor-pointer' : ''}`}
                     >
                       <MarkdownRenderer
                         content={msg.content}
@@ -1862,7 +1874,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
                     {/* Clean Compact Response Action Bar */}
                     {!msg.isStreaming && (
-                      <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                      <div className="chat-reply-actions flex flex-wrap items-center gap-1 pt-0.5">
                         {(isStudyResponse || msg.content.length > 260) && (
                           <button
                             type="button"
@@ -1894,66 +1906,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           </button>
                         )}
 
-                        {isStudyResponse && (
-                          <>
-                            <button
-                              type="button"
-                              data-testid="open-flashcards-btn"
-                              onClick={() =>
-                                openFlashcardsFromText(
-                                  activeConv?.title || 'Flashcards',
-                                  msg.content
-                                )
-                              }
-                              className="min-h-[34px] px-2.5 rounded-full text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 inline-flex items-center gap-1 transition-colors"
-                            >
-                              <Layers className="w-3.5 h-3.5" />
-                              <span>Flashcards</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              data-testid="open-quiz-btn"
-                              onClick={() =>
-                                openQuizFromText(activeConv?.title || 'Practice Quiz', msg.content)
-                              }
-                              className="min-h-[34px] px-2.5 rounded-full text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 inline-flex items-center gap-1 transition-colors"
-                            >
-                              <HelpCircle className="w-3.5 h-3.5" />
-                              <span>Quiz Me</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              data-testid="save-study-note-btn"
-                              onClick={() => {
-                                triggerHaptic(settings.hapticsEnabled, 'light');
-                                if (savedNoteId) {
-                                  removeSavedStudyNote(savedNoteId);
-                                } else {
-                                  saveStudyNote({
-                                    title: activeConv?.title || 'Study Note',
-                                    content: msg.content,
-                                    modelLabel: msgModelShort,
-                                    messageId: msg.id,
-                                  });
-                                }
-                              }}
-                              className="min-h-[34px] px-2.5 rounded-full text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 inline-flex items-center gap-1 transition-colors"
-                            >
-                              {savedNoteId ? (
-                                <BookmarkCheck
-                                  style={{ color: 'var(--m3-primary)' }}
-                                  className="w-3.5 h-3.5"
-                                />
-                              ) : (
-                                <Bookmark className="w-3.5 h-3.5" />
-                              )}
-                              <span>{savedNoteId ? 'Saved' : 'Save'}</span>
-                            </button>
-                          </>
-                        )}
-
                         <button
                           type="button"
                           onClick={() => void handleCopyMessage(msg.id, msg.content)}
@@ -1968,148 +1920,210 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                           <span>{copiedMsgId === msg.id ? 'Copied' : 'Copy'}</span>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => handleSpeakMessage(msg.id, msg.content)}
-                          aria-label={speakingMsgId === msg.id ? 'Stop reading aloud' : 'Read aloud'}
-                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
-                        >
-                          {speakingMsgId === msg.id ? (
-                            <VolumeX className="w-3.5 h-3.5 text-rose-500" />
-                          ) : (
-                            <Volume2 className="w-3.5 h-3.5" />
-                          )}
-                          <span>{speakingMsgId === msg.id ? 'Stop' : 'Listen'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => void handleShareMessage(msg.content)}
-                          aria-label="Share response"
-                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
-                        >
-                          <Share2 className="w-3.5 h-3.5" />
-                          <span>Share</span>
-                        </button>
-
-                        {/* Verify Reply with 2nd Model */}
-                        <button
-                          type="button"
-                          data-testid="verify-msg-btn"
-                          disabled={isRunning || verifyingMsgId === msg.id}
-                          onClick={() => {
-                            setVerifyingMsgId(msg.id);
-                            void verifyAssistantMessage(msg.id).finally(() => setVerifyingMsgId(null));
-                          }}
-                          aria-label="Verify response accuracy"
-                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
-                        >
-                          {verifyingMsgId === msg.id ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <ShieldCheck className="w-3.5 h-3.5" />
-                          )}
-                          <span>{verifyingMsgId === msg.id ? 'Verifying…' : 'Verify'}</span>
-                        </button>
-
-                        {/* Regenerate (or pick different model) */}
-                        <div className="relative inline-flex items-center">
-                          <button
-                            type="button"
-                            data-testid="regen-msg-btn"
-                            disabled={isRunning}
-                            onClick={() =>
-                              setRegenPickerMsgId((curr) => (curr === msg.id ? null : msg.id))
-                            }
-                            aria-label="Regenerate response"
-                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
-                          >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                            <span>Regen</span>
-                          </button>
-                          {regenPickerMsgId === msg.id && (
-                            <div
-                              style={{
-                                backgroundColor: 'var(--m3-surface-container-high)',
-                                borderColor: 'var(--m3-outline)',
-                              }}
-                              className="absolute left-0 bottom-full mb-1.5 z-30 w-56 rounded-2xl border p-1.5 shadow-xl space-y-0.5"
-                            >
+                        <ChatActionGroup placement="reply" label="More response actions">
+                          {isStudyResponse && (
+                            <>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setRegenPickerMsgId(null);
-                                  void regenerateAssistantMessage(msg.id);
-                                }}
-                                className="w-full min-h-[36px] px-2.5 rounded-xl text-left text-xs font-semibold text-slate-900 dark:text-white hover:bg-slate-200/60 dark:hover:bg-slate-800/70"
+                                data-testid="open-flashcards-btn"
+                                onClick={() =>
+                                  openFlashcardsFromText(
+                                    activeConv?.title || 'Flashcards',
+                                    msg.content
+                                  )
+                                }
+                                className="min-h-[34px] px-2.5 rounded-full text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 inline-flex items-center gap-1 transition-colors"
                               >
-                                Retry with {activeModelShort}
+                                <Layers className="w-3.5 h-3.5" />
+                                <span>Flashcards</span>
                               </button>
-                              <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                                Or try another model
-                              </div>
-                              {allCatalogModels.slice(0, 6).map((m) => (
+
+                              <button
+                                type="button"
+                                data-testid="open-quiz-btn"
+                                onClick={() =>
+                                  openQuizFromText(activeConv?.title || 'Practice Quiz', msg.content)
+                                }
+                                className="min-h-[34px] px-2.5 rounded-full text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 inline-flex items-center gap-1 transition-colors"
+                              >
+                                <HelpCircle className="w-3.5 h-3.5" />
+                                <span>Quiz Me</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                data-testid="save-study-note-btn"
+                                onClick={() => {
+                                  triggerHaptic(settings.hapticsEnabled, 'light');
+                                  if (savedNoteId) {
+                                    removeSavedStudyNote(savedNoteId);
+                                  } else {
+                                    saveStudyNote({
+                                      title: activeConv?.title || 'Study Note',
+                                      content: msg.content,
+                                      modelLabel: msgModelShort,
+                                      messageId: msg.id,
+                                    });
+                                  }
+                                }}
+                                className="min-h-[34px] px-2.5 rounded-full text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 inline-flex items-center gap-1 transition-colors"
+                              >
+                                {savedNoteId ? (
+                                  <BookmarkCheck
+                                    style={{ color: 'var(--m3-primary)' }}
+                                    className="w-3.5 h-3.5"
+                                  />
+                                ) : (
+                                  <Bookmark className="w-3.5 h-3.5" />
+                                )}
+                                <span>{savedNoteId ? 'Saved' : 'Save'}</span>
+                              </button>
+                            </>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleSpeakMessage(msg.id, msg.content)}
+                            aria-label={speakingMsgId === msg.id ? 'Stop reading aloud' : 'Read aloud'}
+                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
+                          >
+                            {speakingMsgId === msg.id ? (
+                              <VolumeX className="w-3.5 h-3.5 text-rose-500" />
+                            ) : (
+                              <Volume2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>{speakingMsgId === msg.id ? 'Stop' : 'Listen'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => void handleShareMessage(msg.content)}
+                            aria-label="Share response"
+                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                            <span>Share</span>
+                          </button>
+
+                          {/* Verify Reply with 2nd Model */}
+                          <button
+                            type="button"
+                            data-testid="verify-msg-btn"
+                            disabled={isRunning || verifyingMsgId === msg.id}
+                            onClick={() => {
+                              setVerifyingMsgId(msg.id);
+                              void verifyAssistantMessage(msg.id).finally(() => setVerifyingMsgId(null));
+                            }}
+                            aria-label="Verify response accuracy"
+                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                          >
+                            {verifyingMsgId === msg.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                            )}
+                            <span>{verifyingMsgId === msg.id ? 'Verifying…' : 'Verify'}</span>
+                          </button>
+
+                          {/* Regenerate (or pick different model) */}
+                          <div className="relative inline-flex items-center">
+                            <button
+                              type="button"
+                              data-testid="regen-msg-btn"
+                              disabled={isRunning}
+                              onClick={() =>
+                                setRegenPickerMsgId((curr) => (curr === msg.id ? null : msg.id))
+                              }
+                              aria-label="Regenerate response"
+                              className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Regen</span>
+                            </button>
+                            {regenPickerMsgId === msg.id && (
+                              <div
+                                style={{
+                                  backgroundColor: 'var(--m3-surface-container-high)',
+                                  borderColor: 'var(--m3-outline)',
+                                }}
+                                className="absolute left-0 bottom-full mb-1.5 z-30 w-56 rounded-2xl border p-1.5 shadow-xl space-y-0.5"
+                              >
                                 <button
-                                  key={m.id}
                                   type="button"
                                   onClick={() => {
                                     setRegenPickerMsgId(null);
-                                    void regenerateAssistantMessage(msg.id, m.id);
+                                    void regenerateAssistantMessage(msg.id);
                                   }}
-                                  className="w-full min-h-[34px] px-2.5 rounded-xl text-left text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800/70 truncate"
+                                  className="w-full min-h-[36px] px-2.5 rounded-xl text-left text-xs font-semibold text-slate-900 dark:text-white hover:bg-slate-200/60 dark:hover:bg-slate-800/70"
                                 >
-                                  {getShortModelName(m)}
+                                  Retry with {activeModelShort}
                                 </button>
-                              ))}
+                                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                  Or try another model
+                                </div>
+                                {allCatalogModels.slice(0, 6).map((m) => (
+                                  <button
+                                    key={m.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setRegenPickerMsgId(null);
+                                      void regenerateAssistantMessage(msg.id, m.id);
+                                    }}
+                                    className="w-full min-h-[34px] px-2.5 rounded-xl text-left text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800/70 truncate"
+                                  >
+                                    {getShortModelName(m)}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Fork Conversation Branch */}
+                          <button
+                            type="button"
+                            data-testid="fork-msg-btn"
+                            disabled={isRunning}
+                            onClick={() => void forkConversationFromMessage(msg.id)}
+                            aria-label="Fork conversation from this reply"
+                            className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                          >
+                            <GitFork className="w-3.5 h-3.5" />
+                            <span>Fork</span>
+                          </button>
+
+                          {(msg.chatMode ?? activeChatMode) === 'professional' && (
+                            <div className="ml-1 flex items-center gap-1 flex-wrap">
+                              {(
+                                [
+                                  { fmt: 'pdf', label: 'PDF', Icon: FileText },
+                                  { fmt: 'docx', label: 'DOCX', Icon: FileText },
+                                  { fmt: 'xlsx', label: 'XLSX', Icon: FileSpreadsheet },
+                                  { fmt: 'pptx', label: 'PPTX', Icon: Presentation },
+                                ] as const
+                              ).map(({ fmt, label, Icon }) => {
+                                const busy = exportingKey === `${msg.id}:${fmt}`;
+                                return (
+                                  <button
+                                    key={fmt}
+                                    type="button"
+                                    disabled={busy}
+                                    data-testid={`export-msg-${fmt}`}
+                                    onClick={() => void handleQuickExportPro(msg.id, msg.content, fmt)}
+                                    aria-label={`Export response as ${label}`}
+                                    style={{
+                                      backgroundColor: 'var(--m3-surface-container)',
+                                      borderColor: 'var(--m3-outline)',
+                                    }}
+                                    className="min-h-[30px] px-2 rounded-full border text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap hover:opacity-85 disabled:opacity-50"
+                                  >
+                                    <Icon className="w-3 h-3" />
+                                    <span>{busy ? '…' : label}</span>
+                                  </button>
+                                );
+                              })}
                             </div>
                           )}
-                        </div>
-
-                        {/* Fork Conversation Branch */}
-                        <button
-                          type="button"
-                          data-testid="fork-msg-btn"
-                          disabled={isRunning}
-                          onClick={() => void forkConversationFromMessage(msg.id)}
-                          aria-label="Fork conversation from this reply"
-                          className="min-h-[34px] px-2.5 rounded-full text-xs text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white inline-flex items-center gap-1 transition-colors disabled:opacity-50"
-                        >
-                          <GitFork className="w-3.5 h-3.5" />
-                          <span>Fork</span>
-                        </button>
-
-                        {(msg.chatMode ?? activeChatMode) === 'professional' && (
-                          <div className="ml-1 flex items-center gap-1 flex-wrap">
-                            {(
-                              [
-                                { fmt: 'pdf', label: 'PDF', Icon: FileText },
-                                { fmt: 'docx', label: 'DOCX', Icon: FileText },
-                                { fmt: 'xlsx', label: 'XLSX', Icon: FileSpreadsheet },
-                                { fmt: 'pptx', label: 'PPTX', Icon: Presentation },
-                              ] as const
-                            ).map(({ fmt, label, Icon }) => {
-                              const busy = exportingKey === `${msg.id}:${fmt}`;
-                              return (
-                                <button
-                                  key={fmt}
-                                  type="button"
-                                  disabled={busy}
-                                  data-testid={`export-msg-${fmt}`}
-                                  onClick={() => void handleQuickExportPro(msg.id, msg.content, fmt)}
-                                  aria-label={`Export response as ${label}`}
-                                  style={{
-                                    backgroundColor: 'var(--m3-surface-container)',
-                                    borderColor: 'var(--m3-outline)',
-                                  }}
-                                  className="min-h-[30px] px-2 rounded-full border text-[11px] font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap hover:opacity-85 disabled:opacity-50"
-                                >
-                                  <Icon className="w-3 h-3" />
-                                  <span>{busy ? '…' : label}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
+                        </ChatActionGroup>
                       </div>
                     )}
 
@@ -2651,13 +2665,6 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </div>
               )}
 
-              {'speechSynthesis' in window && <button type="button" aria-pressed={voiceReplies} onClick={() => {
-                spokenReplyId.current = lastMsg?.id;
-                voiceConversationId.current = activeConversationId;
-                if (voiceReplies) { window.speechSynthesis.cancel(); setSpeakingMsgId(null); }
-                setVoiceReplies(!voiceReplies);
-              }} className="self-start inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700"><Volume2 className="w-3.5 h-3.5" /> Voice replies {voiceReplies ? 'on' : 'off'}</button>}
-
               <textarea
                 ref={composerRef}
                 rows={1}
@@ -2693,8 +2700,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               />
 
               {/* Compact Bottom Action Toolbar inside Composer */}
-              <div className="flex items-end justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+              <div className="chat-composer-actions flex items-end justify-between gap-2">
+                <div className="chat-composer-tools flex flex-wrap items-center gap-1.5 min-w-0">
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -2734,69 +2741,86 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     <ChevronUp className="w-3 h-3 opacity-70 shrink-0" />
                   </button>
 
-                  <button
-                    type="button"
-                    data-testid="macros-picker-btn"
-                    onClick={() => setMacrosSheetOpen(true)}
-                    aria-label="Open saved prompt macros"
-                    title="Saved Prompt Macros ({{var}})"
-                    style={{
-                      backgroundColor: 'var(--m3-surface-container)',
-                      borderColor: 'var(--m3-outline)',
-                    }}
-                    className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
-                  >
-                    <BookMarked className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Macros</span>
-                  </button>
-
-                  {availableResources.length > 0 && (
+                  <ChatActionGroup placement="composer" label="More composer tools">
                     <button
                       type="button"
-                      data-testid="mcp-resource-picker-btn"
-                      onClick={() => {
-                        setMcpPickerQuery('');
-                        setMcpPickerMode((m) => (m === 'resource' ? null : 'resource'));
-                      }}
-                      aria-label="Attach MCP resource"
-                      title="Attach MCP resource (@)"
+                      data-testid="macros-picker-btn"
+                      onClick={() => setMacrosSheetOpen(true)}
+                      aria-label="Open saved prompt macros"
+                      title="Saved Prompt Macros ({{var}})"
                       style={{
                         backgroundColor: 'var(--m3-surface-container)',
                         borderColor: 'var(--m3-outline)',
                       }}
                       className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
                     >
-                      <AtSign className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Resource</span>
+                      <BookMarked className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Macros</span>
                     </button>
-                  )}
 
-                  {availablePrompts.length > 0 && (
-                    <button
-                      type="button"
-                      data-testid="mcp-prompt-picker-btn"
-                      onClick={() => {
-                        setMcpPickerQuery('');
-                        setMcpPickerMode((m) => (m === 'prompt' ? null : 'prompt'));
-                      }}
-                      aria-label="Insert MCP prompt template"
-                      title="Insert MCP prompt (/)"
-                      style={{
-                        backgroundColor: 'var(--m3-surface-container)',
-                        borderColor: 'var(--m3-outline)',
-                      }}
-                      className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
-                    >
-                      <Terminal className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Prompt</span>
-                    </button>
-                  )}
+                    {availableResources.length > 0 && (
+                      <button
+                        type="button"
+                        data-testid="mcp-resource-picker-btn"
+                        onClick={() => {
+                          setMcpPickerQuery('');
+                          setMcpPickerMode((m) => (m === 'resource' ? null : 'resource'));
+                        }}
+                        aria-label="Attach MCP resource"
+                        title="Attach MCP resource (@)"
+                        style={{
+                          backgroundColor: 'var(--m3-surface-container)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
+                      >
+                        <AtSign className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Resource</span>
+                      </button>
+                    )}
+
+                    {availablePrompts.length > 0 && (
+                      <button
+                        type="button"
+                        data-testid="mcp-prompt-picker-btn"
+                        onClick={() => {
+                          setMcpPickerQuery('');
+                          setMcpPickerMode((m) => (m === 'prompt' ? null : 'prompt'));
+                        }}
+                        aria-label="Insert MCP prompt template"
+                        title="Insert MCP prompt (/)"
+                        style={{
+                          backgroundColor: 'var(--m3-surface-container)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="min-h-[36px] min-w-[36px] sm:min-h-[38px] sm:px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center justify-center gap-1 shrink-0 hover:opacity-90"
+                      >
+                        <Terminal className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Prompt</span>
+                      </button>
+                    )}
+
+                    {'speechSynthesis' in window && (
+                      <button type="button" aria-pressed={voiceReplies} onClick={() => {
+                        spokenReplyId.current = lastMsg?.id;
+                        voiceConversationId.current = activeConversationId;
+                        if (voiceReplies) {
+                          window.speechSynthesis.cancel();
+                          setSpeakingMsgId(null);
+                        }
+                        setVoiceReplies(!voiceReplies);
+                      }} className="self-start inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700">
+                        <Volume2 className="w-3.5 h-3.5" />
+                        Voice replies {voiceReplies ? 'on' : 'off'}
+                      </button>
+                    )}
+                  </ChatActionGroup>
 
                   {activeKnowledgeSource === 'uploaded' && attachments.length === 0 && (
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      className="text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline truncate"
+                      className="chat-attach-reminder text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline truncate"
                     >
                       Attach file
                     </button>
