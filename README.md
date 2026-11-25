@@ -1,6 +1,6 @@
 # MCP Hub
 
-Zero-cost, zero-backend **Model Context Protocol (MCP)** chat client for Android/iOS (React Native + Expo Router in `mobile/`) and Web preview (`src/`). Connects directly over HTTPS to free-tier cloud LLMs and remote MCP servers.
+Local-first **Model Context Protocol (MCP)** and AI workspace for Android/iOS (React Native + Expo Router in `mobile/`) and web (`src/`), with optional Express-backed account services and cloud synchronization. Connects directly to configured AI providers and remote MCP servers; availability and costs depend on provider plans.
 
 ---
 

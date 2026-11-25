@@ -1,4 +1,4 @@
-import { sanitizeFilename } from './docExport';
+import { sanitizeFilename } from './filenames';
 
 export interface AppFileEntry {
   path: string;

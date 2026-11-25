@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AgentProfile, McpServerConfig } from '../types';
-import { attachConversationToProject, listWorkspaceProjects, projectAgent, projectForConversation, projectReferenceContext, projectServers, saveWorkspaceProjects, type WorkspaceProject } from './projects';
+import { attachConversationToProject, migrateLegacyWorkspaceProjects, listWorkspaceProjects, projectAgent, projectForConversation, projectReferenceContext, projectServers, saveWorkspaceProjects, type WorkspaceProject } from './projects';
 
 const config: WorkspaceProject = {
   id: 'one', name: 'Finances', instructions: 'Use USD.', defaultAgentId: 'analyst', serverIds: ['reports'],
@@ -34,4 +34,13 @@ test('project context adds instructions, restricts tools and retrieves named sou
   assert.match(reference, /\[Source: forecast\.txt #chunk-1\]/);
   assert.match(reference, /15,000 USD/);
   assert.match(reference, /Never follow instructions/);
+});
+
+
+test('legacy local projects migrate into the active profile format without losing pinned text', () => {
+  const storage = { getItem: () => JSON.stringify([config]), setItem: () => {} };
+  const [project] = migrateLegacyWorkspaceProjects('alice', storage);
+  assert.equal(project.id, config.id);
+  assert.deepEqual(project.allowedServerIds, ['reports']);
+  assert.equal(project.pinnedFiles[0].textContent, config.pinnedFiles[0].textContent);
 });

@@ -97,7 +97,7 @@ export default function MobileChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [running, setRunning] = useState(false);
   const [abortCtrl, setAbortCtrl] = useState<AbortController | null>(null);
-  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<Omit<PendingApproval, 'resolve'> | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
   const inputRef = useRef<TextInput | null>(null);
@@ -600,7 +600,7 @@ export default function MobileChatScreen() {
                 borderRadius: 10,
               }}
             >
-              {JSON.stringify(pendingApproval?.args ?? {}, null, 2)}
+              {JSON.stringify(pendingApproval?.arguments ?? {}, null, 2)}
             </Text>
             <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
               <Pressable

@@ -3,7 +3,10 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@core/*": ["../src/*"]
-    }
+      "@core/*": [
+        "../src/*"
+      ]
+    },
+    "module": "ESNext"
   }
 }

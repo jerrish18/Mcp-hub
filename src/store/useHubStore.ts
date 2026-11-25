@@ -75,6 +75,7 @@ import type {
   ToolCallRecord,
   ToolPolicyRule,
 } from '../types';
+import { listWorkspaceProjects, migrateLegacyWorkspaceProjects } from '../utils/projects';
 import { resolveA2uiMode } from '../utils/a2ui';
 import type { SavedStudyNote } from '../utils/studyTools';
 import { safeErrorMessage } from '../utils/redact';
@@ -168,6 +169,17 @@ function migrateConversation(c: Conversation): Conversation {
   };
 }
 
+function migrateScopedConversations(conversations: Conversation[], scope: string, projects: ProjectProfile[]): Conversation[] {
+  const valid = new Set(projects.filter(project => project.updatedAt === 0).map(project => project.id));
+  const legacy = listWorkspaceProjects(scope).filter(project => valid.has(project.id));
+  return conversations.map(conversation => {
+    const migrated = migrateConversation(conversation);
+    if (migrated.projectId !== undefined) return migrated;
+    const project = legacy.find(item => Array.isArray(item.conversationIds) && item.conversationIds.includes(migrated.id));
+    return project ? { ...migrated, projectId: project.id } : migrated;
+  });
+}
+
 function readPersistedMeta(scope = 'guest'): PersistedMeta {
   try {
     let raw = globalThis.localStorage?.getItem(`${STATE_KEY_PREFIX}${scope}`);
@@ -209,7 +221,7 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
           parsed.savedPrompts && parsed.savedPrompts.length > 0
             ? parsed.savedPrompts
             : DEFAULT_SAVED_PROMPTS,
-        projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+        projects: Array.isArray(parsed.projects) ? parsed.projects : migrateLegacyWorkspaceProjects(scope),
         updatedAt: Number(parsed.updatedAt) || 0,
       };
     }
@@ -223,7 +235,7 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
     dynamicModels: [],
     dismissedDefaultServerIds: [],
     savedPrompts: DEFAULT_SAVED_PROMPTS,
-    projects: [],
+    projects: migrateLegacyWorkspaceProjects(scope),
     updatedAt: 0,
   };
 }
@@ -506,7 +518,7 @@ export const useHubStore = create<HubState>((set, get) => {
     const localMeta = readPersistedMeta(scope);
     const localNotes = readSavedStudyNotes(scope);
     const localConvsRaw = await historyDb.listConversations(scope);
-    const localConvs = localConvsRaw.map(migrateConversation);
+    const localConvs = migrateScopedConversations(localConvsRaw, scope, localMeta.projects ?? []);
 
     if (runId !== activeSyncRun || get().authUser?.id !== user.id) return;
 
@@ -648,7 +660,7 @@ export const useHubStore = create<HubState>((set, get) => {
     const guestConvsRaw = await historyDb.listConversations('guest');
     if (runId !== activeSyncRun) return;
 
-    let guestConvs = guestConvsRaw.map(migrateConversation);
+    let guestConvs = migrateScopedConversations(guestConvsRaw, 'guest', guestMeta.projects ?? []);
     const updatedServers = await ensureSandboxConnected(guestMeta.servers);
     if (runId !== activeSyncRun) return;
 
@@ -785,8 +797,8 @@ export const useHubStore = create<HubState>((set, get) => {
         historyDb.listConversations(scope),
       ]);
 
-      const convs = rawConvs.map(migrateConversation);
       const state = get();
+      const convs = migrateScopedConversations(rawConvs, scope, state.projects);
       const nextSettings = autostartSkipOnboarding
         ? { ...state.settings, onboardingCompleted: true }
         : state.settings;

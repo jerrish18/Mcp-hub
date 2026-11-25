@@ -302,7 +302,7 @@ export async function fetchRemoteWorkspace(
       chatMode: (data.chatMode ?? 'professional') as Conversation['chatMode'],
       knowledgeSource: (data.knowledgeSource ?? 'auto') as Conversation['knowledgeSource'],
       studyInstructions: String(data.studyInstructions ?? ''),
-      projectId: typeof data.projectId === 'string' ? data.projectId : undefined,
+      projectId: typeof data.projectId === 'string' ? data.projectId : data.projectId === null ? null : undefined,
       messages: Array.isArray(data.messages) ? (data.messages as Conversation['messages']) : [],
       createdAt: Number(data.clientCreatedAt ?? Date.now()),
       updatedAt: Number(data.clientUpdatedAt ?? Date.now()),
