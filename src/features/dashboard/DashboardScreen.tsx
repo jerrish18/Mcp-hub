@@ -24,6 +24,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { CONNECTOR_PRESETS } from '../../config/connectors';
+import { summarizeWorkspaceUsage } from '../../utils/workspaceInsights';
 import { getModelById } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
 import { useHubStore } from '../../store/useHubStore';
@@ -73,6 +74,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
     (k) => Boolean(k?.trim())
   ).length;
 
+  const usage = summarizeWorkspaceUsage(conversations);
   const recentConversations = conversations.slice(0, 4);
 
   const handleQuickLaunch = (e: React.FormEvent) => {
@@ -192,6 +194,12 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
+        </motion.section>
+
+        <motion.section variants={cardStaggerItem} className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
+          <h2 className="font-semibold">Model usage</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400">Estimated prompt tokens and recorded run latency, not provider billing or answer quality.</p>
+          {!usage.length ? <p className="text-sm">Complete a chat to see your usage.</p> : <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr><th>Model</th><th>Runs</th><th>Est. tokens</th><th>Avg. latency</th><th>Errors</th></tr></thead><tbody>{usage.map(row => <tr key={row.modelId}><td className="py-2 pr-2">{getModelById(row.modelId, dynamicModels)?.label ?? row.modelId}</td><td>{row.runs}</td><td>{row.promptTokens.toLocaleString()}</td><td>{(row.averageMs / 1000).toFixed(2)}s</td><td>{row.errors}</td></tr>)}</tbody></table></div>}
         </motion.section>
 
         {/* 4-Column Real Data KPI Strip */}

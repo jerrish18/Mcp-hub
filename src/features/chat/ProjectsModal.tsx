@@ -252,6 +252,18 @@ export function ProjectsModal({
             )}
           </div>
 
+          {!editingId && <label className="block text-xs font-semibold">Start from a template
+            <select defaultValue="" className="block w-full min-h-[42px] rounded-xl border bg-transparent px-3 mt-1" onChange={e => {
+              const templates = {
+                study: ['Study workspace', 'Organize learning and revision', 'Explain concepts clearly, cite references, and offer practice questions.'],
+                writing: ['Writing workspace', 'Draft and revise documents', 'Use a clear structure, distinguish facts from assumptions, and suggest edits.'],
+                research: ['Research workspace', 'Collect and compare sources', 'Summarize evidence, cite sources, and identify open questions.'],
+              };
+              const template = templates[e.target.value as keyof typeof templates];
+              if (template) { setName(template[0]); setDescription(template[1]); setInstructions(template[2]); }
+            }}><option value="">Blank project</option><option value="study">Study</option><option value="writing">Writing</option><option value="research">Research</option></select>
+          </label>}
+
           <input
             type="text"
             required
