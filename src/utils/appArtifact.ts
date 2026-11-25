@@ -481,3 +481,38 @@ export function validateAppExport(spec: AppArtifactSpec): string[] {
   }
   return issues;
 }
+
+/** Recover only complete file records from an interrupted artifact response. */
+export function recoverAppArtifact(source: string): AppArtifactSpec | null {
+  // Match the files property only outside JSON strings and before the array starts.
+  const tokens = /"(?:[^"\\]|\\[\s\S])*"/g;
+  let start = -1;
+  for (const token of source.matchAll(tokens)) {
+    if (token[0] !== '"files"') continue;
+    const value = /^\s*:\s*\[/.exec(source.slice(token.index + token[0].length));
+    if (value) {
+      start = token.index + token[0].length + value[0].length;
+      break;
+    }
+  }
+  if (start < 0) return null;
+
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  let lastFileEnd = -1;
+  for (let index = start; index < source.length; index++) {
+    const char = source[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) lastFileEnd = index;
+    else if (char === ']' && depth === 0) break;
+  }
+  if (lastFileEnd < 0) return null;
+  const project = parseAppArtifactBlock('artifact-app', source.slice(0, lastFileEnd + 1) + ']}');
+  return project ? { ...project, title: `${project.title} (recovered files)` } : null;
+}

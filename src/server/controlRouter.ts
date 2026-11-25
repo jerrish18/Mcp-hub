@@ -19,6 +19,7 @@ export interface StoredApiKeyRecord {
   prefix: string;
   scope: ControlKeyScope;
   hashHex: string;
+  ownerId?: string;
   createdAt: number;
   lastUsedAt?: number;
   revokedAt?: number;
@@ -92,6 +93,7 @@ export interface CreateControlRouterOptions {
   activityFilePath?: string;
   adminToken?: string;
   isProduction?: boolean;
+  verifyAccount?: (authHeader?: string) => { id: string } | null;
 }
 
 const CreateKeySchema = z.object({
@@ -211,10 +213,10 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     .trim();
   const configuredAdminToken =
     rawAdminToken && !rawAdminToken.startsWith('MY_') ? rawAdminToken : '';
-  const allowKeyAndBridgeManagement = !isProduction || Boolean(configuredAdminToken);
+  const allowKeyAndBridgeManagement = !isProduction || Boolean(configuredAdminToken || options.verifyAccount);
   if (!allowKeyAndBridgeManagement) {
     console.warn(
-      '[controlRouter] NODE_ENV=production without MCP_HUB_ADMIN_TOKEN: refusing to mount /control/keys and /control/bridge/*.'
+      '[controlRouter] No account authentication or administrator token is configured in production: refusing to mount /control/keys and /control/bridge/*.'
     );
   }
 
@@ -222,10 +224,11 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
   const activityLog: ControlActivityEntry[] = [];
   let workspaceMirror: BridgeWorkspaceMirror = defaultMirrorState();
 
-  const bridgeClients = new Map<string, Response>();
+  const bridgeClients = new Map<string, { response: Response; ownerId?: string }>();
   const pendingBridgeCommands = new Map<
     string,
     {
+      ownerId?: string;
       resolve: (val: unknown) => void;
       reject: (err: Error) => void;
       timer: ReturnType<typeof setTimeout>;
@@ -295,7 +298,7 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     persistActivity();
   };
 
-  // Strict same-origin + mandatory admin token guard (never bypassed when Origin is missing)
+  // Apply the same-origin check and authenticate the account or instance administrator.
   const requireUiOrigin = (req: Request, res: Response, next: NextFunction) => {
     const originHeader = req.get('origin');
     const hostHeader = (req.get('x-forwarded-host') ?? req.get('host') ?? '').split(',')[0].trim();
@@ -313,14 +316,18 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
       }
     }
 
-    if (configuredAdminToken) {
-      const auth = req.get('authorization') ?? '';
-      const token = auth.replace(/^Bearer\s+/i, '').trim();
-      if (!token || !safeEqualStrings(token, configuredAdminToken)) {
-        res.status(401).json({ error: 'Admin token required for key management.' });
-        return;
-      }
+    const authorization = req.get('authorization');
+    const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? '';
+    const instanceAdmin = Boolean(configuredAdminToken && safeEqualStrings(token, configuredAdminToken));
+    const account = instanceAdmin ? null : options.verifyAccount?.(authorization);
+    const unrestrictedDev = !isProduction && !configuredAdminToken && !authorization;
+    if (!account && !instanceAdmin && !unrestrictedDev) {
+      res.status(401).json({ error: options.verifyAccount
+        ? 'Sign in to an MCP Hub account to manage your App API keys.'
+        : 'Admin token required for key management.' });
+      return;
     }
+    res.locals.ownerId = account?.id;
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (req.get('x-mcphub-ui') !== '1') {
@@ -331,6 +338,9 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
 
     next();
   };
+
+  const clientsFor = (ownerId?: string) =>
+    [...bridgeClients].filter(([, client]) => client.ownerId === ownerId);
 
   interface AuthedRequest extends Request {
     controlKey?: StoredApiKeyRecord;
@@ -414,9 +424,9 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     }
 
     // Prioritize live connected browser hub when available
-    const activeEntries = Array.from(bridgeClients.entries());
+    const activeEntries = clientsFor(key.ownerId);
     if (activeEntries.length > 0) {
-      const [clientId, sseRes] = activeEntries[activeEntries.length - 1];
+      const [clientId, { response: sseRes }] = activeEntries[activeEntries.length - 1];
       const requestId = `cmd_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
       const timeoutMs = action === 'send_chat_message' ? 45_000 : 15_000;
 
@@ -427,7 +437,7 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
             reject(new Error(`Live browser hub timed out after ${timeoutMs}ms executing "${action}".`));
           }, timeoutMs);
 
-          pendingBridgeCommands.set(requestId, { resolve, reject, timer });
+          pendingBridgeCommands.set(requestId, { ownerId: key.ownerId, resolve, reject, timer });
           const payload = JSON.stringify({
             requestId,
             action,
@@ -464,6 +474,10 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
       }
     }
 
+    if (key.ownerId) {
+      return { ok: false, status: 503, error: 'Open MCP Hub and sign in to this account to connect its browser workspace.' };
+    }
+
     // Headless server fallback when no browser tab is open
     try {
       const result = await executeHeadlessFallback(action, params, workspaceMirror);
@@ -494,18 +508,22 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     }
   };
 
-  // --- UI Management Routes (Same-Origin + Mandatory Admin Token in Production) ---
+  // UI key management and browser bridge
   if (allowKeyAndBridgeManagement) {
     router.get('/control/keys', requireUiOrigin, (req, res) => {
       const requestedLimit = Number(req.query.limit);
       const limit = Number.isFinite(requestedLimit)
         ? Math.max(1, Math.min(500, Math.floor(requestedLimit)))
         : 100;
+      const ownerId: string | undefined = res.locals.ownerId;
+      const ownedKeys = keyRecords.filter((key) => key.ownerId === ownerId);
+      const ownedKeyIds = new Set(ownedKeys.map((key) => key.id));
+      res.set('Cache-Control', 'no-store');
       res.json({
         adminTokenRequired: Boolean(configuredAdminToken),
-        bridgeConnectedCount: bridgeClients.size,
-        keys: keyRecords.map(toPublicKeyInfo),
-        activity: activityLog.slice(0, limit),
+        bridgeConnectedCount: clientsFor(ownerId).length,
+        keys: ownedKeys.map(toPublicKeyInfo),
+        activity: activityLog.filter((entry) => ownedKeyIds.has(entry.keyId)).slice(0, limit),
       });
     });
 
@@ -523,12 +541,14 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
         prefix: `${rawSecret.slice(0, 17)}…`,
         scope: parsed.data.scope,
         hashHex: sha256Hex(rawSecret),
+        ownerId: res.locals.ownerId,
         createdAt: Date.now(),
       };
 
       keyRecords.unshift(record);
       persistKeys();
 
+      res.set('Cache-Control', 'no-store');
       res.status(201).json({
         key: toPublicKeyInfo(record),
         plaintextKey: rawSecret, // Shown once on creation
@@ -536,7 +556,7 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     });
 
     router.delete('/control/keys/:id', requireUiOrigin, (req, res) => {
-      const target = keyRecords.find((k) => k.id === req.params.id);
+      const target = keyRecords.find((k) => k.id === req.params.id && k.ownerId === res.locals.ownerId);
       if (!target) {
         res.status(404).json({ error: 'API key not found.' });
         return;
@@ -548,6 +568,8 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
 
     router.get('/control/bridge/status', (_req, res) => {
       res.json({
+        accountKeysAvailable: Boolean(options.verifyAccount),
+        requiresAuthorization: isProduction || Boolean(configuredAdminToken),
         adminTokenRequired: Boolean(configuredAdminToken),
       });
     });
@@ -557,12 +579,19 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
         Connection: 'keep-alive',
       });
       res.write(`event: connected\ndata: ${JSON.stringify({ clientId })}\n\n`);
-      bridgeClients.set(clientId, res);
+      bridgeClients.set(clientId, { response: res, ownerId: res.locals.ownerId });
 
+      const accountId: string | undefined = res.locals.ownerId;
       const keepAlive = setInterval(() => {
+        if (accountId && options.verifyAccount?.(req.get('authorization'))?.id !== accountId) {
+          bridgeClients.delete(clientId);
+          res.end();
+          return;
+        }
         res.write(': keepalive\n\n');
       }, 25_000);
 
@@ -573,6 +602,10 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     });
 
     router.post('/control/bridge/state', requireUiOrigin, (req, res) => {
+      if (res.locals.ownerId) {
+        res.json({ ok: true, bridgeConnectedCount: clientsFor(res.locals.ownerId).length });
+        return;
+      }
       const body = req.body as Partial<BridgeWorkspaceMirror>;
       if (body && typeof body === 'object') {
         workspaceMirror = {
@@ -581,7 +614,7 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
           updatedAt: Date.now(),
         };
       }
-      res.json({ ok: true, bridgeConnectedCount: bridgeClients.size });
+      res.json({ ok: true, bridgeConnectedCount: clientsFor().length });
     });
 
     router.post('/control/bridge/result', requireUiOrigin, (req, res) => {
@@ -596,7 +629,7 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
         return;
       }
       const pending = pendingBridgeCommands.get(requestId);
-      if (!pending) {
+      if (!pending || pending.ownerId !== res.locals.ownerId) {
         res.status(404).json({ error: 'Pending request expired or not found.' });
         return;
       }
@@ -618,7 +651,7 @@ export function createControlRouter(options: CreateControlRouterOptions = {}): R
     const key = req.controlKey!;
     res.json({
       key: toPublicKeyInfo(key),
-      liveBrowserConnected: bridgeClients.size > 0,
+      liveBrowserConnected: clientsFor(key.ownerId).length > 0,
       actions: getActionsForScope(key.scope),
     });
   });

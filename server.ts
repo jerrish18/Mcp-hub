@@ -83,7 +83,6 @@ async function startServer() {
   app.use('/api/auth/register', authRateLimiter);
   app.use('/api', generalApiLimiter);
 
-  const controlRouter = createControlRouter({ isProduction });
   let authService: ReturnType<typeof createAuthService> | null = null;
   try {
     authService = createAuthService({ isProduction });
@@ -92,6 +91,7 @@ async function startServer() {
       `[server] ${(err as Error).message} App account routes (/api/auth/*, /api/workspace) disabled until AUTH_SESSION_SECRET is configured; Google Sign-In and local mode remain active.`
     );
   }
+  const controlRouter = createControlRouter({ isProduction, verifyAccount: authService?.verifyBearerToken });
   const studyImagesRouter = createStudyImagesRouter();
 
   app.get('/api/health', (_req, res) => {

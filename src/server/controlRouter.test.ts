@@ -349,3 +349,67 @@ describe('createControlRouter (App API Key + External Control)', () => {
     }
   });
 });
+
+it('limits self-service keys, revocation and live routing to the signed-in account', async () => {
+  const app = express();
+  app.use(createControlRouter({
+    isProduction: true, adminToken: 'fixture-admin', storageFilePath: '',
+    verifyAccount: (header) => {
+      const id = /^Bearer fixture-(alice|bob)$/.exec(header ?? '')?.[1];
+      return id ? { id } : null;
+    },
+  }));
+  const server = await new Promise<http.Server>((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/control`;
+  const headers = (identity: string) => ({
+    Authorization: `Bearer fixture-${identity}`, 'X-MCPHub-UI': '1', 'Content-Type': 'application/json',
+  });
+  const streams = new AbortController();
+  try {
+    const create = (identity: string) => fetch(`${base}/keys`, {
+      method: 'POST', headers: headers(identity), body: JSON.stringify({ label: 'Personal key' }),
+    });
+    assert.equal((await create('guest')).status, 401);
+    const created = await create('alice');
+    assert.equal(created.status, 201);
+    const { key, plaintextKey } = await created.json();
+    const keyHeaders = { Authorization: `Bearer ${plaintextKey}` };
+    const other = await fetch(`${base}/keys`, { headers: headers('bob') });
+    assert.deepEqual((await other.json()).keys, []);
+    assert.equal((await fetch(`${base}/keys/${key.id}`, { method: 'DELETE', headers: headers('bob') })).status, 404);
+    const bridge = (identity: string) => fetch(`${base}/bridge/stream`, { headers: headers(identity), signal: streams.signal });
+    assert.equal((await bridge('bob')).status, 200);
+    assert.equal((await fetch(`${base}/state`, { headers: keyHeaders })).status, 503);
+
+    const alice = await bridge('alice');
+    assert.equal(alice.status, 200);
+    const reader = alice.body!.getReader();
+    const decoder = new TextDecoder();
+    let data = decoder.decode((await reader.read()).value);
+    const command = fetch(`${base}/state`, { headers: keyHeaders, signal: AbortSignal.timeout(5000) });
+    let match = /event: command\ndata: ([^\n]+)\n/.exec(data);
+    while (!match) {
+      const next = await reader.read();
+      assert.ok(next.value);
+      data += decoder.decode(next.value);
+      match = /event: command\ndata: ([^\n]+)\n/.exec(data);
+    }
+    const { requestId } = JSON.parse(match[1]);
+    const result = (identity: string) => fetch(`${base}/bridge/result`, {
+      method: 'POST', headers: headers(identity), body: JSON.stringify({ requestId, ok: true, result: { owner: 'Alice' } }),
+    });
+    assert.equal((await result('bob')).status, 404);
+    assert.equal((await result('alice')).status, 200);
+    assert.deepEqual(await (await command).json(), { owner: 'Alice' });
+    const bobKeys = await fetch(`${base}/keys`, { headers: headers('bob') });
+    assert.deepEqual((await bobKeys.json()).activity, []);
+    assert.equal((await fetch(`${base}/keys/${key.id}`, { method: 'DELETE', headers: headers('alice') })).status, 200);
+    assert.equal((await fetch(`${base}/state`, { headers: keyHeaders })).status, 401);
+  } finally {
+    streams.abort();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

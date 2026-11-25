@@ -44,11 +44,13 @@ const SCOPE_LABELS: Record<ControlKeyScope, { title: string; desc: string }> = {
 };
 
 export function AppApiKeySection({ compact = false }: AppApiKeySectionProps) {
-  const { settings } = useHubStore();
+  const { settings, signOutAccount } = useHubStore();
   const [keys, setKeys] = useState<PublicApiKeyInfo[]>([]);
   const [activity, setActivity] = useState<ControlActivityEntry[]>([]);
   const [bridgeConnectedCount, setBridgeConnectedCount] = useState(0);
   const [adminTokenRequired, setAdminTokenRequired] = useState(false);
+  const [canManage, setCanManage] = useState(false);
+  const [requiresSignIn, setRequiresSignIn] = useState(false);
   const [adminTokenInput, setAdminTokenInput] = useState('');
 
   const [loading, setLoading] = useState(true);
@@ -76,11 +78,13 @@ export function AppApiKeySection({ compact = false }: AppApiKeySectionProps) {
       setActivity(data.activity);
       setBridgeConnectedCount(data.bridgeConnectedCount);
       setAdminTokenRequired(data.adminTokenRequired);
+      setRequiresSignIn(Boolean(data.requiresSignIn));
+      setCanManage(Boolean(data.canManage));
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to reach App API server';
-      if (msg.toLowerCase().includes('admin token')) {
-        setAdminTokenRequired(true);
-      }
+      setCanManage(false);
+      if (msg.toLowerCase().includes('sign in')) setRequiresSignIn(true);
+      if (msg.toLowerCase().includes('admin token')) setAdminTokenRequired(true);
       setErrorMsg(msg);
     } finally {
       setLoading(false);
@@ -105,11 +109,13 @@ export function AppApiKeySection({ compact = false }: AppApiKeySectionProps) {
   const handleUnlockAdmin = (e: React.FormEvent) => {
     e.preventDefault();
     setControlAdminToken(adminTokenInput);
+    setAdminTokenInput('');
     void loadData();
   };
 
   const handleGenerateKey = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManage) return;
     const trimmed = label.trim() || 'External Agent Key';
     setCreating(true);
     setErrorMsg('');
@@ -265,6 +271,15 @@ export function AppApiKeySection({ compact = false }: AppApiKeySectionProps) {
         </div>
       </div>
 
+      {requiresSignIn && !canManage && (
+        <div className="rounded-xl border border-slate-300 dark:border-slate-700 p-3 space-y-2">
+          <p className="text-sm">Sign in with an MCP Hub account to create keys for your own workspace. Open that workspace when using your keys.</p>
+          <button type="button" className="workspace-secondary" onClick={() => void signOutAccount()}>
+            Open account sign-in
+          </button>
+        </div>
+      )}
+
       {/* Optional Admin Token Prompt if server enforces MCP_HUB_ADMIN_TOKEN */}
       {adminTokenRequired && (
         <form
@@ -358,7 +373,7 @@ export function AppApiKeySection({ compact = false }: AppApiKeySectionProps) {
           </p>
           <button
             type="submit"
-            disabled={creating}
+            disabled={creating || !canManage}
             data-testid="generate-app-api-key-btn"
             style={{
               backgroundColor: 'var(--m3-primary)',

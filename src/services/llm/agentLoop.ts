@@ -558,8 +558,13 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   // Only expose MCP tools in Professional mode; General and Study Session never invoke MCPs
   const built = buildAgentToolCatalog(agent, servers, project?.allowedServerIds ?? null);
   const localModel = getModelById(modelId, dynamicModels).provider === 'local';
-  const tools = !localModel && chatMode === 'professional' ? built.tools : [];
-  const lookup = !localModel && chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
+  const buildingWebsite = /\b(?:build|create|generate|implement|design|rebuild|make)\b[\s\S]{0,120}\b(?:website|web app|html|dashboard|landing page)\b/i.test(lastUserText);
+  const explicitlySavingNote = /\b(?:save|create|store)\b[\s\S]{0,40}\bnotes?\b/i.test(lastUserText);
+  const tools = !localModel && chatMode === 'professional'
+    ? built.tools.filter((tool) => !buildingWebsite || explicitlySavingNote || tool.originalName !== 'workspace_create_note')
+    : [];
+  const exposedTools = new Set(tools.map((tool) => tool.qualifiedName));
+  const lookup = new Map([...built.lookup].filter(([name]) => exposedTools.has(name)));
   let effectiveSystemPrompt = composeEffectiveSystemPrompt({
     basePrompt: agent.systemPrompt,
     chatMode,
@@ -571,6 +576,10 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     lastAssistantHadA2ui,
     project,
   });
+
+  if (buildingWebsite) {
+    effectiveSystemPrompt += '\nFor this website request, start directly with the fenced artifact-app JSON. Put the runnable HTML entry first. Write each complete file before starting the next, use compact source, and close the fence before any explanation.';
+  }
 
   const pinnedAttachments: ChatAttachment[] =
     project && project.pinnedFiles.length > 0
@@ -748,6 +757,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         chatMode,
         knowledgeSource,
         a2uiEnabled: offerA2ui,
+        websiteBuild: buildingWebsite,
         messages: workingMessages,
         tools,
         signal,

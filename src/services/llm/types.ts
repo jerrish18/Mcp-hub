@@ -59,6 +59,7 @@ export interface StreamCompletionRequest {
   chatMode?: ChatMode;
   knowledgeSource?: KnowledgeSourceMode;
   a2uiEnabled?: boolean;
+  websiteBuild?: boolean;
   messages: LlmConversationItem[];
   tools: LlmToolDefinition[];
   signal?: AbortSignal;
@@ -76,8 +77,8 @@ export class RateLimitError extends Error {
 
 export class ModelUnavailableError extends Error {
   status: number;
-  constructor(message: string, status = 503) {
-    super(message);
+  constructor(message: string, status = 503, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'ModelUnavailableError';
     this.status = status;
   }

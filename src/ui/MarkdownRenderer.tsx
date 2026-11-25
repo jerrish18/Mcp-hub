@@ -23,6 +23,7 @@ import { parseA2uiBlock } from '../utils/a2ui';
 import {
   downloadAppBundle,
   parseAppArtifactBlock,
+  recoverAppArtifact,
   type AppArtifactSpec,
 } from '../utils/appArtifact';
 import {
@@ -608,23 +609,37 @@ function CodeBlock({
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
+          role="status"
           className="my-3 rounded-2xl border p-4 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300"
         >
           <Layers style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
-          <span>Assembling multi-file application…</span>
+          <span>
+            Receiving website source… {code.length >= 1000 && `${(Math.floor(code.length / 1000) * 1000).toLocaleString()}+ characters received`}
+          </span>
         </div>
       );
     }
 
+    const recovered = recoverAppArtifact(code);
     return (
-      <details className="my-3 rounded-xl border border-amber-300/60 p-4 text-sm dark:border-amber-800">
-        <summary className="cursor-pointer font-semibold">
-          Website source is incomplete or invalid. View the generated source
-        </summary>
-        <pre className="mt-3 max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-100">
-          <code>{code}</code>
-        </pre>
-      </details>
+      <div>
+        {recovered && (
+          <div className="my-3">
+            <p className="text-xs text-amber-800 dark:text-amber-200">
+              The response ended early. These files were received in full. The preview may need the remaining files.
+            </p>
+            <AppArtifactCard spec={recovered} onOpenInCanvas={onOpenInCanvas} />
+          </div>
+        )}
+        <details className="my-3 rounded-xl border border-amber-300/60 p-4 text-sm dark:border-amber-800">
+          <summary className="cursor-pointer font-semibold">
+            Website source is incomplete or invalid. View the generated source
+          </summary>
+          <pre className="mt-3 max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-100">
+            <code>{code}</code>
+          </pre>
+        </details>
+      </div>
     );
   }
 

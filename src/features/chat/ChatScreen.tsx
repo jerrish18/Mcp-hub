@@ -2244,7 +2244,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 )}
 
                 {msg.error && (
-                  <div className="rounded-2xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-4 py-3 text-sm text-rose-800 dark:text-rose-200 flex items-start justify-between gap-3">
+                  <div role="alert" className="rounded-2xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-4 py-3 text-sm text-rose-800 dark:text-rose-200 flex flex-wrap items-start justify-between gap-3">
                     <div className="flex items-start gap-2.5 min-w-0">
                       <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                       <span className="break-words">{msg.error}</span>
@@ -2256,6 +2256,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         className="shrink-0 text-xs font-semibold underline"
                       >
                         Open Settings
+                      </button>
+                    )}
+                    {!msg.content && !isRunning && !msg.error.toLowerCase().includes('api key') && (
+                      <button type="button" onClick={() => void regenerateAssistantMessage(msg.id)}
+                        className="shrink-0 text-xs font-semibold underline">
+                        Try again
                       </button>
                     )}
                   </div>

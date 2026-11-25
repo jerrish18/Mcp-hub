@@ -38,3 +38,19 @@ test('stream retains the last text frame and reports an explicit generation limi
   }), /reached its output limit/);
   assert.deepEqual(received, ['partial project']);
 });
+
+test('distinguishes OpenRouter stream interruption from an explicit completion', async () => {
+  const model = getModelById('openrouter/free');
+  const delta = 'data: {"choices":[{"delta":{"content":"partial project"}}]}\n\n';
+  const text: string[] = [];
+  const run = (payload: string) => dispatchStreamCompletion({
+    model, apiKey: 'fixture', effort: 'low', systemPrompt: '',
+    messages: [{ role: 'user', text: 'Build a website' }], tools: [],
+    fetchFn: async () => new Response(payload),
+    onEvent: (event) => { if (event.type === 'text_delta') text.push(event.delta); },
+  });
+  await assert.rejects(run(delta), /ended the response before completion/);
+  assert.deepEqual(text, ['partial project']);
+  await run(delta + 'data: [DONE]');
+  await assert.rejects(run(delta + 'data: {"choices":[{"finish_reason":"error"}]}'), /stopped generating/);
+});

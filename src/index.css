@@ -659,3 +659,8 @@ button.workspace-card:hover {
 @media (max-width: 767px) {
   .chat-study-style { max-height: 27dvh; overflow-y: auto; }
 }
+
+@media (display-mode: standalone) and (max-width: 1023px) {
+  .workspace-shell { padding-top: env(safe-area-inset-top, 0px); background: var(--m3-surface-container); }
+  .workspace-topbar { display: none; }
+}

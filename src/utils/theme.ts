@@ -168,11 +168,10 @@ export function applyPixelThemeVars(
   root.setProperty('--m3-on-primary', tokens.onPrimary);
   root.setProperty('--m3-primary-container', tokens.primaryContainer);
   root.setProperty('--m3-on-primary-container', tokens.onPrimaryContainer);
+  const panel = isDark && oledDark ? '#111317' : tokens.surfaceContainer;
   root.setProperty('--m3-surface', isDark && oledDark ? '#000000' : tokens.surface);
-  root.setProperty(
-    '--m3-surface-container',
-    isDark && oledDark ? '#111317' : tokens.surfaceContainer
-  );
+  root.setProperty('--m3-surface-container', panel);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', panel);
   root.setProperty(
     '--m3-surface-container-high',
     isDark && oledDark ? '#1B1E24' : tokens.surfaceContainerHigh

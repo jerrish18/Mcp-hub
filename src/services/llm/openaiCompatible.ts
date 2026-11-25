@@ -144,12 +144,21 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   let res: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    res = await fetchFn(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
+    try {
+      res = await fetchFn(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      if (model.provider !== 'openrouter' || signal?.aborted || !(error instanceof TypeError)) throw error;
+      if (attempt === 0) {
+        await sleep(650, signal);
+        continue;
+      }
+      throw new ModelUnavailableError('Could not reach OpenRouter. Check your connection and try again.', 503, { cause: error });
+    }
     if (res.status === 503 && attempt === 0) {
       await sleep(650, signal);
       continue;
@@ -193,71 +202,87 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   const toolAcc = new Map<number, { id: string; name: string; rawArgs: string }>();
 
-  for await (const raw of streamSseData(res.body)) {
-    let chunk: {
-      error?: { message?: string; code?: number | string; status?: number };
-      choices?: Array<{
-        finish_reason?: string;
-        delta?: {
-          content?: string | null;
-          reasoning_content?: string | null;
-          reasoning?: string | null;
-          tool_calls?: Array<{
-            index: number;
-            id?: string;
-            function?: { name?: string; arguments?: string };
-          }>;
-        };
-      }>;
-    };
-    try {
-      chunk = JSON.parse(raw) as typeof chunk;
-    } catch {
-      continue;
-    }
+  let finished = false;
+  const readable = streamSseData(res.body, () => { finished = true; });
+  try {
+    for await (const raw of readable) {
+      let chunk: {
+        error?: { message?: string; code?: number | string; status?: number };
+        choices?: Array<{
+          finish_reason?: string;
+          delta?: {
+            content?: string | null;
+            reasoning_content?: string | null;
+            reasoning?: string | null;
+            tool_calls?: Array<{
+              index: number;
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
+      };
+      try {
+        chunk = JSON.parse(raw) as typeof chunk;
+      } catch {
+        continue;
+      }
 
-    if (chunk.error) {
-      const code = Number(chunk.error.code ?? chunk.error.status ?? 0);
-      const msg = redactSecrets(chunk.error.message ?? 'Upstream streaming error', [apiKey]);
-      if (code === 429) {
-        throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
+      if (chunk.error) {
+        const code = Number(chunk.error.code ?? chunk.error.status ?? 0);
+        const msg = redactSecrets(chunk.error.message ?? 'Upstream streaming error', [apiKey]);
+        if (code === 429) {
+          throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
+        }
+        if (code === 401 || code === 403) {
+          throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
+        }
+        if (code === 404 || code === 502 || code === 503 || code === 504) {
+          throw new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
+        }
+        throw new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
       }
-      if (code === 401 || code === 403) {
-        throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
-      }
-      if (code === 404 || code === 502 || code === 503 || code === 504) {
-        throw new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
-      }
-      throw new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
-    }
 
-    const choice = chunk.choices?.[0];
-    const delta = choice?.delta ?? {};
+      const choice = chunk.choices?.[0];
+      const delta = choice?.delta ?? {};
 
-    const reasoning = delta.reasoning_content ?? delta.reasoning;
-    if (reasoning) {
-      onEvent({ type: 'reasoning_delta', delta: reasoning });
-    }
-    if (delta.content) {
-      onEvent({ type: 'text_delta', delta: delta.content });
-    }
-    if (delta.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const idx = tc.index ?? 0;
-        const prev = toolAcc.get(idx) ?? {
-          id: tc.id ?? `call_${Date.now()}_${idx}`,
-          name: '',
-          rawArgs: '',
-        };
-        if (tc.id) prev.id = tc.id;
-        if (tc.function?.name) prev.name += tc.function.name;
-        if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
-        toolAcc.set(idx, prev);
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
+      if (reasoning) {
+        onEvent({ type: 'reasoning_delta', delta: reasoning });
+      }
+      if (delta.content) {
+        onEvent({ type: 'text_delta', delta: delta.content });
+      }
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          const prev = toolAcc.get(idx) ?? {
+            id: tc.id ?? `call_${Date.now()}_${idx}`,
+            name: '',
+            rawArgs: '',
+          };
+          if (tc.id) prev.id = tc.id;
+          if (tc.function?.name) prev.name += tc.function.name;
+          if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
+          toolAcc.set(idx, prev);
+        }
+      }
+      if (choice?.finish_reason) finished = true;
+      if (choice?.finish_reason === 'error') {
+        throw new Error(`${PROVIDER_INFO[model.provider].name} stopped generating. Any received source is kept below.`);
+      }
+      if (choice?.finish_reason === 'length') {
+        throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
       }
     }
-    if (choice?.finish_reason === 'length') {
-      throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
+  } catch (error) {
+    if (model.provider === 'openrouter' && !signal?.aborted && error instanceof TypeError) {
+      throw new ModelUnavailableError('OpenRouter disconnected while generating the reply. Any received source is kept.', 503, { cause: error });
     }
+    throw error;
+  }
+  if (model.provider === 'openrouter' && !finished) {
+    throw new ModelUnavailableError('OpenRouter ended the response before completion. Any received source is kept.');
   }
 
   if (model.provider !== 'local' && toolAcc.size > 0) {

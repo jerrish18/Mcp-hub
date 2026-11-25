@@ -11,15 +11,19 @@ import {
   McpServerConfigSchema,
   type PixelAccentTheme,
 } from '../../types';
+import { getAppSessionToken, refreshAppSession } from '../auth/appAuth';
+import { streamSseData } from '../llm/sse';
 import { mergeModelCatalog } from '../llm/provider';
 import { callMcpTool } from '../mcp/client';
 import { loadServerSecrets, saveServerSecrets } from '../storage/secureStorage';
 import type { ControlKeyScope } from './actionsCatalog';
 
 let runtimeAdminToken = '';
+const credentialsChanged = new EventTarget();
 
 export function setControlAdminToken(token: string): void {
   runtimeAdminToken = token.trim();
+  credentialsChanged.dispatchEvent(new Event('change'));
 }
 
 function uiHeaders(json = true): Record<string, string> {
@@ -27,23 +31,30 @@ function uiHeaders(json = true): Record<string, string> {
     'X-MCPHub-UI': '1',
   };
   if (json) h['Content-Type'] = 'application/json';
-  if (runtimeAdminToken) h.Authorization = `Bearer ${runtimeAdminToken}`;
+  const token = getAppSessionToken() || runtimeAdminToken;
+  if (token) h.Authorization = `Bearer ${token}`;
   return h;
 }
 
 export async function listAppApiKeys(): Promise<{
+  requiresSignIn?: boolean;
+  canManage?: boolean;
   adminTokenRequired: boolean;
   bridgeConnectedCount: number;
   keys: PublicApiKeyInfo[];
   activity: ControlActivityEntry[];
 }> {
-  if (!runtimeAdminToken) {
+  if (!getAppSessionToken() && !runtimeAdminToken) {
     const probe = await fetch('/api/control/bridge/status', { headers: uiHeaders(false) });
     if (probe.ok) {
-      const info = (await probe.json().catch(() => ({}))) as { adminTokenRequired?: boolean };
-      if (info.adminTokenRequired) {
+      const info = await probe.json() as {
+        adminTokenRequired?: boolean; accountKeysAvailable?: boolean; requiresAuthorization?: boolean;
+      };
+      if (info.requiresAuthorization) {
         return {
-          adminTokenRequired: true,
+          adminTokenRequired: Boolean(info.adminTokenRequired),
+          requiresSignIn: Boolean(info.accountKeysAvailable),
+          canManage: false,
           bridgeConnectedCount: 0,
           keys: [],
           activity: [],
@@ -51,21 +62,26 @@ export async function listAppApiKeys(): Promise<{
       }
     }
   }
-  const res = await fetch('/api/control/keys', { headers: uiHeaders(false) });
+  const res = await fetchManagement('/api/control/keys');
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Failed to load App API keys (${res.status})`);
   }
-  return res.json();
+  return { ...await res.json(), adminTokenRequired: false, canManage: true };
+}
+
+async function fetchManagement(url: string, options?: RequestInit) {
+  const request = () => fetch(url, { ...options, headers: uiHeaders(Boolean(options?.body)) });
+  const res = await request();
+  return res.status === 401 && getAppSessionToken() && await refreshAppSession() ? request() : res;
 }
 
 export async function createAppApiKey(
   label: string,
   scope: ControlKeyScope
 ): Promise<{ key: PublicApiKeyInfo; plaintextKey: string }> {
-  const res = await fetch('/api/control/keys', {
+  const res = await fetchManagement('/api/control/keys', {
     method: 'POST',
-    headers: uiHeaders(true),
     body: JSON.stringify({ label, scope }),
   });
   if (!res.ok) {
@@ -76,9 +92,8 @@ export async function createAppApiKey(
 }
 
 export async function revokeAppApiKey(id: string): Promise<void> {
-  const res = await fetch(`/api/control/keys/${encodeURIComponent(id)}`, {
+  const res = await fetchManagement(`/api/control/keys/${encodeURIComponent(id)}`, {
     method: 'DELETE',
-    headers: uiHeaders(false),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -479,115 +494,82 @@ export async function executeStoreControlAction(
 }
 
 export function startBrowserControlBridge(): () => void {
-  if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
-    return () => {};
-  }
+  if (typeof window === 'undefined') return () => {};
 
-  let closed = false;
-  let bridgeAuthorized = false;
-  let es: EventSource | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let syncTimer: ReturnType<typeof setTimeout> | null = null;
+  let connection: AbortController | undefined;
+  let reconnect: ReturnType<typeof setTimeout> | undefined;
+  let sync: ReturnType<typeof setTimeout> | undefined;
+  let connected = false;
 
-  const pushState = async () => {
-    if (closed || !bridgeAuthorized) return;
+  const connect = async () => {
+    connection?.abort();
+    clearTimeout(reconnect);
+    connected = false;
+    const controller = new AbortController();
+    connection = controller;
+    const { signal } = controller;
+    const account = useHubStore.getState().authUser;
+
+    const stillConnected = () => !signal.aborted && useHubStore.getState().authUser === account;
+    const post = (path: string, body: unknown) => fetch(path, {
+      method: 'POST', headers: uiHeaders(), body: JSON.stringify(body), signal,
+    });
+
     try {
-      await fetch('/api/control/bridge/state', {
-        method: 'POST',
-        headers: uiHeaders(true),
-        body: JSON.stringify(buildSanitizedMirrorState()),
-      });
-    } catch {
-      // Ignore transient network errors
-    }
-  };
-
-  const connectStream = () => {
-    if (closed || !bridgeAuthorized) return;
-    es = new EventSource('/api/control/bridge/stream');
-
-    es.addEventListener('connected', () => {
-      void pushState();
-    });
-
-    es.addEventListener('command', (ev) => {
-      void (async () => {
-        try {
-          const data = JSON.parse((ev as MessageEvent).data) as {
-            requestId: string;
-            action: string;
-            params: Record<string, unknown>;
-            scope: ControlKeyScope;
-          };
-          const result = await executeStoreControlAction(
-            data.action,
-            data.params ?? {},
-            data.scope ?? 'full'
-          );
-          await fetch('/api/control/bridge/result', {
-            method: 'POST',
-            headers: uiHeaders(true),
-            body: JSON.stringify({ requestId: data.requestId, ok: true, result }),
-          });
-          void pushState();
-        } catch (err) {
-          const parsed = (() => {
-            try {
-              return JSON.parse((ev as MessageEvent).data) as { requestId?: string };
-            } catch {
-              return {};
-            }
-          })();
-          if (parsed.requestId) {
-            await fetch('/api/control/bridge/result', {
-              method: 'POST',
-              headers: uiHeaders(true),
-              body: JSON.stringify({
-                requestId: parsed.requestId,
-                ok: false,
-                error: err instanceof Error ? err.message : 'Action failed',
-              }),
-            });
-          }
-        }
-      })();
-    });
-
-    es.onerror = () => {
-      es?.close();
-      es = null;
-      if (!closed && bridgeAuthorized) {
-        reconnectTimer = setTimeout(connectStream, 3_000);
+      const res = await fetch('/api/control/bridge/stream', { headers: uiHeaders(false), signal });
+      if (res.status === 401 && getAppSessionToken() && await refreshAppSession() && stillConnected()) {
+        reconnect = setTimeout(connect, 0);
+        return;
       }
-    };
+      if (!res.ok || !res.body || !stillConnected()) return;
+      for await (const raw of streamSseData(res.body)) {
+        if (!stillConnected()) break;
+        const event = JSON.parse(raw) as {
+          clientId?: string; requestId?: string; action?: string; params?: Record<string, unknown>; scope?: ControlKeyScope;
+        };
+        if (event.clientId) {
+          connected = true;
+          if (!getAppSessionToken()) void post('/api/control/bridge/state', buildSanitizedMirrorState()).catch(() => {});
+          continue;
+        }
+        if (!event.requestId || !event.action) continue;
+        const { requestId, action } = event;
+        void (async () => {
+          let response: Record<string, unknown>;
+          try {
+            const result = await executeStoreControlAction(action, event.params ?? {}, event.scope ?? 'full');
+            response = { requestId, ok: true, result };
+          } catch (error) {
+            response = { requestId, ok: false, error: error instanceof Error ? error.message : 'Action failed' };
+          }
+          if (stillConnected()) await post('/api/control/bridge/result', response);
+        })().catch(() => {});
+      }
+      if (stillConnected()) reconnect = setTimeout(connect, 3000);
+    } catch {
+      if (stillConnected()) reconnect = setTimeout(connect, 3000);
+    } finally {
+      if (connection === controller) connected = false;
+    }
   };
 
-  void (async () => {
-    try {
-      const probe = await fetch('/api/control/bridge/status', { headers: uiHeaders(false) });
-      if (closed || !probe.ok) return;
-      const info = (await probe.json().catch(() => ({}))) as { adminTokenRequired?: boolean };
-      if (info.adminTokenRequired && !runtimeAdminToken) return;
-      bridgeAuthorized = true;
-      connectStream();
-    } catch {
-      // ignore unavailable backend
-    }
-  })();
-
+  credentialsChanged.addEventListener('change', connect);
+  void connect();
   const unsubscribe = useHubStore.subscribe(() => {
-    if (!bridgeAuthorized) return;
-    if (syncTimer) clearTimeout(syncTimer);
-    syncTimer = setTimeout(() => {
-      void pushState();
+    if (!connected || getAppSessionToken()) return;
+    clearTimeout(sync);
+    sync = setTimeout(() => {
+      if (connected && !getAppSessionToken()) void fetch('/api/control/bridge/state', {
+        method: 'POST', headers: uiHeaders(), body: JSON.stringify(buildSanitizedMirrorState()),
+        signal: connection?.signal,
+      }).catch(() => {});
     }, 350);
   });
-
   return () => {
-    closed = true;
+    credentialsChanged.removeEventListener('change', connect);
+    connection?.abort();
     unsubscribe();
-    if (syncTimer) clearTimeout(syncTimer);
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    es?.close();
+    clearTimeout(reconnect);
+    clearTimeout(sync);
   };
 }

@@ -1,5 +1,5 @@
 /** Read provider data lines, including a final frame without a trailing newline. */
-export async function* streamSseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+export async function* streamSseData(body: ReadableStream<Uint8Array>, onDone?: () => void): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -14,7 +14,10 @@ export async function* streamSseData(body: ReadableStream<Uint8Array>): AsyncGen
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         const payload = line.slice(5).trim();
-        if (payload === '[DONE]') return;
+        if (payload === '[DONE]') {
+          onDone?.();
+          return;
+        }
         if (payload) yield payload;
       }
     }

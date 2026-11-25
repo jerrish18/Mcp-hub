@@ -7,6 +7,7 @@ import {
   CANVAS_IFRAME_SANDBOX,
   inferFileLanguage,
   parseAppArtifactBlock,
+  recoverAppArtifact,
   STORAGE_SHIM_SCRIPT,
   suggestRepoSlug,
   validateAppExport,
@@ -215,4 +216,15 @@ test('preview keeps standards mode and defers nested classic scripts until the b
   assert.ok(preview.indexOf('<h1 id="title">') < preview.indexOf('document.getElementById("title")'));
   assert.ok(preview.includes('textContent = "$&"'));
   assert.doesNotMatch(preview, /<script defer src=/i);
+});
+
+test('recovers only finished files after a provider cuts off a website response', () => {
+  const input = '{"title":"Workshop","entryFile":"index.html","files":['
+    + JSON.stringify({ path: 'index.html', content: '<script>const greeting = "Hello {world}";</script>' })
+    + ',{"path":"styles.css","content":"body { color: re';
+  assert.equal(parseAppArtifactBlock('artifact-app', input), null);
+  const result = recoverAppArtifact(input);
+  assert.equal(result?.entryFile, 'index.html');
+  assert.deepEqual(result?.files.map(({ path }) => path), ['index.html']);
+  assert.equal(recoverAppArtifact('{"title":"Workshop","files":[{"path":"index.html"'), null);
 });

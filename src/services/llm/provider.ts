@@ -105,20 +105,22 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
   req.signal?.addEventListener('abort', forwardAbort, { once: true });
   if (req.signal?.aborted) forwardAbort();
   let timedOut = false;
+  let outputStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const resetIdleTimer = () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, 120_000);
+    }, req.websiteBuild && outputStarted ? 75_000 : 120_000);
   };
   resetIdleTimer();
   const request = {
     ...req,
     signal: controller.signal,
     onEvent: (event: LlmStreamEvent) => {
-      resetIdleTimer();
+      if (event.type === 'text_delta') outputStarted = true;
+      if (!req.websiteBuild || !outputStarted || event.type !== 'reasoning_delta') resetIdleTimer();
       req.onEvent(event);
     },
   };
@@ -127,7 +129,9 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
     return await streamOpenAiCompatibleCompletion(request);
   } catch (err) {
     if (req.signal?.aborted) throw err;
-    if (timedOut) throw new Error('The model stopped responding. Try again or choose a different model.', { cause: err });
+    if (timedOut) throw new Error(outputStarted && req.websiteBuild
+      ? 'The model stopped sending website source. Any received files are kept. Try again or request a smaller first version.'
+      : 'The model stopped responding. Try again or choose a different model.', { cause: err });
     if (err instanceof RateLimitError) recordProvider429(model.provider);
     throw err;
   } finally {
@@ -146,6 +150,7 @@ export async function streamWithRateLimitFallback(params: {
   chatMode?: import('../../types').ChatMode;
   knowledgeSource?: import('../../types').KnowledgeSourceMode;
   a2uiEnabled?: boolean;
+  websiteBuild?: boolean;
   messages: StreamCompletionRequest['messages'];
   tools: StreamCompletionRequest['tools'];
   signal?: AbortSignal;
@@ -178,6 +183,7 @@ export async function streamWithRateLimitFallback(params: {
         chatMode: params.chatMode,
         knowledgeSource: params.knowledgeSource,
         a2uiEnabled: params.a2uiEnabled,
+        websiteBuild: params.websiteBuild,
         messages: params.messages,
         tools: params.tools,
         signal: params.signal,
