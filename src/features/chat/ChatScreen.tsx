@@ -108,7 +108,9 @@ import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { InlineRunTraceBar } from './InlineRunTraceBar';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
-import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
+import { ProCanvasPanel } from './ProCanvasPanel';
+import { useCanvasDraft } from './useCanvasDraft';
+import { getAccountScope } from '../../services/storage/accountSync';
 import { ProjectsModal } from './ProjectsModal';
 import { PromptMacrosSheet } from './PromptMacrosSheet';
 import { RunTraceSheet, type ConversationTraceEntry } from './RunTraceSheet';
@@ -305,7 +307,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Pro Canvas & Document Export state
   const [canvasOpen, setCanvasOpen] = useState(false);
-  const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
+  const canvasScope = getAccountScope(authUser);
+  const { artifact: canvasArtifact, change: setCanvasArtifact, saveFailed: canvasSaveFailed } = useCanvasDraft(canvasScope, activeConversationId);
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
@@ -345,6 +348,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Voice & Message feedback
   const [isListening, setIsListening] = useState(false);
+  const [voiceReplies, setVoiceReplies] = useState(false);
+  const spokenReplyId = useRef<string | undefined>(undefined);
+  const voiceConversationId = useRef<string | null>(null);
   const [speechNotice, setSpeechNotice] = useState('');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
@@ -406,6 +412,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   );
   const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
+  useEffect(() => {
+    if (!voiceReplies || voiceConversationId.current !== activeConversationId || isRunning || lastMsg?.role !== 'assistant' || lastMsg.isStreaming || lastMsg.error || !lastMsg.content || spokenReplyId.current === lastMsg.id || !('speechSynthesis' in window)) return;
+    spokenReplyId.current = lastMsg.id;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(stripMarkdownForSpeech(lastMsg.content));
+    utterance.lang = navigator.language;
+    utterance.onend = utterance.onerror = () => setSpeakingMsgId(null);
+    setSpeakingMsgId(lastMsg.id);
+    window.speechSynthesis.speak(utterance);
+  }, [voiceReplies, lastMsg, isRunning, activeConversationId]);
+
 
   const availableResources = useMemo(() => {
     const items: Array<{ server: McpServerConfig; resource: McpResource }> = [];
@@ -500,6 +517,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setIsListening(false);
     setSourceMenuOpen(false);
     setCanvasOpen(false);
+    setVoiceReplies(false);
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -2648,6 +2667,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </div>
               )}
 
+              {'speechSynthesis' in window && <button type="button" aria-pressed={voiceReplies} onClick={() => {
+                spokenReplyId.current = lastMsg?.id;
+                voiceConversationId.current = activeConversationId;
+                if (voiceReplies) { window.speechSynthesis.cancel(); setSpeakingMsgId(null); }
+                setVoiceReplies(!voiceReplies);
+              }} className="self-start inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700"><Volume2 className="w-3.5 h-3.5" /> Voice replies {voiceReplies ? 'on' : 'off'}</button>}
+
               <textarea
                 ref={composerRef}
                 rows={1}
@@ -2854,9 +2880,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       </div>
 
       {/* Pro Coding & Document Canvas Split Pane / Mobile Sheet */}
+      {canvasOpen && canvasSaveFailed && <div role="alert" className="absolute bottom-20 right-4 z-50 rounded-xl bg-rose-700 text-white p-3 text-xs">Canvas autosave failed. Export your work to retain a copy.</div>}
       <ProCanvasPanel
+        key={JSON.stringify([canvasScope, activeConversationId])}
         open={canvasOpen}
         artifact={canvasArtifact}
+        storageScope={JSON.stringify([canvasScope, activeConversationId])}
         isRunning={isRunning}
         githubConnected={Boolean(
           servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')?.status ===

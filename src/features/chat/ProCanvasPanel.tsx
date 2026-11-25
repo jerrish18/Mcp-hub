@@ -104,6 +104,7 @@ function serializeArtifactSnapshot(artifact: CanvasArtifact): string {
 interface ProCanvasPanelProps {
   open: boolean;
   artifact: CanvasArtifact | null;
+  storageScope?: string;
   isRunning?: boolean;
   githubConnected?: boolean;
   onRequestConnectGithub?: () => void;
@@ -318,6 +319,7 @@ export function ProCanvasPanel({
   githubConnected = false,
   onRequestConnectGithub,
   onChangeArtifact,
+  storageScope,
   onAskCanvasAction,
   onClose,
 }: ProCanvasPanelProps) {
@@ -347,7 +349,20 @@ export function ProCanvasPanel({
   // Version History & Selection Ask AI
   const [versionsByArtifactId, setVersionsByArtifactId] = useState<
     Record<string, CanvasVersionEntry[]>
-  >({});
+  >(() => {
+    try { return storageScope ? JSON.parse(localStorage.getItem(`mcphub_versions:${storageScope}`) ?? '{}') : {}; }
+    catch { return {}; }
+  });
+  useEffect(() => {
+    if (!storageScope) return;
+    const save = () => {
+      try { localStorage.setItem(`mcphub_versions:${storageScope}`, JSON.stringify(versionsByArtifactId)); }
+      catch { /* Current draft remains independently recoverable; export for durable backup. */ }
+    };
+    const timer = setTimeout(save, 800);
+    window.addEventListener('pagehide', save);
+    return () => { clearTimeout(timer); window.removeEventListener('pagehide', save); save(); };
+  }, [storageScope, versionsByArtifactId]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareVersionId, setCompareVersionId] = useState<string | null>(null);
   const [selectedSnippet, setSelectedSnippet] = useState('');
