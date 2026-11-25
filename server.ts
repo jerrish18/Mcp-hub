@@ -49,6 +49,7 @@ async function startServer() {
             "'self'",
             'https:',
             'wss:',
+            'http://127.0.0.1:11434',
             ...(!isProduction ? ['ws:', 'http://localhost:*', 'http://127.0.0.1:*'] : []),
           ],
           frameSrc: ["'self'", 'blob:', 'data:', 'https://accounts.google.com', 'https://*.firebaseapp.com'],

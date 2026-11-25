@@ -138,7 +138,7 @@ export function SettingsScreen() {
     const slug = customSlug.trim();
     if (!slug) return;
     addCustomModel(customProvider, slug);
-    setTestModelId(slug);
+    setTestModelId(customProvider === 'local' && !slug.startsWith('local:') ? `local:${slug}` : slug);
     setCustomSlug('');
     triggerHaptic(settings.hapticsEnabled, 'success');
   };
@@ -852,6 +852,7 @@ export function SettingsScreen() {
             </div>
           </div>
 
+          <p className="text-xs text-slate-500 dark:text-slate-400">For a local model, select Local and enter an installed model name. Connects directly to the device's OpenAI-compatible server on 127.0.0.1:11434. No key, remote fallback or MCP tools. The server must permit this app's origin.</p>
           {/* Add Custom Model Slug */}
           <form onSubmit={handleAddCustomModel} className="pt-2 border-t border-slate-200/60 dark:border-slate-800 space-y-2">
             <div className="text-xs font-medium text-slate-600 dark:text-slate-400">
@@ -871,6 +872,7 @@ export function SettingsScreen() {
                 <option value="gemini">Gemini</option>
                 <option value="groq">Groq</option>
                 <option value="openrouter">OpenRouter</option>
+                <option value="local">Local (loopback)</option>
               </select>
               <input
                 type="text"

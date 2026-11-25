@@ -14,7 +14,7 @@ export type AuthType = z.infer<typeof AuthTypeSchema>;
 export const EffortLevelSchema = z.enum(['low', 'medium', 'high']);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
-export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'demo']);
+export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'local', 'demo']);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
 export const ChatModeSchema = z.enum(['general', 'professional', 'study']);

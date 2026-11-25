@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Check, Columns, Loader2, Sparkles, X } from 'lucide-react';
 import { getModelById, getShortModelName } from '../../config/models';
 import type { CompareResultItem } from '../../store/useHubStore';
@@ -30,6 +30,10 @@ export function CompareModelsPane({
   onClearResults,
   onCloseCompare,
 }: CompareModelsPaneProps) {
+  const [ratings, setRatings] = useState<Record<string, number>>({});
+  useEffect(() => { if (isRunning) setRatings({}); }, [isRunning]);
+  const completed = results.filter(item => item.status === 'done');
+  const fastest = completed.length > 1 ? Math.min(...completed.map(item => item.durationMs)) : undefined;
   return (
     <section
       data-testid="compare-models-pane"
@@ -47,7 +51,7 @@ export function CompareModelsPane({
               Side-by-Side Compare Mode ({selectedModelIds.length}/3 selected)
             </h2>
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Pick 2–3 models below and send a prompt in the composer to compare responses concurrently.
+              Pick 2–3 models to send the same prompt to each selected provider. Rate answer quality yourself after comparing.
             </p>
           </div>
         </div>
@@ -74,7 +78,7 @@ export function CompareModelsPane({
 
       {/* Model Multi-Select Bar */}
       <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-        {allModels.slice(0, 14).map((model) => {
+        {allModels.map((model) => {
           const selected = selectedModelIds.includes(model.id);
           return (
             <button
@@ -145,7 +149,7 @@ export function CompareModelsPane({
                         ) : item.status === 'error' ? (
                           <span className="text-rose-500">Error</span>
                         ) : (
-                          <span>{item.durationMs}ms</span>
+                          <span>{item.durationMs}ms{item.durationMs === fastest ? ' · fastest' : ''}</span>
                         )}
                       </span>
                     </div>
@@ -164,6 +168,10 @@ export function CompareModelsPane({
                   </div>
 
                   {item.status === 'done' && item.content && (
+                    <div className="space-y-2"><label className="flex items-center justify-between text-[11px]">Your quality rating
+                      <select aria-label={`Quality rating for ${model.label}`} className="rounded-lg border bg-transparent text-xs px-2 py-1" value={ratings[item.modelId] ?? 0} onChange={event => setRatings(previous => ({ ...previous, [item.modelId]: Number(event.target.value) }))}>
+                        <option value={0}>Unrated</option>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}/5</option>)}
+                      </select></label>
                     <button
                       type="button"
                       data-testid={`compare-use-${item.modelId}`}
@@ -175,7 +183,7 @@ export function CompareModelsPane({
                       className="w-full min-h-[34px] rounded-full text-xs font-semibold hover:opacity-90"
                     >
                       Use this reply
-                    </button>
+                    </button></div>
                   )}
                 </div>
               );

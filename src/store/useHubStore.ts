@@ -955,8 +955,9 @@ export const useHubStore = create<HubState>((set, get) => {
     },
 
     addCustomModel: (provider, modelId, label) => {
-      const trimmed = modelId.trim();
-      if (!trimmed) return;
+      const raw = modelId.trim();
+      if (!raw) return;
+      const trimmed = provider === 'local' && !raw.startsWith('local:') ? `local:${raw}` : raw;
       const custom: ModelConfig = {
         id: trimmed,
         provider,
@@ -964,7 +965,7 @@ export const useHubStore = create<HubState>((set, get) => {
         description: 'Custom user model',
         contextWindow: 128_000,
         supportsThinkingLevel: provider === 'gemini',
-        supportsReasoningEffort: provider !== 'gemini',
+        supportsReasoningEffort: provider !== 'gemini' && provider !== 'local',
         isFreeTier: true,
       };
       set((s) => ({
@@ -1705,7 +1706,8 @@ export const useHubStore = create<HubState>((set, get) => {
         }
       }
 
-      const available = getAvailableModels(state.providerKeys, state.dynamicModels);
+      const answerModel = getModelById(targetMsg.modelId || conv.modelId, state.dynamicModels);
+      const available = getAvailableModels(state.providerKeys, state.dynamicModels).filter(model => answerModel.provider === 'local' ? model.provider === 'local' : model.provider !== 'local');
       const chosenModel =
         (verifierModelId && available.find((m) => m.id === verifierModelId)) ||
         available.find((m) => m.id !== targetMsg.modelId && m.provider !== 'demo') ||

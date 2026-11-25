@@ -127,3 +127,9 @@ npm install
 npx expo prebuild --platform android
 npx expo run:android --variant release
 ```
+
+### Workspace improvements
+
+The web app includes searchable conversations and pinned project files, project templates, model usage estimates, focus layout, scoped local Canvas drafts, and browser speech replies. The production web build caches its static app shell for offline reopening; cloud inference and account synchronization still need connectivity. Installability depends on the browser and hosting environment.
+
+For local inference, add a custom model under Settings → Model catalog and choose **Local (loopback)**. Enter the installed model name exposed by an OpenAI-compatible service on `127.0.0.1:11434/v1`. The local model does not send MCP tool definitions or fall back to cloud providers; the service must be running on the device and allow the app's web origin. Account synchronization and explicitly selected cloud comparisons are separate features; use local guest mode for local-only storage. Real-device and local-service compatibility must be tested in the target deployment.

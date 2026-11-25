@@ -5,7 +5,7 @@ export interface ProviderQuotaLimit {
   rpdLimit: number;
 }
 
-export const FREE_TIER_QUOTA_LIMITS: Record<Exclude<ProviderId, 'demo'>, ProviderQuotaLimit> = {
+export const FREE_TIER_QUOTA_LIMITS: Record<Exclude<ProviderId, 'demo' | 'local'>, ProviderQuotaLimit> = {
   gemini: { rpmLimit: 15, rpdLimit: 1500 },
   groq: { rpmLimit: 30, rpdLimit: 1000 },
   openrouter: { rpmLimit: 20, rpdLimit: 200 },
@@ -75,7 +75,7 @@ function saveState(provider: ProviderId, state: QuotaState): void {
 }
 
 export function recordProviderRequest(provider: ProviderId, now = Date.now()): void {
-  if (provider === 'demo') return;
+  if (provider === 'demo' || provider === 'local') return;
   const state = loadState(provider, now);
   state.timestamps = [...state.timestamps.filter((t) => now - t < 60_000), now];
   state.dailyCounts[provider] = (state.dailyCounts[provider] ?? 0) + 1;
@@ -83,14 +83,14 @@ export function recordProviderRequest(provider: ProviderId, now = Date.now()): v
 }
 
 export function recordProvider429(provider: ProviderId, now = Date.now()): void {
-  if (provider === 'demo') return;
+  if (provider === 'demo' || provider === 'local') return;
   const state = loadState(provider, now);
   state.last429At[provider] = now;
   saveState(provider, state);
 }
 
 export interface ProviderQuotaStatus {
-  provider: Exclude<ProviderId, 'demo'>;
+  provider: Exclude<ProviderId, 'demo' | 'local'>;
   rpmUsed: number;
   rpmLimit: number;
   rpdUsed: number;
@@ -104,7 +104,7 @@ export function getProviderQuotaStatus(
   provider: ProviderId,
   now = Date.now()
 ): ProviderQuotaStatus | null {
-  if (provider === 'demo') return null;
+  if (provider === 'demo' || provider === 'local') return null;
   const limits = FREE_TIER_QUOTA_LIMITS[provider];
   const state = loadState(provider, now);
   const rpmUsed = state.timestamps.filter((t) => now - t < 60_000).length;

@@ -133,6 +133,12 @@ export const PROVIDER_INFO: Record<
     keyHint: 'sk-or-v1-...',
     baseUrl: 'https://openrouter.ai/api/v1',
   },
+  local: {
+    name: 'Local model',
+    signupUrl: '',
+    keyHint: 'No API key required',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+  },
   demo: {
     name: 'Sandbox Demo',
     signupUrl: '',
@@ -178,6 +184,11 @@ export function getShortModelName(model: Pick<ModelConfig, 'id' | 'label'>): str
 
 export function getModelById(modelId: string, dynamicModels: ModelConfig[] = []): ModelConfig {
   const normalized = normalizeModelId(modelId);
+  if (normalized.startsWith('local:')) {
+    return dynamicModels.find(model => model.id === normalized && model.provider === 'local') ?? {
+      id: normalized, provider: 'local', label: normalized.slice(6), description: 'Local model', contextWindow: 8192, isFreeTier: true,
+    };
+  }
   return (
     dynamicModels.find((m) => m.id === normalized) ??
     FREE_MODELS.find((m) => m.id === normalized) ??

@@ -37,6 +37,8 @@ export function getApiKeyForProvider(provider: ProviderId, keys: ProviderKeys): 
       return keys.groq?.trim() ?? '';
     case 'openrouter':
       return keys.openrouter?.trim() ?? '';
+    case 'local':
+      return 'local-model-no-api-key';
     case 'demo':
       return 'demo';
   }
@@ -83,8 +85,9 @@ export function getFallbackModelCandidates(
 ): ModelConfig[] {
   const catalog = mergeModelCatalog(dynamicModels);
   const primary = getModelById(primaryModelId, dynamicModels);
+  if (primary.provider === 'local') return [primary];
   const configured = catalog.filter(
-    (m) => m.id !== primary.id && m.provider !== 'demo' && Boolean(getApiKeyForProvider(m.provider, keys))
+    (m) => m.provider !== 'local' && m.id !== primary.id && m.provider !== 'demo' && Boolean(getApiKeyForProvider(m.provider, keys))
   );
   // Prioritize models from same provider with lower latency, then other configured providers
   const sameProvider = configured.filter((m) => m.provider === primary.provider);

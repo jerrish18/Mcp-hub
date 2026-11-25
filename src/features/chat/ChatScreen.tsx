@@ -283,6 +283,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [uploadError, setUploadError] = useState('');
+  const [previewAttachment, setPreviewAttachment] = useState<string | null>(null);
+  const selectedAttachment = attachments.find(item => item.id === previewAttachment);
   const [isDragging, setIsDragging] = useState(false);
 
   // Separate sheets for Models vs Agents
@@ -577,9 +579,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const handleFilesSelected = async (files: FileList | File[]) => {
     setUploadError('');
     const { attachments: parsed, errors } = await processUploadedFiles(files);
+    if (files.length + attachments.length > 4) errors.push('Up to four attachments can be added per message.');
     if (errors.length > 0) setUploadError(errors.join(' '));
     if (parsed.length > 0) {
-      setAttachments((prev) => [...prev, ...parsed].slice(0, 4));
+      setAttachments((prev) => {
+        const unique = [...prev];
+        for (const file of parsed) if (!unique.some(existing => existing.name === file.name && existing.size === file.size && existing.textContent === file.textContent && existing.dataBase64 === file.dataBase64)) unique.push(file);
+        return unique.slice(0, 4);
+      });
       if (activeKnowledgeSource === 'auto') {
         setKnowledgeSource('uploaded');
       }
@@ -2627,7 +2634,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         <FileText className="w-4 h-4 text-slate-500 shrink-0" />
                       )}
                       <div className="min-w-0 max-w-[140px]">
-                        <div className="truncate font-medium">{att.name}</div>
+                        <button type="button" className="truncate font-medium underline max-w-full" onClick={() => setPreviewAttachment(att.id)}>{att.name}</button>
                         <div className="text-[10px] text-slate-500">{formatFileSize(att.size)}</div>
                       </div>
                       {isTabularAttachment(att) && (
@@ -2653,6 +2660,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   ))}
                 </div>
               )}
+
+              {selectedAttachment && <section className="rounded-xl border p-2 space-y-2 text-xs"><div className="flex justify-between gap-2"><strong className="truncate">{selectedAttachment.name}</strong><button type="button" className="underline" onClick={() => setPreviewAttachment(null)}>Close preview</button></div>{selectedAttachment.kind === 'image' && selectedAttachment.previewUrl ? <img src={selectedAttachment.previewUrl} alt={selectedAttachment.name} className="max-h-40 object-contain" /> : <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words">{selectedAttachment.textContent?.slice(0, 5000) || 'No text preview available.'}</pre>}</section>}
 
               {shouldOfferProPlan(input, activeChatMode) && !planMode && !pendingPlanDraft && (
                 <div className="px-1 flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
