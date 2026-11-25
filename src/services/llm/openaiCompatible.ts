@@ -111,7 +111,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   }
 
   const body: Record<string, unknown> = {
-    model: model.id,
+    model: model.provider === 'local' ? model.id.replace(/^local:/, '') : model.id,
     messages: formattedMessages,
     stream: true,
   };
@@ -120,7 +120,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     body.reasoning_effort = effort;
   }
 
-  if (tools.length > 0) {
+  if (model.provider !== 'local' && tools.length > 0) {
     body.tools = tools.map((t) => ({
       type: 'function',
       function: {
@@ -134,7 +134,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey}`,
+    ...(model.provider !== 'local' ? { Authorization: `Bearer ${apiKey}` } : {}),
   };
   if (model.provider === 'openrouter') {
     headers['HTTP-Referer'] = 'https://mcphub.app';
@@ -269,7 +269,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     }
   }
 
-  if (toolAcc.size > 0) {
+  if (model.provider !== 'local' && toolAcc.size > 0) {
     const calls: LlmToolCall[] = Array.from(toolAcc.entries())
       .sort(([a], [b]) => a - b)
       .map(([, v]) => {

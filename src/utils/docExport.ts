@@ -104,23 +104,10 @@ export interface XlsxSpec {
 
 export type DocumentSpec = PptxSpec | DocxSpec | XlsxSpec | PdfSpec;
 
-function cleanText(text: string): string {
-  return text
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .trim();
-}
 
-export function sanitizeFilename(name: string, ext: DocFormat): string {
-  const stem = cleanText(name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '')
-    .slice(0, 60);
-  return `${stem || 'document'}.${ext}`;
-}
+
+export { sanitizeFilename } from './filenames';
+import { cleanText, sanitizeFilename } from './filenames';
 
 function normalizeHexColor(input?: string, fallback = '0B57D0'): string {
   const cleaned = (input ?? '').replace(/^#/, '').trim();

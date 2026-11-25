@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Check, MessageSquarePlus, Pencil, Search, Trash2, X } from 'lucide-react';
 import type { Conversation } from '../../types';
+import { searchConversations } from '../../utils/workspaceInsights';
 import { BottomSheet } from '../../ui/BottomSheet';
 
 interface HistoryListContentProps {
@@ -24,15 +25,9 @@ export function HistoryListContent({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return conversations;
-    return conversations.filter(
-      (c) =>
-        c.title.toLowerCase().includes(q) ||
-        c.messages.some((m) => m.content.toLowerCase().includes(q))
-    );
-  }, [conversations, query]);
+  const results = useMemo(() => searchConversations(conversations, query), [conversations, query]);
+  const filtered = results.map(result => result.conversation);
+  const excerpts = new Map(results.map(result => [result.conversation.id, result.excerpt]));
 
   return (
     <div className="flex flex-col h-full gap-3">
@@ -148,6 +143,7 @@ export function HistoryListContent({
                       <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
                         {conv.messages.length} msgs · {new Date(conv.updatedAt).toLocaleDateString()}
                       </div>
+                      {excerpts.get(conv.id) && <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{excerpts.get(conv.id)}</p>}
                     </button>
                     <div className="flex items-center shrink-0">
                       <button

@@ -8,6 +8,18 @@ export default defineConfig(() => {
   return {
     plugins: [
       react(),
+      {
+        name: 'offline-app-shell',
+        apply: 'build',
+        generateBundle(_options, bundle) {
+          const assets = Object.keys(bundle).filter(name => name.startsWith('assets/')).map(name => '/' + name);
+          const source = fs.readFileSync(path.resolve(__dirname, 'public/sw.js'), 'utf8');
+          const version = assets.join(',');
+          let hash = 0;
+          for (const character of version) hash = (Math.imul(31, hash) + character.charCodeAt(0)) | 0;
+          this.emitFile({ type: 'asset', fileName: 'sw.js', source: source.replace("mcphub-shell-v1", `mcphub-shell-${hash >>> 0}`).replace("['/', '/manifest.webmanifest', '/app-icon.svg']", JSON.stringify(['/', '/manifest.webmanifest', '/app-icon.svg', ...assets])) });
+        },
+      },
       tailwindcss(),
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve

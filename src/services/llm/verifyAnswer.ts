@@ -1,7 +1,7 @@
 import { normalizeModelId } from '../../config/models';
 import type { ChatMessage, ModelConfig, ProviderKeys } from '../../types';
 import { redactSecrets } from '../../utils/redact';
-import { tracePreview } from '../../utils/runTrace';
+import { redactAndPreview } from '../../utils/runTrace';
 import { dispatchStreamCompletion, getApiKeyForProvider } from './provider';
 
 export const VERIFY_ANSWER_PROMPT = [
@@ -19,7 +19,7 @@ export function eligibleReviewModels(models: ModelConfig[], keys: ProviderKeys, 
 export function buildVerificationInput(question: string, answer: ChatMessage, keys: ProviderKeys): string {
   const secrets = Object.values(keys).filter((value): value is string => Boolean(value));
   const toolResults = (answer.toolCalls ?? []).slice(-12).map((call) =>
-    `- ${tracePreview(call.serverName, secrets)} / ${tracePreview(call.toolName, secrets)} · ${call.status}\n  ${tracePreview(call.result, secrets)}`);
+    `- ${redactAndPreview(call.serverName, 280, secrets)} / ${redactAndPreview(call.toolName, 280, secrets)} · ${call.status}\n  ${redactAndPreview(call.result, 280, secrets)}`);
   return [
     'Question\n' + redactSecrets(question, secrets).slice(0, 5000),
     'Answer\n' + redactSecrets(answer.content, secrets).slice(0, 10000),

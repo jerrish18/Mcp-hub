@@ -70,6 +70,7 @@ service cloud.firestore {
         && settings.keys().hasOnly([
           'theme',
           'accentTheme',
+          'chatLayout',
           'oledDark',
           'a2uiEnabled',
           'a2uiMode',

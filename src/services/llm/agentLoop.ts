@@ -557,8 +557,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const localAlwaysAllowRules: AlwaysAllowRule[] = [...(params.alwaysAllowedRules ?? [])];
   // Only expose MCP tools in Professional mode; General and Study Session never invoke MCPs
   const built = buildAgentToolCatalog(agent, servers, project?.allowedServerIds ?? null);
-  const tools = chatMode === 'professional' ? built.tools : [];
-  const lookup = chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
+  const localModel = getModelById(modelId, dynamicModels).provider === 'local';
+  const tools = !localModel && chatMode === 'professional' ? built.tools : [];
+  const lookup = !localModel && chatMode === 'professional' ? built.lookup : new Map<string, LlmToolDefinition>();
   let effectiveSystemPrompt = composeEffectiveSystemPrompt({
     basePrompt: agent.systemPrompt,
     chatMode,
@@ -626,7 +627,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
   // In Study mode, fetch verified educational web images when user asks for pictures/images/diagrams
   let studyImages: StudyWebImage[] = [];
-  if (chatMode === 'study' && knowledgeSource !== 'uploaded') {
+  if (!localModel && chatMode === 'study' && knowledgeSource !== 'uploaded') {
     const lastUserItem = [...workingMessages].reverse().find((m) => m.role === 'user');
     const visualQuery =
       lastUserItem?.role === 'user'

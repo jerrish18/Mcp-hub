@@ -108,7 +108,9 @@ import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
 import { InlineRunTraceBar } from './InlineRunTraceBar';
 import { ModelSwitcherSheet } from './ModelSwitcherSheet';
-import { ProCanvasPanel, type CanvasArtifact } from './ProCanvasPanel';
+import { ProCanvasPanel } from './ProCanvasPanel';
+import { useCanvasDraft } from './useCanvasDraft';
+import { getAccountScope } from '../../services/storage/accountSync';
 import { ProjectsModal } from './ProjectsModal';
 import { PromptMacrosSheet } from './PromptMacrosSheet';
 import { RunTraceSheet, type ConversationTraceEntry } from './RunTraceSheet';
@@ -281,6 +283,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [uploadError, setUploadError] = useState('');
+  const [previewAttachment, setPreviewAttachment] = useState<string | null>(null);
+  const selectedAttachment = attachments.find(item => item.id === previewAttachment);
   const [isDragging, setIsDragging] = useState(false);
 
   // Separate sheets for Models vs Agents
@@ -305,7 +309,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Pro Canvas & Document Export state
   const [canvasOpen, setCanvasOpen] = useState(false);
-  const [canvasArtifact, setCanvasArtifact] = useState<CanvasArtifact | null>(null);
+  const canvasScope = getAccountScope(authUser);
+  const { artifact: canvasArtifact, change: setCanvasArtifact, saveFailed: canvasSaveFailed } = useCanvasDraft(canvasScope, activeConversationId);
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
@@ -345,6 +350,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Voice & Message feedback
   const [isListening, setIsListening] = useState(false);
+  const [voiceReplies, setVoiceReplies] = useState(false);
+  const spokenReplyId = useRef<string | undefined>(undefined);
+  const voiceConversationId = useRef<string | null>(null);
   const [speechNotice, setSpeechNotice] = useState('');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
@@ -406,6 +414,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   );
   const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
+  useEffect(() => {
+    if (!voiceReplies || voiceConversationId.current !== activeConversationId || isRunning || lastMsg?.role !== 'assistant' || lastMsg.isStreaming || lastMsg.error || !lastMsg.content || spokenReplyId.current === lastMsg.id || !('speechSynthesis' in window)) return;
+    spokenReplyId.current = lastMsg.id;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(stripMarkdownForSpeech(lastMsg.content));
+    utterance.lang = navigator.language;
+    utterance.onend = utterance.onerror = () => setSpeakingMsgId(null);
+    setSpeakingMsgId(lastMsg.id);
+    window.speechSynthesis.speak(utterance);
+  }, [voiceReplies, lastMsg, isRunning, activeConversationId]);
+
 
   const availableResources = useMemo(() => {
     const items: Array<{ server: McpServerConfig; resource: McpResource }> = [];
@@ -500,6 +519,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setIsListening(false);
     setSourceMenuOpen(false);
     setCanvasOpen(false);
+    setVoiceReplies(false);
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -558,9 +579,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const handleFilesSelected = async (files: FileList | File[]) => {
     setUploadError('');
     const { attachments: parsed, errors } = await processUploadedFiles(files);
+    if (files.length + attachments.length > 4) errors.push('Up to four attachments can be added per message.');
     if (errors.length > 0) setUploadError(errors.join(' '));
     if (parsed.length > 0) {
-      setAttachments((prev) => [...prev, ...parsed].slice(0, 4));
+      setAttachments((prev) => {
+        const unique = [...prev];
+        for (const file of parsed) if (!unique.some(existing => existing.name === file.name && existing.size === file.size && existing.textContent === file.textContent && existing.dataBase64 === file.dataBase64)) unique.push(file);
+        return unique.slice(0, 4);
+      });
       if (activeKnowledgeSource === 'auto') {
         setKnowledgeSource('uploaded');
       }
@@ -975,7 +1001,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className={`${canvasOpen ? 'hidden' : 'hidden lg:flex'} w-72 shrink-0 flex-col border-r p-4`}
+        className={`${canvasOpen || settings.chatLayout === 'focus' ? 'hidden' : 'hidden lg:flex'} w-72 shrink-0 flex-col border-r p-4`}
       >
         <div className="mb-3">
           <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
@@ -1075,7 +1101,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 type="button"
                 onClick={() => setHistoryOpen(true)}
                 aria-label="Open chat history"
-                className="lg:hidden min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+                className={`${settings.chatLayout === 'focus' || canvasOpen ? '' : 'lg:hidden'} min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors`}
               >
                 <History className="w-5 h-5" />
               </button>
@@ -2608,7 +2634,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         <FileText className="w-4 h-4 text-slate-500 shrink-0" />
                       )}
                       <div className="min-w-0 max-w-[140px]">
-                        <div className="truncate font-medium">{att.name}</div>
+                        <button type="button" className="truncate font-medium underline max-w-full" onClick={() => setPreviewAttachment(att.id)}>{att.name}</button>
                         <div className="text-[10px] text-slate-500">{formatFileSize(att.size)}</div>
                       </div>
                       {isTabularAttachment(att) && (
@@ -2635,6 +2661,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </div>
               )}
 
+              {selectedAttachment && <section className="rounded-xl border p-2 space-y-2 text-xs"><div className="flex justify-between gap-2"><strong className="truncate">{selectedAttachment.name}</strong><button type="button" className="underline" onClick={() => setPreviewAttachment(null)}>Close preview</button></div>{selectedAttachment.kind === 'image' && selectedAttachment.previewUrl ? <img src={selectedAttachment.previewUrl} alt={selectedAttachment.name} className="max-h-40 object-contain" /> : <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words">{selectedAttachment.textContent?.slice(0, 5000) || 'No text preview available.'}</pre>}</section>}
+
               {shouldOfferProPlan(input, activeChatMode) && !planMode && !pendingPlanDraft && (
                 <div className="px-1 flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
                   <span>Multi-step Pro task detected — want to review a plan first?</span>
@@ -2647,6 +2675,13 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   </button>
                 </div>
               )}
+
+              {'speechSynthesis' in window && <button type="button" aria-pressed={voiceReplies} onClick={() => {
+                spokenReplyId.current = lastMsg?.id;
+                voiceConversationId.current = activeConversationId;
+                if (voiceReplies) { window.speechSynthesis.cancel(); setSpeakingMsgId(null); }
+                setVoiceReplies(!voiceReplies);
+              }} className="self-start inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700"><Volume2 className="w-3.5 h-3.5" /> Voice replies {voiceReplies ? 'on' : 'off'}</button>}
 
               <textarea
                 ref={composerRef}
@@ -2854,9 +2889,12 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       </div>
 
       {/* Pro Coding & Document Canvas Split Pane / Mobile Sheet */}
+      {canvasOpen && canvasSaveFailed && <div role="alert" className="absolute bottom-20 right-4 z-50 rounded-xl bg-rose-700 text-white p-3 text-xs">Canvas autosave failed. Export your work to retain a copy.</div>}
       <ProCanvasPanel
+        key={JSON.stringify([canvasScope, activeConversationId])}
         open={canvasOpen}
         artifact={canvasArtifact}
+        storageScope={JSON.stringify([canvasScope, activeConversationId])}
         isRunning={isRunning}
         githubConnected={Boolean(
           servers.find((s) => s.presetId === 'github' || s.id === 'srv_github')?.status ===

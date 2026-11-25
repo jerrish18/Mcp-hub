@@ -1,4 +1,4 @@
-import { sanitizeFilename } from './docExport';
+import { sanitizeFilename } from './filenames';
 
 const CRC32_TABLE = (() => {
   const table = new Uint32Array(256);

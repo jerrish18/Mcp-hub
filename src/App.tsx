@@ -1,13 +1,8 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import { Bot, Fingerprint, KeyRound, LayoutDashboard, MessageSquare, Server, Settings, Sparkles } from 'lucide-react';
-import { AgentsScreen } from './features/agents/AgentsScreen';
 import { AuthScreen } from './features/auth/AuthScreen';
-import { ChatScreen } from './features/chat/ChatScreen';
-import { DashboardScreen } from './features/dashboard/DashboardScreen';
 import { OnboardingModal } from './features/onboarding/OnboardingModal';
-import { ServersScreen } from './features/servers/ServersScreen';
-import { SettingsScreen } from './features/settings/SettingsScreen';
 import { parseMcpAddDeepLink } from './config/connectors';
 import { subscribeGoogleAuth } from './services/auth/appAuth';
 import { startBrowserControlBridge } from './services/control/browserBridge';
@@ -16,6 +11,11 @@ import { ErrorBoundary } from './ui/ErrorBoundary';
 import { M3_SPRING, screenTransitionVariants } from './utils/motion';
 import { applyPixelThemeVars } from './utils/theme';
 
+const AgentsScreen = lazy(() => import('./features/agents/AgentsScreen').then(module => ({ default: module.AgentsScreen })));
+const ChatScreen = lazy(() => import('./features/chat/ChatScreen').then(module => ({ default: module.ChatScreen })));
+const DashboardScreen = lazy(() => import('./features/dashboard/DashboardScreen').then(module => ({ default: module.DashboardScreen })));
+const ServersScreen = lazy(() => import('./features/servers/ServersScreen').then(module => ({ default: module.ServersScreen })));
+const SettingsScreen = lazy(() => import('./features/settings/SettingsScreen').then(module => ({ default: module.SettingsScreen })));
 const NAV_TABS: Array<{ id: HubTabId; label: string; Icon: typeof MessageSquare }> = [
   { id: 'dashboard', label: 'Dashboard', Icon: LayoutDashboard },
   { id: 'chat', label: 'Chat', Icon: MessageSquare },
@@ -348,11 +348,13 @@ export default function App() {
                 exit="exit"
                 className="h-full min-h-0"
               >
+                <Suspense fallback={<div role="status" className="p-6 text-sm">Loading workspace…</div>}>
                 {activeTab === 'dashboard' && <DashboardScreen onNavigateTab={setActiveTab} />}
                 {activeTab === 'chat' && <ChatScreen onOpenSettings={() => setActiveTab('settings')} />}
                 {activeTab === 'servers' && <ServersScreen />}
                 {activeTab === 'agents' && <AgentsScreen onOpenChat={() => setActiveTab('chat')} />}
                 {activeTab === 'settings' && <SettingsScreen />}
+                </Suspense>
               </motion.div>
             </AnimatePresence>
           </main>

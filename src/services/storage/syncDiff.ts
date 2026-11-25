@@ -73,6 +73,7 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
   return {
     theme: settings.theme,
     accentTheme: settings.accentTheme,
+    chatLayout: settings.chatLayout === 'focus' ? 'focus' : 'standard',
     oledDark: Boolean(settings.oledDark),
     a2uiEnabled: resolvedA2uiMode !== 'off',
     a2uiMode: resolvedA2uiMode,

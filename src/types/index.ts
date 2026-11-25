@@ -14,7 +14,7 @@ export type AuthType = z.infer<typeof AuthTypeSchema>;
 export const EffortLevelSchema = z.enum(['low', 'medium', 'high']);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
-export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'demo']);
+export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'local', 'demo']);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
 export const ChatModeSchema = z.enum(['general', 'professional', 'study']);
@@ -403,6 +403,7 @@ export interface ChatMessage {
   runTrace?: RunTrace;
   a2uiWidgetState?: A2uiWidgetState;
   verification?: MessageVerification;
+  canvasEdit?: { artifactId: string; kind: string };
   createdAt: number;
   isStreaming?: boolean;
   error?: string;
@@ -418,6 +419,7 @@ export interface Conversation {
   knowledgeSource: KnowledgeSourceMode;
   studyInstructions: string;
   projectId?: string | null;
+  forkedFrom?: { conversationId: string; messageId?: string };
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
@@ -457,6 +459,7 @@ export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'mo
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   accentTheme: PixelAccentTheme;
+  chatLayout?: 'standard' | 'focus';
   oledDark: boolean;
   a2uiEnabled: boolean;
   a2uiMode?: A2uiMode;

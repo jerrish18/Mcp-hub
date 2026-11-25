@@ -21,7 +21,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Run typecheck & ESLint
         run: npm run lint
@@ -31,3 +31,13 @@ jobs:
 
       - name: Build production bundle
         run: npm run build
+
+      - name: Install mobile dependencies
+        run: npm ci --prefix mobile
+
+      - name: Typecheck mobile app
+        run: npm run typecheck --prefix mobile
+
+      - name: Build Android JavaScript bundle
+        working-directory: mobile
+        run: npx expo export --platform android --max-workers 2 --output-dir dist

@@ -59,7 +59,7 @@ export function VerificationSheet({ answer, question, models, keys, onClose }: {
         {error && <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">{error}</p>}
         {review && <section aria-label="Verification findings" className="rounded-lg border p-3 dark:border-slate-700">
           <h3 className="mb-2 text-sm font-semibold">Findings</h3>
-          <MarkdownRenderer content={review} a2uiEnabled={false} isStreaming={running} />
+          <MarkdownRenderer content={review} a2uiEnabled={false} />
         </section>}
       </div>
     </BottomSheet>
