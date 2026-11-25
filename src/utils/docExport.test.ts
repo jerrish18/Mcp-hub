@@ -205,7 +205,7 @@ test('binary document builders produce genuine PPTX, DOCX, XLSX, and PDF file si
     })
   );
   assert.ok(pdfSpec && pdfSpec.format === 'pdf');
-  const pdfBlob = buildPdfBlob(pdfSpec);
+  const pdfBlob = await buildPdfBlob(pdfSpec);
   assert.ok(pdfBlob.size > 1200);
   const pdfHeader = await pdfBlob.slice(0, 5).text();
   assert.equal(pdfHeader, '%PDF-');

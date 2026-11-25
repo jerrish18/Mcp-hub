@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import { X } from 'lucide-react';
 import { M3_FAST_EASE, M3_SPRING } from '../utils/motion';
@@ -21,7 +22,7 @@ export function BottomSheet({ open, onClose, title, subtitle, children }: Bottom
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
-  return (
+  return createPortal(
     <AnimatePresence>
       {open && (
         <motion.div
@@ -48,7 +49,7 @@ export function BottomSheet({ open, onClose, title, subtitle, children }: Bottom
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="w-full sm:max-w-lg max-h-[88vh] flex flex-col rounded-t-[28px] sm:rounded-[28px] border shadow-2xl overflow-hidden"
+            className="w-full sm:max-w-lg max-h-[88dvh] flex flex-col rounded-t-[22px] sm:rounded-[20px] border shadow-2xl overflow-hidden"
           >
             <div
               style={{ borderColor: 'var(--m3-outline)' }}
@@ -81,6 +82,7 @@ export function BottomSheet({ open, onClose, title, subtitle, children }: Bottom
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 }

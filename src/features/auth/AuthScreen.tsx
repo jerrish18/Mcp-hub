@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { AlertCircle, ArrowRight, Eye, EyeOff, Lock, Mail, Sparkles, User } from 'lucide-react';
+import { AlertCircle, ArrowRight, Eye, EyeOff, Lock, Mail, User, Workflow } from 'lucide-react';
 import {
   loginAppAccount,
   loginWithGoogleAccount,
@@ -62,35 +62,27 @@ export function AuthScreen({ onAuthenticated, onContinueGuest }: AuthScreenProps
   };
 
   return (
-    <div
-      style={{ backgroundColor: 'var(--m3-surface)' }}
-      className="min-h-dvh flex items-center justify-center p-4 sm:p-6 overflow-y-auto"
-    >
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={M3_EMPHASIZED_EASE}
-        style={{
-          backgroundColor: 'var(--m3-surface-container)',
-          borderColor: 'var(--m3-outline)',
-        }}
-        className="w-full max-w-md rounded-[28px] border p-6 sm:p-7 space-y-5 shadow-xl"
-      >
-        <div className="text-center space-y-2">
-          <div
-            style={{
-              backgroundColor: 'var(--m3-primary)',
-              color: 'var(--m3-on-primary)',
-            }}
-            className="w-12 h-12 rounded-2xl flex items-center justify-center mx-auto shadow-xs"
-          >
-            <Sparkles className="w-6 h-6" />
-          </div>
-          <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
-            Welcome to MCP Hub
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            Sign in with your App account or Google to manage agents, study notes, and MCP servers.
+    <main className="auth-layout">
+      <div className="auth-cover" aria-hidden="true">
+        <div className="dashboard-hero-pattern" />
+        <div className="workspace-brand">
+          <span className="workspace-mark"><Workflow /></span>
+          <span>MCP Hub</span>
+        </div>
+        <p>Connect your tools to AI.</p>
+      </div>
+      <div className="auth-form-wrap">
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={M3_EMPHASIZED_EASE}
+          className="auth-form"
+        >
+        <div className="space-y-2">
+          <span className="workspace-mark auth-mark"><Workflow aria-hidden="true" /></span>
+          <h1>{mode === 'register' ? 'Create your account' : 'Sign in to MCP Hub'}</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Sign in to sync your workspace across devices.
           </p>
         </div>
 
@@ -306,10 +298,11 @@ export function AuthScreen({ onAuthenticated, onContinueGuest }: AuthScreenProps
             onClick={onContinueGuest}
             className="min-h-[40px] px-4 rounded-full text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
           >
-            Continue locally without signing in
+            Continue locally
           </button>
         </div>
-      </motion.div>
-    </div>
+        </motion.div>
+      </div>
+    </main>
   );
 }

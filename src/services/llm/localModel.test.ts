@@ -22,3 +22,19 @@ test('local streaming sends to loopback without API credentials or tool definiti
   } });
   assert.deepEqual(events, ['Hello']);
 });
+
+test('stream retains the last text frame and reports an explicit generation limit', async () => {
+  const received: string[] = [];
+  const lastFrame = 'data: {"choices":[{"delta":{"content":"partial project"},"finish_reason":"length"}]}';
+  await assert.rejects(dispatchStreamCompletion({
+    model: getModelById('local:fixture'),
+    apiKey: getApiKeyForProvider('local', {}),
+    effort: 'low',
+    systemPrompt: '',
+    messages: [{ role: 'user', text: 'Build a large project' }],
+    tools: [],
+    fetchFn: async () => new Response(lastFrame),
+    onEvent: (event) => { if (event.type === 'text_delta') received.push(event.delta); },
+  }), /reached its output limit/);
+  assert.deepEqual(received, ['partial project']);
+});

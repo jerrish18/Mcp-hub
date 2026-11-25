@@ -92,8 +92,7 @@ export function parseAppArtifactBlock(language: string, rawCode: string): AppArt
   };
 }
 
-export const CANVAS_IFRAME_SANDBOX =
-  'allow-scripts allow-forms allow-modals allow-popups allow-downloads';
+export { CANVAS_IFRAME_SANDBOX } from './canvasPreview';
 
 export const STORAGE_SHIM_SCRIPT = `<script data-mcphub-shim="storage">
 (function installCanvasStorage(){
@@ -157,29 +156,28 @@ export const STORAGE_SHIM_SCRIPT = `<script data-mcphub-shim="storage">
 })();
 </script>`;
 
-const RUNTIME_BRIDGE_SCRIPT = `<script data-mcphub-bridge="runtime">
+export const CANVAS_RUNTIME_BRIDGE = `<script data-mcphub-bridge="runtime">
 (function(){
-  if (!window.__mcpCanvasRenderListenerHooked) {
-    window.__mcpCanvasRenderListenerHooked = true;
-    window.addEventListener('message', function(ev) {
-      if (ev.source !== window.parent) return;
-      var data = ev.data;
-      if (data && data.type === 'mcphub-canvas-render' && typeof data.html === 'string') {
-        document.open();
-        document.write(data.html);
-        document.close();
-      }
-    });
+  function ready() {
+    window.parent.postMessage({ source: 'mcphub-canvas-runtime', type: 'loaded' }, '*');
   }
-  if (window.__mcpCanvasRuntimeHooked) return;
-  window.__mcpCanvasRuntimeHooked = true;
-  function send(level, msg) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', ready, { once: true });
+  } else {
+    ready();
+  }
+  function format(value) {
+    if (value instanceof Error) return value.stack || value.message;
+    try { return typeof value === 'object' ? JSON.stringify(value) : String(value); }
+    catch { return String(value); }
+  }
+  function send(level, msg, blocking) {
     try {
       window.parent.postMessage({
         source: 'mcphub-canvas-runtime',
         level: level,
         message: String(msg || ''),
-        timestamp: Date.now()
+        blocking: Boolean(blocking)
       }, '*');
     } catch (e) {}
   }
@@ -188,33 +186,31 @@ const RUNTIME_BRIDGE_SCRIPT = `<script data-mcphub-bridge="runtime">
       var el = ev.target;
       var tag = el.tagName ? el.tagName.toLowerCase() : 'resource';
       var resUrl = el.src || el.href || '';
-      send('error', 'Failed to load ' + tag + (resUrl ? ': ' + resUrl : ''));
+      var critical = tag === 'script' || (tag === 'link' && el.rel === 'stylesheet');
+      send(critical ? 'error' : 'warn', 'Failed to load ' + tag + (resUrl ? ': ' + resUrl : ''), critical);
       return;
     }
-    send('error', (ev.message || 'Runtime error') + (ev.lineno ? ' (line ' + ev.lineno + ')' : ''));
+    send('error', (ev.message || 'Runtime error') + (ev.lineno ? ' (line ' + ev.lineno + ')' : ''), true);
   }, true);
   window.addEventListener('unhandledrejection', function(ev) {
     var reason = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason || 'Unhandled promise rejection');
-    send('error', reason);
+    send('error', reason, true);
   });
   window.addEventListener('securitypolicyviolation', function(ev) {
     var directive = ev.violatedDirective || ev.effectiveDirective || 'csp';
     var blocked = ev.blockedURI || 'inline';
     var line = ev.lineNumber ? ' (line ' + ev.lineNumber + ')' : '';
-    send('error', 'CSP blocked ' + directive + ': ' + blocked + line);
+    var critical = /^(script|style)-src/.test(directive);
+    send(critical ? 'error' : 'warn', 'Preview policy blocked ' + directive + ': ' + blocked + line, critical);
   });
   var origErr = console.error;
   console.error = function() {
-    send('error', Array.prototype.slice.call(arguments).map(function(a){
-      return typeof a === 'object' ? JSON.stringify(a) : String(a);
-    }).join(' '));
+    send('error', Array.prototype.slice.call(arguments).map(format).join(' '));
     return origErr.apply(console, arguments);
   };
   var origWarn = console.warn;
   console.warn = function() {
-    send('warn', Array.prototype.slice.call(arguments).map(function(a){
-      return typeof a === 'object' ? JSON.stringify(a) : String(a);
-    }).join(' '));
+    send('warn', Array.prototype.slice.call(arguments).map(format).join(' '));
     return origWarn.apply(console, arguments);
   };
 })();
@@ -228,15 +224,20 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function findMatchingProjectFile(
-  files: AppFileEntry[],
-  refPath: string
-): AppFileEntry | undefined {
-  const cleanRef = normalizePath(refPath.split('?')[0].split('#')[0]);
-  return (
-    files.find((f) => f.path.toLowerCase() === cleanRef.toLowerCase()) ??
-    files.find((f) => f.path.toLowerCase().endsWith(`/${cleanRef.toLowerCase()}`))
-  );
+function resolveProjectPath(entryPath: string, refPath: string): string | undefined {
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(refPath)) return;
+  const parts = refPath.startsWith('/') ? [] : entryPath.split('/').slice(0, -1);
+  for (const segment of refPath.split(/[?#]/, 1)[0].split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      if (!parts.length) return;
+      parts.pop();
+    } else {
+      try { parts.push(decodeURIComponent(segment)); }
+      catch { return; }
+    }
+  }
+  return parts.join('/');
 }
 
 /**
@@ -248,13 +249,10 @@ export function buildAppPreviewSrcDoc(
   options?: { includeRuntimeBridge?: boolean }
 ): string {
   const includeBridge = options?.includeRuntimeBridge !== false;
-  const entryTarget = spec.entryFile?.toLowerCase();
-  const htmlEntry =
-    (entryTarget
-      ? spec.files.find((f) => f.path.toLowerCase() === entryTarget)
-      : undefined) ??
-    spec.files.find((f) => f.path.toLowerCase() === 'index.html') ??
-    spec.files.find((f) => f.path.toLowerCase().endsWith('.html'));
+  const htmlFiles = spec.files.filter((file) => file.language === 'html' || /\.html?$/i.test(file.path));
+  const htmlEntry = htmlFiles.find((file) => file.path === spec.entryFile)
+    ?? htmlFiles.find((file) => /^index\.html?$/i.test(file.path))
+    ?? htmlFiles[0];
 
   if (!htmlEntry) {
     const fileCards = spec.files
@@ -269,7 +267,7 @@ export function buildAppPreviewSrcDoc(
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>${escapeHtml(spec.title)}</title>
-${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
+${includeBridge ? CANVAS_RUNTIME_BRIDGE : ''}
 <style>
   body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; color: #0f172a; padding: 24px; }
   .shell { max-width: 680px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 22px; }
@@ -284,22 +282,31 @@ ${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
   <div class="shell">
     <div class="meta">${escapeHtml(spec.framework || 'Project')} · ${spec.files.length} files</div>
     <h1>${escapeHtml(spec.title)}</h1>
-    <p>${escapeHtml(spec.description || 'Multi-file source project ready for code inspection and GitHub sync.')}</p>
+    ${spec.description ? `<p>${escapeHtml(spec.description)}</p>` : ''}
+    <p>Add an HTML entry file to preview this project, or download the files to run its build tools.</p>
     ${fileCards}
   </div>
 </body>
 </html>`;
   }
 
-  let html = htmlEntry.content;
+  // A doctype must precede any injected tags to keep the preview in standards mode.
+  const doctype = /^\s*<!doctype[^>]*>/i.exec(htmlEntry.content)?.[0] ?? '<!doctype html>';
+  let html = htmlEntry.content.replace(/^\s*<!doctype[^>]*>/i, '');
   const inlinedPaths = new Set<string>([htmlEntry.path]);
+  const filesByPath = new Map(spec.files.map((file) => [file.path, file]));
+  const findFile = (reference: string) => {
+    const path = resolveProjectPath(htmlEntry.path, reference);
+    return path ? filesByPath.get(path) : undefined;
+  };
+  const deferredScripts: string[] = [];
 
   // Inline local <link rel="stylesheet" href="..."> references
   html = html.replace(
     /<link\b[^>]*rel=["']?stylesheet["']?[^>]*href=["']([^"']+)["'][^>]*\/?>/gi,
     (fullTag, href: string) => {
       if (/^https?:\/\//i.test(href) || href.startsWith('//')) return fullTag;
-      const match = findMatchingProjectFile(spec.files, href);
+      const match = findFile(href);
       if (!match) return fullTag;
       inlinedPaths.add(match.path);
       return `<style data-file="${escapeHtml(match.path)}">\n${match.content}\n</style>`;
@@ -309,7 +316,7 @@ ${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
     /<link\b[^>]*href=["']([^"']+)["'][^>]*rel=["']?stylesheet["']?[^>]*\/?>/gi,
     (fullTag, href: string) => {
       if (/^https?:\/\//i.test(href) || href.startsWith('//')) return fullTag;
-      const match = findMatchingProjectFile(spec.files, href);
+      const match = findFile(href);
       if (!match) return fullTag;
       inlinedPaths.add(match.path);
       return `<style data-file="${escapeHtml(match.path)}">\n${match.content}\n</style>`;
@@ -321,11 +328,15 @@ ${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
     /<script\b([^>]*?)src=["']([^"']+)["']([^>]*)>\s*<\/script>/gi,
     (fullTag, beforeSrc: string, src: string, afterSrc: string) => {
       if (/^https?:\/\//i.test(src) || src.startsWith('//')) return fullTag;
-      const match = findMatchingProjectFile(spec.files, src);
+      const match = findFile(src);
       if (!match) return fullTag;
       inlinedPaths.add(match.path);
       const attrs = `${beforeSrc} ${afterSrc}`.trim();
-      const safeJs = match.content.replace(/<\/script>/gi, '<\\/script>');
+      const safeJs = match.content.replace(/<\/script/gi, '<\\/script');
+      if (/(?:^|\s)defer(?:\s|=|$)/i.test(attrs) && !/\btype\s*=\s*["']?module\b/i.test(attrs)) {
+        deferredScripts.push(`<script data-file="${escapeHtml(match.path)}">\n${safeJs}\n</script>`);
+        return '';
+      }
       return `<script ${attrs} data-file="${escapeHtml(match.path)}">\n${safeJs}\n</script>`;
     }
   );
@@ -339,7 +350,7 @@ ${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
       .map((f) => `<style data-file="${escapeHtml(f.path)}">\n${f.content}\n</style>`)
       .join('\n');
     html = /<\/head>/i.test(html)
-      ? html.replace(/<\/head>/i, `${styleTags}\n</head>`)
+      ? html.replace(/<\/head>/i, () => `${styleTags}\n</head>`)
       : `${styleTags}\n${html}`;
   }
 
@@ -349,20 +360,20 @@ ${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
       (f.language === 'javascript' || f.language === 'js') &&
       !f.path.toLowerCase().includes('.test.')
   );
-  if (unreferencedJs.length > 0) {
-    const scriptTags = unreferencedJs
-      .map(
-        (f) =>
-          `<script data-file="${escapeHtml(f.path)}">\n${f.content.replace(/<\/script>/gi, '<\\/script>')}\n</script>`
-      )
-      .join('\n');
+  const scriptTags = [
+    ...unreferencedJs.map(
+      (f) => `<script data-file="${escapeHtml(f.path)}">\n${f.content.replace(/<\/script/gi, '<\\/script')}\n</script>`
+    ),
+    ...deferredScripts,
+  ].join('\n');
+  if (scriptTags) {
     html = /<\/body>/i.test(html)
-      ? html.replace(/<\/body>/i, `${scriptTags}\n</body>`)
+      ? html.replace(/<\/body>/i, () => `${scriptTags}\n</body>`)
       : `${html}\n${scriptTags}`;
   }
 
   const preloadScripts = includeBridge
-    ? `${STORAGE_SHIM_SCRIPT}\n${RUNTIME_BRIDGE_SCRIPT}`
+    ? `${STORAGE_SHIM_SCRIPT}\n${CANVAS_RUNTIME_BRIDGE}`
     : STORAGE_SHIM_SCRIPT;
 
   if (/<head[^>]*>/i.test(html)) {
@@ -371,7 +382,7 @@ ${includeBridge ? RUNTIME_BRIDGE_SCRIPT : ''}
     html = `${preloadScripts}\n${html}`;
   }
 
-  return html;
+  return `${doctype}\n${html}`;
 }
 
 export function suggestRepoSlug(title: string): string {

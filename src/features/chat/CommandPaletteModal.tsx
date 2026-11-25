@@ -57,11 +57,19 @@ export function CommandPaletteModal({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    if (open) {
-      setQuery('');
-      setTimeout(() => inputRef.current?.focus(), 20);
-    }
+    if (!open) return;
+    setQuery('');
+    inputRef.current?.focus();
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [open, onClose]);
 
   const actions = useMemo<CommandPaletteAction[]>(() => {
     const list: CommandPaletteAction[] = [
@@ -226,7 +234,7 @@ export function CommandPaletteModal({
           backgroundColor: 'var(--m3-surface)',
           borderColor: 'var(--m3-outline)',
         }}
-        className="w-full max-w-xl rounded-3xl border shadow-xl overflow-hidden flex flex-col max-h-[75vh]"
+        className="w-full max-w-xl rounded-[18px] border shadow-xl overflow-hidden flex flex-col max-h-[75dvh]"
       >
         <div
           style={{ borderColor: 'var(--m3-outline)' }}
@@ -239,16 +247,15 @@ export function CommandPaletteModal({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                onClose();
-              } else if (e.key === 'Enter' && filtered[0]) {
+              if (e.key === 'Enter' && filtered[0]) {
                 e.preventDefault();
                 filtered[0].run();
                 onClose();
               }
             }}
-            placeholder="Type /, @, project, mode, or action..."
-            className="flex-1 bg-transparent text-sm text-slate-900 dark:text-white focus:outline-none"
+            aria-label="Search commands"
+            placeholder="Search commands, projects, or macros"
+            className="min-w-0 flex-1 bg-transparent text-sm text-slate-900 dark:text-white focus:outline-none"
           />
           <button
             type="button"

@@ -50,11 +50,12 @@ import { StudyImageCard } from './StudyImageCard';
 export type MarkdownCanvasRequest =
   | { kind: 'code'; title: string; language: string; code: string }
   | { kind: 'document'; title: string; spec: DocumentSpec; rawJson: string }
-  | { kind: 'app'; title: string; spec: AppArtifactSpec; rawJson: string }
+  | { kind: 'app'; title: string; spec: AppArtifactSpec }
   | { kind: 'dataset'; title: string; spec: DatasetArtifactSpec };
 
 interface MarkdownRendererProps {
   content: string;
+  isStreaming?: boolean;
   a2uiEnabled?: boolean;
   a2uiWidgetState?: A2uiWidgetState;
   onUpdateA2uiWidgetState?: (patch: Partial<A2uiWidgetState>) => void;
@@ -62,7 +63,7 @@ interface MarkdownRendererProps {
   onA2UIAction?: (prompt: string, displayLabel?: string) => void;
   onOpenInteractiveFlashcards?: () => void;
   onOpenInteractiveQuiz?: () => void;
-  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest, block: number) => void;
 }
 
 const CANVAS_CODE_LANGS = new Set([
@@ -294,11 +295,9 @@ function DocumentArtifactCard({
 
 function AppArtifactCard({
   spec,
-  rawJson,
   onOpenInCanvas,
 }: {
   spec: AppArtifactSpec;
-  rawJson: string;
   onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void;
 }) {
   const [downloaded, setDownloaded] = useState(false);
@@ -355,7 +354,6 @@ function AppArtifactCard({
                 kind: 'app',
                 title: spec.title,
                 spec,
-                rawJson,
               })
             }
             style={{
@@ -451,6 +449,7 @@ function CodeBlock({
   language,
   code,
   isUnclosed,
+  isStreaming,
   a2uiEnabled = true,
   a2uiWidgetState,
   onUpdateA2uiWidgetState,
@@ -463,6 +462,7 @@ function CodeBlock({
   language: string;
   code: string;
   isUnclosed?: boolean;
+  isStreaming?: boolean;
   a2uiEnabled?: boolean;
   a2uiWidgetState?: A2uiWidgetState;
   onUpdateA2uiWidgetState?: (patch: Partial<A2uiWidgetState>) => void;
@@ -475,9 +475,17 @@ function CodeBlock({
   const [copied, setCopied] = useState(false);
 
   const normalizedLang = language.toLowerCase().trim();
+  const isBuilding = isUnclosed && isStreaming;
+  const parsedDataset = useMemo(
+    () =>
+      normalizedLang === 'csv' || normalizedLang === 'tsv'
+        ? parseDelimitedDataset(code, normalizedLang === 'tsv' ? 'snippet.tsv' : 'snippet.csv')
+        : null,
+    [code, normalizedLang]
+  );
 
   if (normalizedLang === 'a2ui' || normalizedLang === 'artifact-a2ui') {
-    if (isUnclosed) {
+    if (isBuilding) {
       return (
         <div
           data-testid="a2ui-streaming-skeleton"
@@ -556,7 +564,7 @@ function CodeBlock({
   }
 
   if (/^(?:artifact|doc)-(?:pptx|docx|xlsx|pdf)$/.test(normalizedLang)) {
-    const parsedDoc = isUnclosed ? null : parseArtifactBlock(normalizedLang, code);
+    const parsedDoc = isBuilding ? null : parseArtifactBlock(normalizedLang, code);
     if (parsedDoc) {
       return (
         <DocumentArtifactCard
@@ -567,7 +575,7 @@ function CodeBlock({
       );
     }
     const fmtLabel = normalizedLang.replace(/^(?:artifact|doc)-/, '').toUpperCase();
-    if (isUnclosed) {
+    if (isBuilding) {
       return (
         <div
           style={{
@@ -584,17 +592,16 @@ function CodeBlock({
   }
 
   if (normalizedLang === 'artifact-app' || normalizedLang === 'app-project') {
-    const parsedApp = isUnclosed ? null : parseAppArtifactBlock(normalizedLang, code);
+    const parsedApp = isBuilding ? null : parseAppArtifactBlock(normalizedLang, code);
     if (parsedApp) {
       return (
         <AppArtifactCard
           spec={parsedApp}
-          rawJson={code}
           onOpenInCanvas={onOpenInCanvas}
         />
       );
     }
-    if (isUnclosed) {
+    if (isBuilding) {
       return (
         <div
           style={{
@@ -608,6 +615,21 @@ function CodeBlock({
         </div>
       );
     }
+
+    return (
+      <details className="my-3 rounded-xl border border-amber-300/60 p-4 text-sm dark:border-amber-800">
+        <summary className="cursor-pointer font-semibold">
+          Website source is incomplete or invalid. View the generated source
+        </summary>
+        <pre className="mt-3 max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-100">
+          <code>{code}</code>
+        </pre>
+      </details>
+    );
+  }
+
+  if (isBuilding && (normalizedLang === 'html' || normalizedLang === 'htm')) {
+    return <p role="status" className="my-3 p-4 text-sm text-slate-600 dark:text-slate-300">Generating website source…</p>;
   }
 
   if (normalizedLang === 'study-flashcards' && onOpenInteractiveFlashcards) {
@@ -725,13 +747,7 @@ function CodeBlock({
   };
 
   const canOpenInCanvas = Boolean(onOpenInCanvas && (CANVAS_CODE_LANGS.has(normalizedLang) || code.length > 80));
-  const parsedDataset = useMemo(
-    () =>
-      normalizedLang === 'csv' || normalizedLang === 'tsv'
-        ? parseDelimitedDataset(code, normalizedLang === 'tsv' ? 'snippet.tsv' : 'snippet.csv')
-        : null,
-    [code, normalizedLang]
-  );
+
 
   return (
     <div className="my-3 overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-100">
@@ -866,7 +882,8 @@ function renderBlock(
   onA2UIAction?: (prompt: string, displayLabel?: string) => void,
   onOpenInteractiveFlashcards?: () => void,
   onOpenInteractiveQuiz?: () => void,
-  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void
+  onOpenInCanvas?: (payload: MarkdownCanvasRequest) => void,
+  isStreaming?: boolean,
 ): React.ReactNode {
   switch (block.type) {
     case 'code':
@@ -876,6 +893,7 @@ function renderBlock(
           language={block.language}
           code={block.code}
           isUnclosed={block.isUnclosed}
+          isStreaming={isStreaming}
           a2uiEnabled={a2uiEnabled}
           a2uiWidgetState={a2uiWidgetState}
           onUpdateA2uiWidgetState={onUpdateA2uiWidgetState}
@@ -1047,6 +1065,7 @@ function renderBlock(
 
 export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
+  isStreaming = false,
   a2uiEnabled = true,
   a2uiWidgetState,
   onUpdateA2uiWidgetState,
@@ -1072,7 +1091,8 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
           onA2UIAction,
           onOpenInteractiveFlashcards,
           onOpenInteractiveQuiz,
-          onOpenInCanvas
+          onOpenInCanvas ? (request) => onOpenInCanvas(request, i) : undefined,
+          isStreaming
         )
       )}
     </div>

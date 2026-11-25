@@ -1,23 +1,22 @@
 import { Tabs } from 'expo-router';
-import { useColorScheme } from 'react-native';
+import { useWorkspaceTheme } from '../../ui/workspace';
 import { Bot, MessageSquare, Server, Settings } from 'lucide-react-native';
 
 export default function TabLayout() {
-  const isDark = useColorScheme() === 'dark';
+  const theme = useWorkspaceTheme();
 
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: '#2563EB',
-        tabBarInactiveTintColor: isDark ? '#94A3B8' : '#64748B',
-        tabBarStyle: {
-          backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
-          borderTopColor: isDark ? '#1E293B' : '#E2E8F0',
-          height: 64,
-          paddingBottom: 8,
-          paddingTop: 6,
-        },
+        tabBarHideOnKeyboard: true,
+        tabBarActiveTintColor: theme.onAccentSurface,
+        tabBarActiveBackgroundColor: theme.accentSurface,
+        tabBarInactiveTintColor: theme.muted,
+        tabBarLabelStyle: { fontWeight: '600', fontSize: 11 },
+        tabBarItemStyle: { borderRadius: 10, marginHorizontal: 4, marginVertical: 4 },
+        tabBarStyle: { backgroundColor: theme.panel, borderTopColor: theme.border },
+
       }}
     >
       <Tabs.Screen

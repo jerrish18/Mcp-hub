@@ -3,11 +3,19 @@ import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
+import { handleCanvasPreviewRequest } from './src/server/canvasPreview';
+import { CANVAS_PREVIEW_PATH } from './src/utils/canvasPreview';
 
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
+      {
+        name: 'canvas-preview',
+        configurePreviewServer(server) {
+          server.middlewares.use(CANVAS_PREVIEW_PATH, handleCanvasPreviewRequest);
+        },
+      },
       {
         name: 'offline-app-shell',
         apply: 'build',

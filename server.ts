@@ -7,6 +7,7 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { createAuthService } from './src/server/authRouter.ts';
 import { handleCanvasPreviewRequest } from './src/server/canvasPreview.ts';
+import { CANVAS_PREVIEW_PATH } from './src/utils/canvasPreview.ts';
 import { createControlRouter } from './src/server/controlRouter.ts';
 import { createStudyImagesRouter } from './src/server/studyImagesRouter.ts';
 import { createWorkspaceRouter } from './src/server/workspaceRouter.ts';
@@ -27,7 +28,7 @@ async function startServer() {
   app.set('trust proxy', 1);
 
   // Dedicated isolated preview loader for Pro Canvas (must bypass parent helmet CSP & SPA fallback)
-  app.get('/__canvas-preview', handleCanvasPreviewRequest);
+  app.get(CANVAS_PREVIEW_PATH, handleCanvasPreviewRequest);
 
   app.use(
     helmet({

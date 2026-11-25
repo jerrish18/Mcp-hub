@@ -1,10 +1,13 @@
+import { WorkspaceHeading, useWorkspaceTheme } from '../../ui/workspace';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useState } from 'react';
-import { Pressable, SafeAreaView, ScrollView, Text, View, useColorScheme } from 'react-native';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+import { Bot, Check } from 'lucide-react-native';
 import type { AgentProfile } from '@core/types';
 import { loadMobilePrefs, saveMobilePrefs } from '../../services/storage/mobilePrefs';
 
 export default function MobileAgentsScreen() {
-  const isDark = useColorScheme() === 'dark';
+  const theme = useWorkspaceTheme();
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string>('');
 
@@ -21,41 +24,37 @@ export default function MobileAgentsScreen() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? '#020617' : '#F8FAFC' }}>
-      <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
-        <Text style={{ fontSize: 24, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A' }}>
-          Agents
-        </Text>
-        <Text style={{ fontSize: 13, color: '#64748B' }}>
-          Tap an agent profile to use it as the active assistant in Chat.
-        </Text>
+    <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1, backgroundColor: theme.background }}>
+      <ScrollView contentContainerStyle={{ padding: 20, gap: 12 }}>
+        <WorkspaceHeading title="Agents" subtitle="Choose the assistant you want to use in Chat." />
         {agents.map((agent) => {
           const active = agent.id === selectedId;
           return (
             <Pressable
               key={agent.id}
               onPress={() => void handleSelect(agent.id)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
               style={{
                 padding: 16,
                 borderRadius: 16,
-                backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
-                borderWidth: active ? 2 : 1,
-                borderColor: active ? '#2563EB' : isDark ? '#1E293B' : '#E2E8F0',
+                backgroundColor: active ? theme.accentSurface : theme.panel,
+                borderWidth: 1,
+                borderColor: active ? theme.accent : theme.border,
                 gap: 6,
               }}
             >
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Text style={{ fontSize: 16, fontWeight: '600', color: isDark ? '#FFFFFF' : '#0F172A' }}>
-                  {agent.name}
-                </Text>
-                {active ? (
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#2563EB' }}>ACTIVE</Text>
-                ) : null}
+              <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                <View style={{ backgroundColor: active ? theme.panel : theme.accentSurface, padding: 8, borderRadius: 9 }}>
+                  <Bot size={17} color={theme.accent} />
+                </View>
+                <Text style={{ flex: 1, fontSize: 16, fontWeight: '700', color: theme.text }}>{agent.name}</Text>
+                {active && <Check size={18} color={theme.onAccentSurface} />}
               </View>
-              <Text style={{ fontSize: 13, color: isDark ? '#CBD5E1' : '#475569' }}>
+              <Text style={{ fontSize: 13, color: theme.muted }}>
                 {agent.description}
               </Text>
-              <Text style={{ fontSize: 12, color: '#64748B' }}>
+              <Text style={{ fontSize: 12, color: theme.muted }}>
                 Default model: {agent.defaultModelId} · Effort: {agent.defaultEffort}
               </Text>
             </Pressable>

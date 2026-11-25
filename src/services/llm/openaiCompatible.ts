@@ -1,3 +1,4 @@
+import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
 import { redactSecrets } from '../../utils/redact';
 import {
@@ -190,82 +191,72 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     throw new Error(`${PROVIDER_INFO[model.provider].name} returned an empty stream.`);
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
   const toolAcc = new Map<number, { id: string; name: string; rawArgs: string }>();
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? '';
+  for await (const raw of streamSseData(res.body)) {
+    let chunk: {
+      error?: { message?: string; code?: number | string; status?: number };
+      choices?: Array<{
+        finish_reason?: string;
+        delta?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+          reasoning?: string | null;
+          tool_calls?: Array<{
+            index: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+      }>;
+    };
+    try {
+      chunk = JSON.parse(raw) as typeof chunk;
+    } catch {
+      continue;
+    }
 
-    for (const line of lines) {
-      if (!line.startsWith('data:')) continue;
-      const raw = line.slice(5).trim();
-      if (!raw || raw === '[DONE]') continue;
-      let chunk: {
-        error?: { message?: string; code?: number | string; status?: number };
-        choices?: Array<{
-          delta?: {
-            content?: string | null;
-            reasoning_content?: string | null;
-            reasoning?: string | null;
-            tool_calls?: Array<{
-              index: number;
-              id?: string;
-              function?: { name?: string; arguments?: string };
-            }>;
-          };
-        }>;
-      };
-      try {
-        chunk = JSON.parse(raw) as typeof chunk;
-      } catch {
-        continue;
+    if (chunk.error) {
+      const code = Number(chunk.error.code ?? chunk.error.status ?? 0);
+      const msg = redactSecrets(chunk.error.message ?? 'Upstream streaming error', [apiKey]);
+      if (code === 429) {
+        throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
       }
+      if (code === 401 || code === 403) {
+        throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
+      }
+      if (code === 404 || code === 502 || code === 503 || code === 504) {
+        throw new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
+      }
+      throw new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
+    }
 
-      if (chunk.error) {
-        const code = Number(chunk.error.code ?? chunk.error.status ?? 0);
-        const msg = redactSecrets(chunk.error.message ?? 'Upstream streaming error', [apiKey]);
-        if (code === 429) {
-          throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
-        }
-        if (code === 401 || code === 403) {
-          throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
-        }
-        if (code === 404 || code === 502 || code === 503 || code === 504) {
-          throw new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
-        }
-        throw new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
-      }
+    const choice = chunk.choices?.[0];
+    const delta = choice?.delta ?? {};
 
-      const delta = chunk.choices?.[0]?.delta;
-      if (!delta) continue;
-
-      const reasoning = delta.reasoning_content ?? delta.reasoning;
-      if (reasoning) {
-        onEvent({ type: 'reasoning_delta', delta: reasoning });
+    const reasoning = delta.reasoning_content ?? delta.reasoning;
+    if (reasoning) {
+      onEvent({ type: 'reasoning_delta', delta: reasoning });
+    }
+    if (delta.content) {
+      onEvent({ type: 'text_delta', delta: delta.content });
+    }
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const idx = tc.index ?? 0;
+        const prev = toolAcc.get(idx) ?? {
+          id: tc.id ?? `call_${Date.now()}_${idx}`,
+          name: '',
+          rawArgs: '',
+        };
+        if (tc.id) prev.id = tc.id;
+        if (tc.function?.name) prev.name += tc.function.name;
+        if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
+        toolAcc.set(idx, prev);
       }
-      if (delta.content) {
-        onEvent({ type: 'text_delta', delta: delta.content });
-      }
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          const prev = toolAcc.get(idx) ?? {
-            id: tc.id ?? `call_${Date.now()}_${idx}`,
-            name: '',
-            rawArgs: '',
-          };
-          if (tc.id) prev.id = tc.id;
-          if (tc.function?.name) prev.name += tc.function.name;
-          if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
-          toolAcc.set(idx, prev);
-        }
-      }
+    }
+    if (choice?.finish_reason === 'length') {
+      throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
     }
   }
 

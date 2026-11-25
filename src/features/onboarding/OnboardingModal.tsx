@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowRight, CheckCircle2, KeyRound, MessageSquare, Server, Sparkles } from 'lucide-react';
+import { ArrowRight, CheckCircle2, KeyRound, MessageSquare, Server, Workflow } from 'lucide-react';
 import { PROVIDER_INFO } from '../../config/models';
 import { useHubStore } from '../../store/useHubStore';
 
@@ -46,25 +46,17 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className="w-full max-w-md rounded-[28px] border p-6 shadow-2xl space-y-6"
+        className="w-full max-w-md rounded-[18px] border p-6 shadow-2xl space-y-6"
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <span
-              style={{
-                backgroundColor: 'var(--m3-primary-container)',
-                color: 'var(--m3-on-primary-container)',
-              }}
-              className="w-9 h-9 rounded-2xl flex items-center justify-center"
-            >
-              <Sparkles className="w-5 h-5" />
-            </span>
+            <span className="workspace-mark"><Workflow aria-hidden="true" /></span>
             <div>
               <h1 className="font-display text-lg font-bold text-slate-900 dark:text-white">
                 Welcome to MCP Hub
               </h1>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Step {step} of 3 · Zero-backend mobile client
+                Step {step} of 3
               </p>
             </div>
           </div>
@@ -81,7 +73,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
               <KeyRound className="w-4 h-4 text-blue-600" />
-              <span>1. Add a free LLM API key</span>
+              <span>Add a provider API key</span>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               Your key is encrypted locally and talks directly to the provider over HTTPS. Or skip to try the built-in Sandbox Simulator.
@@ -151,7 +143,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
               <Server className="w-4 h-4 text-blue-600" />
-              <span>2. Connect an MCP server</span>
+              <span>Connect an MCP server</span>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               The built-in <strong>Workspace Sandbox</strong> MCP server is pre-connected with 4 tools (notes & calculator). You can add remote HTTPS MCP servers anytime in the Servers tab.
@@ -200,7 +192,7 @@ export function OnboardingModal({ onComplete }: OnboardingModalProps) {
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
               <MessageSquare className="w-4 h-4 text-blue-600" />
-              <span>3. Ready to chat with MCP tools</span>
+              <span>Start chatting with MCP tools</span>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               Write actions ask for your approval before running, you can switch agents or effort mid-chat, and all history stays locally on your device.

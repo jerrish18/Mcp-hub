@@ -98,19 +98,41 @@ export function getFallbackModelCandidates(
 export async function dispatchStreamCompletion(req: StreamCompletionRequest): Promise<void> {
   const { model } = req;
   recordProviderRequest(model.provider);
+  if (model.provider === 'demo') return streamDemoCompletion(req);
+
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  req.signal?.addEventListener('abort', forwardAbort, { once: true });
+  if (req.signal?.aborted) forwardAbort();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const resetIdleTimer = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 120_000);
+  };
+  resetIdleTimer();
+  const request = {
+    ...req,
+    signal: controller.signal,
+    onEvent: (event: LlmStreamEvent) => {
+      resetIdleTimer();
+      req.onEvent(event);
+    },
+  };
   try {
-    if (model.provider === 'demo') {
-      return await streamDemoCompletion(req);
-    }
-    if (model.provider === 'gemini') {
-      return await streamGeminiCompletion(req);
-    }
-    return await streamOpenAiCompatibleCompletion(req);
+    if (model.provider === 'gemini') return await streamGeminiCompletion(request);
+    return await streamOpenAiCompatibleCompletion(request);
   } catch (err) {
-    if (err instanceof RateLimitError) {
-      recordProvider429(model.provider);
-    }
+    if (req.signal?.aborted) throw err;
+    if (timedOut) throw new Error('The model stopped responding. Try again or choose a different model.', { cause: err });
+    if (err instanceof RateLimitError) recordProvider429(model.provider);
     throw err;
+  } finally {
+    clearTimeout(timer);
+    req.signal?.removeEventListener('abort', forwardAbort);
   }
 }
 
@@ -146,6 +168,7 @@ export async function streamWithRateLimitFallback(params: {
     const augmentedPrompt = buildEffortAugmentedPrompt(params.systemPrompt, params.effort, model);
 
     params.onModelAttemptStart?.(model, i, augmentedPrompt);
+    let startedResponse = false;
     try {
       await dispatchStreamCompletion({
         model,
@@ -158,7 +181,10 @@ export async function streamWithRateLimitFallback(params: {
         messages: params.messages,
         tools: params.tools,
         signal: params.signal,
-        onEvent: params.onEvent,
+        onEvent: (event) => {
+          if (event.type !== 'done') startedResponse = true;
+          params.onEvent(event);
+        },
         fetchFn: params.fetchFn,
       });
       params.onModelAttemptEnd?.('success');
@@ -166,7 +192,7 @@ export async function streamWithRateLimitFallback(params: {
     } catch (err) {
       params.onModelAttemptEnd?.(params.signal?.aborted ? 'cancelled' : 'error', err);
       const recoverable = err instanceof RateLimitError || err instanceof ModelUnavailableError;
-      if (recoverable && i + 1 < candidates.length) {
+      if (!startedResponse && recoverable && i + 1 < candidates.length) {
         const nextModel = candidates[i + 1];
         params.onModelFallback?.(model, nextModel, err.message);
         lastError = err;

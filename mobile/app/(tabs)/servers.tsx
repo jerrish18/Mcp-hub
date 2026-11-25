@@ -1,13 +1,13 @@
+import { WorkspaceCard, WorkspaceHeading, useWorkspaceTheme, workspaceBlue } from '../../ui/workspace';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useState } from 'react';
 import {
   Pressable,
-  SafeAreaView,
   ScrollView,
   Switch,
   Text,
   TextInput,
   View,
-  useColorScheme,
 } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import {
@@ -21,7 +21,7 @@ import { runExpoOAuthPkceFlow } from '../../services/auth/expoOAuth';
 import { loadMobilePrefs, saveMobilePrefs } from '../../services/storage/mobilePrefs';
 
 export default function MobileServersScreen() {
-  const isDark = useColorScheme() === 'dark';
+  const theme = useWorkspaceTheme();
   const params = useLocalSearchParams<{ addUrl?: string; addName?: string; addAuthType?: string }>();
   const [servers, setServers] = useState<McpServerConfig[]>([]);
   const [statusMsg, setStatusMsg] = useState('');
@@ -148,41 +148,31 @@ export default function MobileServersScreen() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: isDark ? '#020617' : '#F8FAFC' }}>
-      <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
-        <Text style={{ fontSize: 24, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A' }}>
-          MCP Servers
-        </Text>
+    <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1, backgroundColor: theme.background }}>
+      <ScrollView contentContainerStyle={{ padding: 20, gap: 12 }}>
+        <WorkspaceHeading title="MCP Servers" subtitle="Connect and manage remote MCP tools." />
         {statusMsg ? (
-          <Text style={{ color: '#2563EB', fontSize: 13 }}>{statusMsg}</Text>
+          <Text style={{ color: theme.accent, fontSize: 13 }}>{statusMsg}</Text>
         ) : null}
 
-        <View
-          style={{
-            padding: 14,
-            borderRadius: 16,
-            backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
-            borderWidth: 1,
-            borderColor: isDark ? '#1E293B' : '#E2E8F0',
-            gap: 8,
-          }}
-        >
-          <Text style={{ fontSize: 14, fontWeight: '600', color: isDark ? '#FFFFFF' : '#0F172A' }}>
+        <WorkspaceCard>
+          <Text style={{ fontSize: 14, fontWeight: '600', color: theme.text }}>
             Add Remote MCP Server
           </Text>
           <TextInput
             value={newName}
             onChangeText={setNewName}
-            placeholder="Server name (e.g. GitHub MCP)"
-            placeholderTextColor="#94A3B8"
+            placeholder="Server name"
+            accessibilityLabel="Server name"
+            placeholderTextColor={theme.muted}
             style={{
               minHeight: 44,
               paddingHorizontal: 12,
               borderRadius: 10,
-              backgroundColor: isDark ? '#020617' : '#F8FAFC',
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.background,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: isDark ? '#1E293B' : '#CBD5E1',
+              borderColor: theme.border,
             }}
           />
           <TextInput
@@ -190,40 +180,42 @@ export default function MobileServersScreen() {
             onChangeText={setNewUrl}
             autoCapitalize="none"
             placeholder="https://mcp.example.com/mcp"
-            placeholderTextColor="#94A3B8"
+            accessibilityLabel="Server URL"
+            placeholderTextColor={theme.muted}
             style={{
               minHeight: 44,
               paddingHorizontal: 12,
               borderRadius: 10,
-              backgroundColor: isDark ? '#020617' : '#F8FAFC',
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.background,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: isDark ? '#1E293B' : '#CBD5E1',
+              borderColor: theme.border,
             }}
           />
           <TextInput
             value={newBearer}
             onChangeText={setNewBearer}
             secureTextEntry
-            placeholder="Optional Bearer token"
-            placeholderTextColor="#94A3B8"
+            placeholder="Optional bearer token"
+            accessibilityLabel="Bearer token"
+            placeholderTextColor={theme.muted}
             style={{
               minHeight: 44,
               paddingHorizontal: 12,
               borderRadius: 10,
-              backgroundColor: isDark ? '#020617' : '#F8FAFC',
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.background,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: isDark ? '#1E293B' : '#CBD5E1',
+              borderColor: theme.border,
             }}
           />
           <Pressable
             onPress={() => void handleAddServer()}
-            style={{ minHeight: 44, justifyContent: 'center', backgroundColor: '#2563EB', borderRadius: 10, alignItems: 'center' }}
+            style={{ minHeight: 44, justifyContent: 'center', backgroundColor: workspaceBlue, borderRadius: 10, alignItems: 'center' }}
           >
             <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Add Server</Text>
           </Pressable>
-        </View>
+        </WorkspaceCard>
 
         {servers.map((srv) => (
           <View
@@ -231,30 +223,32 @@ export default function MobileServersScreen() {
             style={{
               padding: 16,
               borderRadius: 16,
-              backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
+              backgroundColor: theme.panel,
               borderWidth: 1,
-              borderColor: isDark ? '#1E293B' : '#E2E8F0',
+              borderColor: theme.border,
               gap: 8,
             }}
           >
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <Text style={{ fontSize: 16, fontWeight: '600', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+              <Text style={{ fontSize: 16, fontWeight: '600', color: theme.text, flex: 1 }}>
                 {srv.name}
               </Text>
               <Switch
+                accessibilityLabel={`Enable ${srv.name}`}
                 value={srv.enabled}
                 onValueChange={(v) => void handleToggleEnabled(srv, v)}
               />
             </View>
-            <Text style={{ fontSize: 12, color: '#64748B' }}>
-              {srv.url} · {srv.status} · {srv.tools.length} tools
+            <Text style={{ fontSize: 13, color: theme.muted }}>{srv.url}</Text>
+            <Text style={{ fontSize: 12, fontWeight: '600', color: theme.accent }}>
+              {srv.status} · {srv.tools.length} tools
               {srv.protocolVersion ? ` · ${srv.protocolVersion}` : ''}
               {typeof srv.latencyMs === 'number' && srv.status === 'connected' ? ` · ${srv.latencyMs}ms` : ''}
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
               <Pressable
                 onPress={() => void handleTest(srv)}
-                style={{ minHeight: 44, justifyContent: 'center', backgroundColor: '#2563EB', paddingHorizontal: 14, borderRadius: 10 }}
+                style={{ minHeight: 44, justifyContent: 'center', backgroundColor: workspaceBlue, paddingHorizontal: 14, borderRadius: 10 }}
               >
                 <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Test Connection</Text>
               </Pressable>

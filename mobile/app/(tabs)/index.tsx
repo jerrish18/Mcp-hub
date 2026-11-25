@@ -1,3 +1,5 @@
+import { WorkspaceHeading, useWorkspaceTheme, workspaceBlue } from '../../ui/workspace';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
@@ -5,12 +7,11 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   Text,
   TextInput,
   View,
-  useColorScheme,
 } from 'react-native';
+import { MessageSquare, Mic, MicOff, Plus } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams } from 'expo-router';
 import { getModelById } from '@core/config/models';
@@ -84,7 +85,6 @@ function buildHistoryFromMessages(msgs: ChatMessage[]): LlmConversationItem[] {
 }
 
 export default function MobileChatScreen() {
-  const isDark = useColorScheme() === 'dark';
   const params = useLocalSearchParams<{ sharedText?: string }>();
   const [agents, setAgents] = useState<AgentProfile[]>(BUILT_IN_AGENTS);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(BUILT_IN_AGENTS[0].id);
@@ -441,43 +441,34 @@ export default function MobileChatScreen() {
     }
   };
 
-  const bgSurface = isDark ? (settings.oledDark ? '#000000' : '#020617') : '#F8FAFC';
+  const theme = useWorkspaceTheme(Boolean(settings.oledDark));
+  const isDark = theme.dark;
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: bgSurface }}>
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: 14,
-          paddingVertical: 10,
-          borderBottomWidth: 1,
-          borderBottomColor: isDark ? '#1E293B' : '#E2E8F0',
-          gap: 8,
-        }}
-      >
-        <Pressable
-          onPress={() => void handleCycleAgent()}
-          style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
-        >
-          <Text style={{ fontWeight: '600', color: isDark ? '#F8FAFC' : '#0F172A' }}>{agent.name}</Text>
-        </Pressable>
-        <View style={{ flexDirection: 'row', gap: 6 }}>
-          <Pressable
-            onPress={() => void handleNewChat()}
-            style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: isDark ? '#1E293B' : '#E2E8F0' }}
-          >
-            <Text style={{ fontWeight: '600', color: isDark ? '#F8FAFC' : '#0F172A' }}>New</Text>
+    <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1, backgroundColor: theme.background }}>
+      <View style={{ paddingHorizontal: 18, paddingVertical: 12, gap: 10, borderBottomWidth: 1,
+        borderBottomColor: theme.border, backgroundColor: theme.panel }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <WorkspaceHeading title="Chat" />
+          <Pressable accessibilityRole="button" accessibilityLabel="New chat" onPress={() => void handleNewChat()}
+            style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11,
+              borderRadius: 10, backgroundColor: theme.accentSurface }}>
+            <Plus color={theme.onAccentSurface} size={16} />
+            <Text style={{ color: theme.onAccentSurface, fontWeight: '700' }}>New chat</Text>
           </Pressable>
-          <Pressable
-            onPress={() => {
-              const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
-              setEffort((e) => next[e]);
-            }}
-            style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#2563EB' }}
-          >
-            <Text style={{ fontWeight: '600', color: '#FFFFFF' }}>Effort: {effort}</Text>
+        </View>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Agent ${agent.name}, switch agent`}
+            onPress={() => void handleCycleAgent()} style={{ minHeight: 44, flex: 1, justifyContent: 'center',
+              borderRadius: 10, paddingHorizontal: 10, backgroundColor: theme.mutedPanel }}>
+            <Text numberOfLines={1} style={{ color: theme.text, fontWeight: '600' }}>{agent.name}</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" onPress={() => {
+            const next: Record<EffortLevel, EffortLevel> = { low: 'medium', medium: 'high', high: 'low' };
+            setEffort((value) => next[value]);
+          }} style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 10, borderRadius: 10,
+            backgroundColor: theme.mutedPanel }}>
+            <Text style={{ color: theme.text, fontWeight: '600' }}>Effort · {effort}</Text>
           </Pressable>
         </View>
       </View>
@@ -485,14 +476,25 @@ export default function MobileChatScreen() {
       <FlatList
         data={messages}
         keyExtractor={(m) => m.id}
-        contentContainerStyle={{ padding: 14, gap: 10 }}
+        contentContainerStyle={{ flexGrow: 1, padding: 18, gap: 12 }}
+        ListEmptyComponent={
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 24 }}>
+            <View style={{ backgroundColor: theme.accentSurface, padding: 12, borderRadius: 14 }}>
+              <MessageSquare color={theme.onAccentSurface} size={22} />
+            </View>
+            <Text style={{ color: theme.text, fontSize: 19, fontWeight: '700' }}>Start a conversation</Text>
+            <Text style={{ color: theme.muted, textAlign: 'center' }}>Send a message to {agent.name}.</Text>
+          </View>
+        }
         renderItem={({ item }) => (
           <View
             style={{
               alignSelf: item.role === 'user' ? 'flex-end' : 'flex-start',
-              backgroundColor: item.role === 'user' ? '#2563EB' : isDark ? '#0F172A' : '#FFFFFF',
+              backgroundColor: item.role === 'user' ? workspaceBlue : theme.panel,
               padding: 12,
-              borderRadius: 16,
+              borderWidth: item.role === 'user' ? 0 : 1,
+              borderColor: theme.border,
+              borderRadius: 14,
               maxWidth: '88%',
             }}
           >
@@ -508,7 +510,8 @@ export default function MobileChatScreen() {
         )}
       />
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={{ backgroundColor: theme.panel, borderTopWidth: 1, borderTopColor: theme.border }}>
         {voiceHint ? (
           <View style={{ paddingHorizontal: 14, paddingTop: 6 }}>
             <Text style={{ fontSize: 11, color: isDark ? '#93C5FD' : '#1D4ED8' }}>{voiceHint}</Text>
@@ -517,36 +520,37 @@ export default function MobileChatScreen() {
         <View style={{ flexDirection: 'row', padding: 12, gap: 8 }}>
           <TextInput
             ref={inputRef}
+            accessibilityLabel="Chat message"
             value={input}
             onChangeText={setInput}
             placeholder={isListening ? 'Listening...' : `Message ${agent.name}...`}
-            placeholderTextColor="#94A3B8"
+            placeholderTextColor={theme.muted}
             style={{
               flex: 1,
               minHeight: 44,
               paddingHorizontal: 14,
               borderRadius: 16,
-              backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.panel,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: isDark ? '#1E293B' : '#CBD5E1',
+              borderColor: theme.border,
             }}
           />
           <Pressable
             onPress={() => void handleToggleVoice()}
+            accessibilityRole="button"
+            accessibilityLabel={isListening ? 'Stop microphone' : 'Start microphone'}
             style={{
               minWidth: 44,
               minHeight: 44,
               borderRadius: 16,
-              backgroundColor: isListening ? '#DC2626' : isDark ? '#1E293B' : '#E2E8F0',
+              backgroundColor: isListening ? '#DC2626' : theme.mutedPanel,
               justifyContent: 'center',
               alignItems: 'center',
               paddingHorizontal: 12,
             }}
           >
-            <Text style={{ color: isListening ? '#FFFFFF' : isDark ? '#F8FAFC' : '#0F172A', fontWeight: '600', fontSize: 12 }}>
-              {isListening ? 'Stop Mic' : 'Mic'}
-            </Text>
+            {isListening ? <MicOff size={18} color="#ffffff" /> : <Mic size={18} color={theme.text} />}
           </Pressable>
           <Pressable
             onPress={running ? () => abortCtrl?.abort() : () => void handleSend()}
@@ -554,7 +558,7 @@ export default function MobileChatScreen() {
               minWidth: 64,
               minHeight: 44,
               borderRadius: 16,
-              backgroundColor: running ? '#DC2626' : '#2563EB',
+              backgroundColor: running ? '#b91c1c' : workspaceBlue,
               justifyContent: 'center',
               alignItems: 'center',
               paddingHorizontal: 14,
@@ -576,7 +580,7 @@ export default function MobileChatScreen() {
         >
           <View
             style={{
-              backgroundColor: isDark ? '#0F172A' : '#FFFFFF',
+              backgroundColor: theme.panel,
               borderRadius: 20,
               padding: 18,
               gap: 12,
@@ -584,7 +588,7 @@ export default function MobileChatScreen() {
               borderColor: isDark ? '#334155' : '#E2E8F0',
             }}
           >
-            <Text style={{ fontSize: 17, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A' }}>
+            <Text style={{ fontSize: 17, fontWeight: '700', color: theme.text }}>
               Approve Write Action
             </Text>
             <Text style={{ fontSize: 13, color: isDark ? '#CBD5E1' : '#334155' }}>
@@ -617,7 +621,7 @@ export default function MobileChatScreen() {
               </Pressable>
               <Pressable
                 onPress={() => resolveApproval('approve')}
-                style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#2563EB' }}
+                style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 10, backgroundColor: workspaceBlue }}
               >
                 <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Approve</Text>
               </Pressable>

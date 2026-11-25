@@ -2,7 +2,8 @@ import { mergeCanvasHistories, type CanvasHistory } from '../../utils/canvasArti
 import type { Conversation } from '../../types';
 
 const DB_NAME = 'mcphub_history_db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
+const CANVAS_WORKSPACE_STORE = 'canvas_workspace';
 const CANVAS_STORE_NAME = 'canvas_history';
 const LEGACY_STORE_NAME = 'conversations';
 const SCOPED_STORE_NAME = 'scoped_conversations';
@@ -39,6 +40,7 @@ function openDatabase(): Promise<IDBDatabase | null> {
       const req = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
+        if (!db.objectStoreNames.contains(CANVAS_WORKSPACE_STORE)) db.createObjectStore(CANVAS_WORKSPACE_STORE);
         if (!db.objectStoreNames.contains(CANVAS_STORE_NAME)) db.createObjectStore(CANVAS_STORE_NAME);
         if (!db.objectStoreNames.contains(LEGACY_STORE_NAME)) {
           const legacyStore = db.createObjectStore(LEGACY_STORE_NAME, { keyPath: 'id' });
@@ -52,6 +54,7 @@ function openDatabase(): Promise<IDBDatabase | null> {
       };
       req.onsuccess = () => {
         const db = req.result;
+        if (settled) { db.close(); return; }
         db.onversionchange = () => {
           db.close();
           dbPromise = null;
@@ -113,6 +116,42 @@ function sanitizeConversation(conv: Conversation): Conversation {
 }
 
 export const historyDb = {
+  async readCanvasRecord<T>(key: string): Promise<T | undefined> {
+    const db = await openDatabase();
+    const stored = db ? await new Promise<T | undefined>((resolve) => {
+      try {
+        const request = db.transaction(CANVAS_WORKSPACE_STORE).objectStore(CANVAS_WORKSPACE_STORE).get(key);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve(undefined);
+      } catch { resolve(undefined); }
+    }) : undefined;
+    if (stored !== undefined) return stored;
+    try { return JSON.parse(localStorage.getItem(key) ?? 'null') ?? undefined; }
+    catch { return undefined; }
+  },
+
+  async saveCanvasRecord<T>(key: string, value: T): Promise<boolean> {
+    const db = await openDatabase();
+    if (!db) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+        return true;
+      } catch { return false; }
+    }
+    const saved = await new Promise<boolean>((resolve) => {
+      try {
+        const tx = db.transaction(CANVAS_WORKSPACE_STORE, 'readwrite');
+        tx.objectStore(CANVAS_WORKSPACE_STORE).put(value, key);
+        tx.oncomplete = () => resolve(true);
+        tx.onabort = tx.onerror = () => resolve(false);
+      } catch { resolve(false); }
+    });
+    if (saved) {
+      try { localStorage.removeItem(key); } catch { /* Storage may be unavailable. */ }
+    }
+    return saved;
+  },
+
   async readCanvas(scope: string, artifactId: string): Promise<CanvasHistory | undefined> {
     const db = await openDatabase();
     const key = JSON.stringify([scope, artifactId]);

@@ -180,31 +180,47 @@ export function SettingsScreen() {
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
-      className="h-full overflow-y-auto p-4 sm:p-6"
+      className="workspace-scroll"
     >
       <motion.div
         variants={cardStaggerContainer}
         initial="initial"
         animate="animate"
-        className="max-w-3xl mx-auto space-y-5 pb-10"
+        className="workspace-content settings-content"
       >
-        <motion.div variants={cardStaggerItem}>
-          <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
+        <motion.div variants={cardStaggerItem} className="workspace-page-heading">
+          <div><h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
             Settings
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Account sign-in, Pixel Material You appearance, encrypted API keys & safety
-          </p>
+            Manage your account, appearance, AI providers, and workspace preferences.
+          </p></div>
         </motion.div>
 
+        <nav aria-label="Settings sections" className="settings-sections">
+          {[
+            ['account', 'Account'],
+            ['appearance', 'Appearance'],
+            ['providers', 'Provider keys'],
+            ['app-api', 'App API'],
+            ['models', 'Models'],
+            ['preferences', 'Agent preferences'],
+          ].map(([id, label]) => (
+            <button type="button" key={id} className="workspace-secondary"
+              onClick={() => document.getElementById(`settings-${id}`)?.scrollIntoView({ block: 'start' })}>
+              {label}
+            </button>
+          ))}
+        </nav>
+
         {/* Account & Sign-In Section */}
-        <motion.section
+        <motion.section id="settings-account"
           variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="rounded-[24px] border p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+          className="workspace-card border p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
         >
           <div className="flex items-center gap-3 min-w-0">
             {authUser?.photoURL ? (
@@ -303,19 +319,19 @@ export function SettingsScreen() {
         </motion.section>
 
         {/* Pixel Material You & Appearance Studio */}
-        <motion.section
+        <motion.section id="settings-appearance"
           variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="rounded-[24px] border p-5 space-y-4"
+          className="workspace-card border p-5 space-y-4"
         >
           <div className="flex items-center gap-2.5">
             <Palette style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
             <div>
               <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-                Pixel Material You
+                Appearance
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 Dynamic color palette & OLED dark surfaces
@@ -423,14 +439,14 @@ export function SettingsScreen() {
         </motion.section>
 
         {/* Provider API Keys */}
-        <motion.form
+        <motion.form id="settings-providers"
           variants={cardStaggerItem}
           onSubmit={handleSaveKeys}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="rounded-[24px] border p-5 space-y-4"
+          className="workspace-card border p-5 space-y-4"
         >
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -656,18 +672,18 @@ export function SettingsScreen() {
         </motion.form>
 
         {/* App API & External Agent Control */}
-        <motion.div variants={cardStaggerItem}>
+        <motion.div id="settings-app-api" variants={cardStaggerItem}>
           <AppApiKeySection />
         </motion.div>
 
         {/* Live Model Sync & Connectivity Test */}
-        <motion.section
+        <motion.section id="settings-models"
           variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="rounded-[24px] border p-5 space-y-4"
+          className="workspace-card border p-5 space-y-4"
         >
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -898,13 +914,13 @@ export function SettingsScreen() {
         </motion.section>
 
         {/* Agent Loop & Safety */}
-        <motion.section
+        <motion.section id="settings-preferences"
           variants={cardStaggerItem}
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="rounded-[24px] border p-5 space-y-4"
+          className="workspace-card border p-5 space-y-4"
         >
           <div className="flex items-center gap-2.5">
             <Shield style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />

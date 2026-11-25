@@ -193,3 +193,26 @@ test('export checks honor nested relative paths, case, and traversal', () => {
     'Missing local resource: ./style.css (from site/index.html)',
   ]);
 });
+
+test('preview keeps standards mode and defers nested classic scripts until the body exists', () => {
+  const spec: AppArtifactSpec = {
+    title: 'Nested project',
+    entryFile: 'site/index.html',
+    files: [
+      {
+        path: 'site/index.html', language: 'html',
+        content: '<!doctype html><html><head><link rel="stylesheet" href="./style.css"><script defer src="../js/app.js"></script></head><body><h1 id="title">Ready</h1></body></html>',
+      },
+      { path: 'site/style.css', language: 'css', content: 'h1 { color: blue; }' },
+      { path: 'style.css', language: 'css', content: 'body::after { content: "$&"; }' },
+      { path: 'js/app.js', language: 'javascript', content: 'document.getElementById("title").textContent = "$&";' },
+    ],
+  };
+  const preview = buildAppPreviewSrcDoc(spec);
+  assert.ok(preview.startsWith('<!doctype html>'));
+  assert.match(preview, /<style data-file="site\/style.css">\nh1 \{ color: blue; \}/);
+  assert.ok(preview.includes('content: "$&"'));
+  assert.ok(preview.indexOf('<h1 id="title">') < preview.indexOf('document.getElementById("title")'));
+  assert.ok(preview.includes('textContent = "$&"'));
+  assert.doesNotMatch(preview, /<script defer src=/i);
+});

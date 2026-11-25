@@ -433,16 +433,16 @@ export function ServersScreen() {
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
-      className="h-full overflow-y-auto p-4 sm:p-6"
+      className="workspace-scroll"
     >
-      <div className="max-w-4xl mx-auto space-y-5 pb-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="workspace-content">
+        <div className="workspace-page-heading">
           <div>
             <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
               MCP Servers
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400">
-              Remote Streamable HTTP & SSE servers · {servers.filter((s) => s.status === 'connected').length} connected
+              Connect and manage remote MCP tools · {servers.filter((server) => server.status === 'connected').length} connected
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -477,17 +477,17 @@ export function ServersScreen() {
           </div>
         </div>
 
-        {/* Pro Work MCP Standards Quick-Add Strip */}
+        {/* Quick connect Quick-Add Strip */}
         <section
           style={{
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="rounded-[24px] border p-4 space-y-3"
+          className="workspace-card border p-4 space-y-3"
         >
           <div>
             <h2 className="font-display text-sm font-bold text-slate-900 dark:text-white">
-              Pro Work MCP Standards
+              Quick connect
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
               1-tap templates prefilled with official endpoints and OAuth 2.1 / Bearer defaults
@@ -554,7 +554,7 @@ export function ServersScreen() {
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="rounded-[24px] border p-8 text-center space-y-3"
+            className="workspace-card border p-8 text-center space-y-3"
           >
             <Server className="w-8 h-8 text-slate-400 mx-auto" />
             <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white">
@@ -599,7 +599,7 @@ export function ServersScreen() {
                     backgroundColor: 'var(--m3-surface-container)',
                     borderColor: 'var(--m3-outline)',
                   }}
-                  className="rounded-[24px] border overflow-hidden"
+                  className="workspace-card border overflow-hidden"
                 >
                   <div className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <button

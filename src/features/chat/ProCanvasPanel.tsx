@@ -11,6 +11,7 @@ import {
   Download,
   Edit3,
   Eye,
+  ExternalLink,
   FileArchive,
   FileCode2,
   FileSpreadsheet,
@@ -30,6 +31,9 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
+import { useCanvasRecord } from './useCanvasRecord';
+import { CanvasPreviewFrame, type CanvasRuntimeLog } from './CanvasPreviewFrame';
+import { openCanvasPreviewInNewTab, type CanvasPreviewStatus } from '../../utils/canvasPreview';
 import { MermaidDiagramCard } from '../../ui/MermaidDiagramCard';
 import {
   buildAppPreviewSrcDoc,
@@ -78,7 +82,6 @@ export type CanvasArtifact =
       id: string;
       title: string;
       spec: AppArtifactSpec;
-      rawJson: string;
     }
   | {
       kind: 'dataset';
@@ -91,14 +94,28 @@ interface CanvasVersionEntry {
   id: string;
   label: string;
   timestamp: number;
-  serialized: string;
   snapshot: CanvasArtifact;
 }
 
 function serializeArtifactSnapshot(artifact: CanvasArtifact): string {
   if (artifact.kind === 'code') return artifact.code;
-  if (artifact.kind === 'dataset') return JSON.stringify(artifact.spec, null, 2);
-  return artifact.rawJson;
+  if (artifact.kind === 'document') return artifact.rawJson;
+  return JSON.stringify(artifact.spec, null, 2);
+}
+
+function matchesSnapshot(previous: CanvasArtifact | undefined, artifact: CanvasArtifact): boolean {
+  if (previous === artifact) return true;
+  if (!previous || previous.kind !== artifact.kind) return false;
+  if (artifact.kind === 'app' && previous.kind === 'app') {
+    const before = previous.spec;
+    const after = artifact.spec;
+    return before.title === after.title && before.framework === after.framework
+      && before.description === after.description && before.entryFile === after.entryFile
+      && before.files.length === after.files.length && before.files.every((file, index) =>
+        file.path === after.files[index].path && file.language === after.files[index].language
+        && file.content === after.files[index].content);
+  }
+  return serializeArtifactSnapshot(previous) === serializeArtifactSnapshot(artifact);
 }
 
 interface ProCanvasPanelProps {
@@ -109,6 +126,7 @@ interface ProCanvasPanelProps {
   githubConnected?: boolean;
   onRequestConnectGithub?: () => void;
   onChangeArtifact: (next: CanvasArtifact) => void;
+  onSaveDraft: () => void;
   onAskCanvasAction: (prompt: string, displayLabel: string) => void;
   onClose: () => void;
 }
@@ -319,6 +337,7 @@ export function ProCanvasPanel({
   githubConnected = false,
   onRequestConnectGithub,
   onChangeArtifact,
+  onSaveDraft,
   storageScope,
   onAskCanvasAction,
   onClose,
@@ -342,27 +361,13 @@ export function ProCanvasPanel({
   const [jsonError, setJsonError] = useState('');
   const [copied, setCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [canvasReady, setCanvasReady] = useState(false);
-  const [previewTimedOut, setPreviewTimedOut] = useState(false);
+  const [previewStatus, setPreviewStatus] = useState<CanvasPreviewStatus>('loading');
+  const [previewError, setPreviewError] = useState('');
   const [previewEpoch, setPreviewEpoch] = useState(0);
 
   // Version History & Selection Ask AI
-  const [versionsByArtifactId, setVersionsByArtifactId] = useState<
-    Record<string, CanvasVersionEntry[]>
-  >(() => {
-    try { return storageScope ? JSON.parse(localStorage.getItem(`mcphub_versions:${storageScope}`) ?? '{}') : {}; }
-    catch { return {}; }
-  });
-  useEffect(() => {
-    if (!storageScope) return;
-    const save = () => {
-      try { localStorage.setItem(`mcphub_versions:${storageScope}`, JSON.stringify(versionsByArtifactId)); }
-      catch { /* Current draft remains independently recoverable; export for durable backup. */ }
-    };
-    const timer = setTimeout(save, 800);
-    window.addEventListener('pagehide', save);
-    return () => { clearTimeout(timer); window.removeEventListener('pagehide', save); save(); };
-  }, [storageScope, versionsByArtifactId]);
+  const { value: versionsByArtifactId, loaded: versionsLoaded, failed: versionsSaveFailed, update: updateVersions } =
+    useCanvasRecord<Record<string, CanvasVersionEntry[]>>(storageScope ? `mcphub_versions:${storageScope}` : undefined);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareVersionId, setCompareVersionId] = useState<string | null>(null);
   const [selectedSnippet, setSelectedSnippet] = useState('');
@@ -380,10 +385,7 @@ export function ProCanvasPanel({
   const [dataValueCol, setDataValueCol] = useState(1);
   const [dataTransformExpr, setDataTransformExpr] = useState('');
 
-  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
   const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const frameHasRenderedRef = useRef(false);
-  const lastRenderedKeyRef = useRef<string | null>(null);
 
   const codeLanguage = artifact?.kind === 'code' ? artifact.language.toLowerCase() : '';
   const isHtmlPreview = codeLanguage === 'html' || codeLanguage === 'htm';
@@ -395,22 +397,20 @@ export function ProCanvasPanel({
       ? artifact.spec.files[Math.min(activeFileIdx, Math.max(0, artifact.spec.files.length - 1))]
       : undefined;
 
-  const appSrcDoc = useMemo(() => {
-    if (!artifact || artifact.kind !== 'app') return '';
-    return buildAppPreviewSrcDoc(artifact.spec, { includeRuntimeBridge: true });
-  }, [artifact]);
-
-  const singleHtmlSrcDoc = useMemo(() => {
-    if (!artifact || artifact.kind !== 'code' || !isHtmlPreview) return '';
-    return buildAppPreviewSrcDoc(
-      {
-        title: artifact.title,
-        entryFile: 'index.html',
-        files: [{ path: 'index.html', language: 'html', content: artifact.code }],
-      },
-      { includeRuntimeBridge: true }
-    );
+  const previewSpec = useMemo(() => {
+    if (artifact?.kind === 'app') return artifact.spec;
+    if (artifact?.kind !== 'code' || !isHtmlPreview) return;
+    return {
+      title: artifact.title,
+      entryFile: 'index.html',
+      files: [{ path: 'index.html', language: 'html', content: artifact.code }],
+    };
   }, [artifact, isHtmlPreview]);
+
+  const appPreviewHtml = useMemo(() => {
+    if (!open || tab !== 'preview' || !previewSpec) return '';
+    return buildAppPreviewSrcDoc(previewSpec);
+  }, [open, tab, previewSpec]);
 
   const datasetSandboxHtml = useMemo(() => {
     if (!artifact || artifact.kind !== 'dataset' || !dataSandboxOpen) return '';
@@ -422,51 +422,8 @@ export function ProCanvasPanel({
     });
   }, [artifact, dataSandboxOpen, dataLabelCol, dataValueCol, dataTransformExpr]);
 
-  const activePreviewHtml =
-    artifact?.kind === 'app'
-      ? appSrcDoc
-      : isHtmlPreview
-        ? singleHtmlSrcDoc
-        : artifact?.kind === 'dataset' && dataSandboxOpen
-          ? datasetSandboxHtml
-          : '';
-
-  const exportableHtml = useMemo(() => {
-    if (!artifact) return '';
-    if (artifact.kind === 'app') {
-      return buildAppPreviewSrcDoc(artifact.spec, { includeRuntimeBridge: false });
-    }
-    if (artifact.kind === 'code' && isHtmlPreview) {
-      return buildAppPreviewSrcDoc(
-        {
-          title: artifact.title,
-          entryFile: 'index.html',
-          files: [{ path: 'index.html', language: 'html', content: artifact.code }],
-        },
-        { includeRuntimeBridge: false }
-      );
-    }
-    return '';
-  }, [artifact, isHtmlPreview]);
-
-  const previewBlobUrl = useMemo(() => {
-    if (!previewTimedOut || !exportableHtml || typeof URL === 'undefined') return '';
-    return URL.createObjectURL(new Blob([exportableHtml], { type: 'text/html;charset=utf-8' }));
-  }, [previewTimedOut, exportableHtml]);
-
   useEffect(() => {
-    return () => {
-      if (previewBlobUrl) URL.revokeObjectURL(previewBlobUrl);
-    };
-  }, [previewBlobUrl]);
-
-  const isInteractivePreviewActive =
-    Boolean(open && artifact && tab === 'preview') &&
-    (artifact?.kind === 'app' ||
-      (artifact?.kind === 'code' && isHtmlPreview) ||
-      (artifact?.kind === 'dataset' && dataSandboxOpen));
-
-  useEffect(() => {
+    setTab('preview');
     setActiveFileIdx(0);
     setSlideIdx(0);
     setSheetIdx(0);
@@ -493,112 +450,57 @@ export function ProCanvasPanel({
         : 1
     );
     setDataTransformExpr('');
-    frameHasRenderedRef.current = false;
-    lastRenderedKeyRef.current = null;
-    setCanvasReady(false);
-    setPreviewTimedOut(false);
-    setPreviewEpoch((e) => e + 1);
     if (artifact) {
       setRepoName(suggestRepoSlug(artifact.title));
       setCommitMessage(`feat: add ${artifact.title}`);
     }
   }, [artifact?.id]);
 
-  // Record version snapshots cleanly when artifact content changes meaningfully
   useEffect(() => {
-    if (!artifact) return;
-    const serialized = serializeArtifactSnapshot(artifact);
-    setVersionsByArtifactId((prev) => {
-      const list = prev[artifact.id] ?? [];
-      if (list.length > 0 && list[list.length - 1].serialized === serialized) {
-        return prev;
-      }
-      const nextEntry: CanvasVersionEntry = {
-        id: `ver_${Date.now()}_${list.length + 1}`,
-        label: list.length === 0 ? 'Initial version' : `Edit v${list.length + 1}`,
-        timestamp: Date.now(),
-        serialized,
-        snapshot: artifact,
-      };
-      return {
-        ...prev,
-        [artifact.id]: [...list.slice(-11), nextEntry],
-      };
-    });
-  }, [artifact]);
-
-  useEffect(() => {
-    if (!isInteractivePreviewActive) {
-      frameHasRenderedRef.current = false;
-      lastRenderedKeyRef.current = null;
-      setCanvasReady(false);
-      setPreviewTimedOut(false);
-    }
-  }, [isInteractivePreviewActive]);
-
-  // Listen strictly to messages originating from our sandboxed preview iframe
-  useEffect(() => {
-    const handleMessage = (ev: MessageEvent) => {
-      if (!previewIframeRef.current || ev.source !== previewIframeRef.current.contentWindow) {
-        return;
-      }
-      const data = ev.data as {
-        type?: string;
-        source?: string;
-        level?: string;
-        message?: string;
-        timestamp?: number;
-      } | null;
-      if (!data) return;
-
-      if (data.type === 'mcphub-canvas-ready') {
-        frameHasRenderedRef.current = false;
-        setCanvasReady(true);
-        setPreviewTimedOut(false);
-        return;
-      }
-
-      if (data.source !== 'mcphub-canvas-runtime' || !data.message) return;
-      const level = data.level === 'warn' ? 'warn' : 'error';
-      setRuntimeLogs((prev) => [
-        ...prev.slice(-19),
-        { level, message: data.message!, timestamp: data.timestamp ?? Date.now() },
-      ]);
-      if (level === 'error') {
-        setConsoleOpen(true);
-      }
+    if (!artifact || artifact.kind === 'dataset' || !versionsLoaded) return;
+    const saveSnapshot = () => {
+      updateVersions((previous = {}) => {
+        const list = previous[artifact.id] ?? [];
+        const latest = list.at(-1)?.snapshot;
+        if (matchesSnapshot(latest, artifact)) return previous;
+        return {
+          ...previous,
+          [artifact.id]: [...list.slice(-11), {
+            id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2),
+            label: list.length ? 'Edited source' : 'Initial version',
+            timestamp: Date.now(),
+            snapshot: artifact,
+          }],
+        };
+      });
     };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
-  // Push updated HTML once per ready iframe epoch; remount loader cleanly when HTML updates later
-  useEffect(() => {
-    if (!isInteractivePreviewActive || !canvasReady || !activePreviewHtml) return;
-    const renderKey = `${previewEpoch}:${activePreviewHtml}`;
-    if (lastRenderedKeyRef.current === renderKey) return;
-    if (frameHasRenderedRef.current) {
-      frameHasRenderedRef.current = false;
-      setCanvasReady(false);
-      setPreviewEpoch((e) => e + 1);
-      return;
+    // Keep the initial snapshot immediately, then group edits made while typing.
+    if (!versionsByArtifactId?.[artifact.id]?.length) saveSnapshot();
+    else {
+      const timer = window.setTimeout(saveSnapshot, 650);
+      return () => window.clearTimeout(timer);
     }
-    frameHasRenderedRef.current = true;
-    lastRenderedKeyRef.current = renderKey;
-    previewIframeRef.current?.contentWindow?.postMessage(
-      { type: 'mcphub-canvas-render', html: activePreviewHtml },
-      '*'
-    );
-  }, [isInteractivePreviewActive, canvasReady, activePreviewHtml, previewEpoch]);
+  }, [artifact, versionsLoaded, updateVersions, versionsByArtifactId]);
 
-  // 3-second readiness watchdog for blocked/failed preview frames
-  useEffect(() => {
-    if (!isInteractivePreviewActive || canvasReady) return;
-    const timer = window.setTimeout(() => {
-      setPreviewTimedOut(true);
-    }, 3000);
-    return () => window.clearTimeout(timer);
-  }, [isInteractivePreviewActive, canvasReady, artifact?.id, previewEpoch]);
+  const onPreviewLoading = () => {
+    setPreviewStatus('loading');
+    setPreviewError('');
+    setRuntimeLogs([]);
+  };
+
+  const onPreviewLog = (entry: CanvasRuntimeLog) => {
+    setRuntimeLogs((previous) => [...previous.slice(-19), {
+      level: entry.level, message: entry.message, timestamp: Date.now(),
+    }]);
+    if (entry.blocking) setPreviewError((previous) => previous || entry.message);
+  };
+
+  const previewCallbacks = {
+    onLoading: onPreviewLoading,
+    onLoaded: () => setPreviewStatus('loaded'),
+    onFailed: () => setPreviewStatus('failed'),
+    onLog: onPreviewLog,
+  };
 
   const svgSrcDoc = useMemo(() => {
     if (!artifact || artifact.kind !== 'code' || !isSvgPreview) return '';
@@ -628,7 +530,7 @@ export function ProCanvasPanel({
       artifact.kind === 'code'
         ? artifact.code
         : artifact.kind === 'app'
-          ? activeAppFile?.content ?? artifact.rawJson
+          ? activeAppFile?.content ?? ''
           : artifact.kind === 'dataset'
             ? [
                 artifact.spec.columns.join(','),
@@ -697,14 +599,12 @@ export function ProCanvasPanel({
   };
 
   const handleSaveManualSnapshot = () => {
-    const serialized = serializeArtifactSnapshot(artifact);
-    setVersionsByArtifactId((prev) => {
+    updateVersions((prev = {}) => {
       const list = prev[artifact.id] ?? [];
       const nextEntry: CanvasVersionEntry = {
-        id: `ver_${Date.now()}_${list.length + 1}`,
+        id: crypto.randomUUID?.() ?? Math.random().toString(36).slice(2),
         label: `Checkpoint #${list.length + 1}`,
         timestamp: Date.now(),
-        serialized,
         snapshot: artifact,
       };
       return {
@@ -754,9 +654,10 @@ export function ProCanvasPanel({
     const nextSpec: AppArtifactSpec = { ...artifact.spec, files: nextFiles };
     setRuntimeLogs([]);
     onChangeArtifact({
-      ...artifact,
+      kind: 'app',
+      id: artifact.id,
+      title: artifact.title,
       spec: nextSpec,
-      rawJson: JSON.stringify(nextSpec, null, 2),
     });
   };
 
@@ -837,17 +738,19 @@ export function ProCanvasPanel({
     return <Code2 className="w-4 h-4" />;
   };
 
-  const artifactVersions = versionsByArtifactId[artifact.id] ?? [];
+  const artifactVersions = versionsByArtifactId?.[artifact.id] ?? [];
   const selectedCompareVersion =
     artifactVersions.find((v) => v.id === compareVersionId) ??
     (artifactVersions.length >= 2 ? artifactVersions[artifactVersions.length - 2] : artifactVersions[0]);
-  const currentSerialized = serializeArtifactSnapshot(artifact);
+  const currentSerialized = historyOpen ? serializeArtifactSnapshot(artifact) : '';
+  const previousSerialized = historyOpen && selectedCompareVersion
+    ? serializeArtifactSnapshot(selectedCompareVersion.snapshot) : '';
 
   const viewportWidthClass =
     viewport === 'mobile'
-      ? 'max-w-[390px] mx-auto shadow-sm'
+      ? 'w-full max-w-[390px] mx-auto shadow-sm'
       : viewport === 'tablet'
-        ? 'max-w-[768px] mx-auto shadow-sm'
+        ? 'w-full max-w-[768px] mx-auto shadow-sm'
         : 'w-full';
 
   const panelBody = (
@@ -857,8 +760,9 @@ export function ProCanvasPanel({
         backgroundColor: 'var(--m3-surface)',
         borderColor: 'var(--m3-outline)',
       }}
-      className="flex flex-col h-full w-full overflow-hidden"
+      className="canvas-workspace flex flex-col h-full w-full overflow-hidden"
     >
+      {versionsSaveFailed && <p role="alert" className="px-4 py-2 text-xs text-red-700 dark:text-red-300">Version history could not be saved. Download a copy to keep your changes.</p>}
       {/* Canvas Header */}
       <header
         style={{
@@ -893,7 +797,7 @@ export function ProCanvasPanel({
           </div>
         </div>
 
-        <div className="flex items-center justify-between sm:justify-end gap-1.5 w-full sm:w-auto shrink-0 flex-wrap">
+        <div className="canvas-header-actions flex items-center gap-1.5 w-full sm:w-auto shrink-0 flex-wrap">
           {artifact.kind !== 'dataset' && (
             <div
               style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
@@ -902,6 +806,7 @@ export function ProCanvasPanel({
               <button
                 type="button"
                 onClick={() => setTab('preview')}
+                aria-pressed={tab === 'preview'}
                 data-testid="canvas-tab-preview"
                 style={
                   tab === 'preview'
@@ -919,6 +824,7 @@ export function ProCanvasPanel({
               <button
                 type="button"
                 onClick={() => setTab('source')}
+                aria-pressed={tab === 'source'}
                 data-testid="canvas-tab-source"
                 style={
                   tab === 'source'
@@ -1066,7 +972,7 @@ export function ProCanvasPanel({
             type="button"
             onClick={onClose}
             aria-label="Close Canvas"
-            className="min-h-[34px] min-w-[34px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
+            className="canvas-close min-h-[34px] min-w-[34px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800"
           >
             <X className="w-4 h-4" />
           </button>
@@ -1150,11 +1056,12 @@ export function ProCanvasPanel({
                 <span className="text-slate-500 dark:text-slate-400">
                   Diff: {selectedCompareVersion.label} → Current
                 </span>
-                {selectedCompareVersion.serialized !== currentSerialized && (
+                {previousSerialized !== currentSerialized && (
                   <button
                     type="button"
                     data-testid="canvas-restore-version-btn"
                     onClick={() => {
+                      handleSaveManualSnapshot();
                       onChangeArtifact(selectedCompareVersion.snapshot);
                       setHistoryOpen(false);
                     }}
@@ -1170,7 +1077,7 @@ export function ProCanvasPanel({
                 )}
               </div>
               <pre className="max-h-28 overflow-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-2 text-[10px] font-mono leading-relaxed">
-                {computeLineDiff(selectedCompareVersion.serialized, currentSerialized, 60).map((d, di) => (
+                {computeLineDiff(previousSerialized, currentSerialized, 60).map((d, di) => (
                   <div
                     key={di}
                     className={
@@ -1246,7 +1153,7 @@ export function ProCanvasPanel({
           className="shrink-0 px-3.5 py-1.5 border-b flex items-center justify-between gap-2"
         >
           <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            Live Sandboxed Runtime
+            Preview viewport
           </span>
           <div className="inline-flex items-center gap-1">
             {(
@@ -1264,6 +1171,7 @@ export function ProCanvasPanel({
                   data-testid={`canvas-viewport-${id}`}
                   onClick={() => setViewport(id)}
                   aria-label={`${label} preview`}
+                  aria-pressed={active}
                   style={
                     active
                       ? {
@@ -1279,6 +1187,15 @@ export function ProCanvasPanel({
                 </button>
               );
             })}
+            <button
+              type="button"
+              aria-label="Open preview in new tab"
+              title="Open preview in new tab"
+              className="workspace-icon-button"
+              onClick={() => openCanvasPreviewInNewTab(appPreviewHtml)}
+            >
+              <ExternalLink aria-hidden="true" className="size-4" />
+            </button>
           </div>
         </div>
       )}
@@ -1570,15 +1487,20 @@ export function ProCanvasPanel({
                         className="w-full min-h-[36px] px-3 rounded-xl border font-mono text-xs text-slate-900 dark:text-white"
                       />
                     </label>
-                    <iframe
-                      key={`ds_${previewEpoch}`}
-                      ref={previewIframeRef}
+                    <CanvasPreviewFrame
+                      key={previewEpoch}
                       title={`${ds.title} Sandbox`}
-                      data-testid="canvas-dataset-iframe"
-                      sandbox={CANVAS_IFRAME_SANDBOX}
-                      src="/__canvas-preview"
+                      testId="canvas-dataset-iframe"
+                      html={datasetSandboxHtml}
                       className="w-full h-[260px] rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950"
+                      {...previewCallbacks}
                     />
+                    {previewStatus === 'loading' && <p role="status" className="text-xs">Loading chart…</p>}
+                    {previewStatus === 'failed' && (
+                      <button type="button" onClick={() => setPreviewEpoch((value) => value + 1)}
+                        className="text-xs font-semibold underline">Chart could not load. Retry preview</button>
+                    )}
+                    {previewError && <p role="alert" className="text-xs text-red-700 dark:text-red-300 break-words">{previewError}</p>}
                   </div>
                 )}
 
@@ -1690,6 +1612,7 @@ export function ProCanvasPanel({
                     ? activeAppFile?.content ?? ''
                     : artifact.rawJson
               }
+              onBlur={onSaveDraft}
               onSelect={handleSourceTextareaSelection}
               onKeyUp={handleSourceTextareaSelection}
               onMouseUp={handleSourceTextareaSelection}
@@ -1706,45 +1629,32 @@ export function ProCanvasPanel({
             />
           </div>
         ) : artifact.kind === 'app' || (artifact.kind === 'code' && isHtmlPreview) ? (
-          <div className="h-full flex flex-col min-h-[380px] gap-2">
-            {previewTimedOut && (
-              <div
-                data-testid="canvas-preview-timeout-banner"
-                className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900 dark:text-amber-200"
-              >
-                <span className="font-medium inline-flex items-center gap-1.5">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>Preview blocked or failed to load</span>
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleDownloadPrimary()}
-                    className="min-h-[32px] px-3 rounded-full border border-amber-400/70 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:opacity-90"
-                  >
-                    Download HTML
-                  </button>
-                  {previewBlobUrl && (
-                    <a
-                      href={previewBlobUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="min-h-[32px] px-3 rounded-full bg-blue-600 text-white text-xs font-semibold inline-flex items-center hover:opacity-90"
-                    >
-                      Open in new tab
-                    </a>
-                  )}
-                </div>
+          <div className="canvas-preview-stage">
+            {previewStatus === 'loading' && (
+              <div className="canvas-preview-feedback" role="status">
+                <RefreshCw aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+                <span>Loading website preview…</span>
               </div>
             )}
-            <iframe
-              key={`app_${previewEpoch}`}
-              ref={previewIframeRef}
+            {(previewStatus === 'failed' || previewError) && (
+              <div data-testid="canvas-preview-timeout-banner" className="canvas-preview-feedback" role="alert">
+                <AlertTriangle aria-hidden="true" className="size-4 shrink-0" />
+                <span className="min-w-0 flex-1 break-words">{previewError || 'Website preview could not finish loading.'}</span>
+                <button type="button" className="workspace-secondary" onClick={() => setPreviewEpoch((value) => value + 1)}>
+                  Retry
+                </button>
+                <button type="button" className="workspace-secondary" onClick={() => void handleDownloadPrimary()}>
+                  Download
+                </button>
+              </div>
+            )}
+            <CanvasPreviewFrame
+              key={previewEpoch}
               title={artifact.title}
-              data-testid={artifact.kind === 'app' ? 'canvas-app-iframe' : 'canvas-html-iframe'}
-              sandbox={CANVAS_IFRAME_SANDBOX}
-              src="/__canvas-preview"
-              className={`${viewportWidthClass} flex-1 min-h-[380px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white transition-all`}
+              testId={artifact.kind === 'app' ? 'canvas-app-iframe' : 'canvas-html-iframe'}
+              html={appPreviewHtml}
+              className={`canvas-site-frame ${viewportWidthClass}`}
+              {...previewCallbacks}
             />
           </div>
         ) : artifact.kind === 'code' ? (
@@ -2266,50 +2176,33 @@ export function ProCanvasPanel({
           className="shrink-0 border-t"
           data-testid="canvas-runtime-console"
         >
-          <button
-            type="button"
-            onClick={() => setConsoleOpen((v) => !v)}
-            className="w-full px-3.5 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-700 dark:text-rose-300 font-medium"
-          >
-            <span className="inline-flex items-center gap-1.5 tabular-nums">
-              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-              <span>
-                Runtime Console ({runtimeLogs.length} issue{runtimeLogs.length === 1 ? '' : 's'})
-              </span>
-            </span>
-            <span className="inline-flex items-center gap-2">
-              {!isRunning && (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  data-testid="canvas-fix-this-btn"
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    const errSummary = runtimeLogs.map((l) => `- ${l.level}: ${l.message}`).join('\n');
-                    onAskCanvasAction(
-                      `Fix these runtime errors detected in the Canvas preview and return an updated artifact:\n${errSummary}\n\n${buildCodeContextForPrompt()}`,
-                      `Fix ${runtimeLogs.length} runtime error(s) in ${artifact.title}`
-                    );
-                  }}
-                  onKeyDown={(ev) => {
-                    if (ev.key === 'Enter' || ev.key === ' ') {
-                      ev.preventDefault();
-                      ev.stopPropagation();
-                      const errSummary = runtimeLogs.map((l) => `- ${l.level}: ${l.message}`).join('\n');
-                      onAskCanvasAction(
-                        `Fix these runtime errors detected in the Canvas preview and return an updated artifact:\n${errSummary}\n\n${buildCodeContextForPrompt()}`,
-                        `Fix ${runtimeLogs.length} runtime error(s) in ${artifact.title}`
-                      );
-                    }
-                  }}
-                  className="px-2.5 py-1 rounded-full bg-rose-600 text-white text-[11px] font-semibold"
-                >
-                  Fix this
-                </span>
-              )}
-              <Terminal className="w-3.5 h-3.5" />
-            </span>
-          </button>
+          <div className="flex min-w-0 items-center justify-between gap-2 px-3.5 py-1">
+            <button
+              type="button"
+              aria-expanded={consoleOpen}
+              onClick={() => setConsoleOpen((value) => !value)}
+              className="flex min-h-8 items-center gap-1.5 text-left text-xs font-medium text-slate-700 dark:text-slate-200"
+            >
+              <Terminal aria-hidden="true" className="size-4 shrink-0" />
+              Runtime console ({runtimeLogs.length})
+            </button>
+            {!isRunning && (
+              <button
+                type="button"
+                data-testid="canvas-fix-this-btn"
+                onClick={() => {
+                  const summary = runtimeLogs.map((log) => `- ${log.level}: ${log.message}`).join('\n');
+                  onAskCanvasAction(
+                    `Fix these runtime issues detected in Canvas and return the updated artifact:\n${summary}\n\n${buildCodeContextForPrompt()}`,
+                    `Fix runtime issues in ${artifact.title}`
+                  );
+                }}
+                className="workspace-secondary"
+              >
+                Fix this
+              </button>
+            )}
+          </div>
           {consoleOpen && (
             <div className="max-h-28 overflow-y-auto px-3.5 pb-2 space-y-1 font-mono text-[11px]">
               {runtimeLogs.map((log, li) => (
@@ -2476,7 +2369,7 @@ export function ProCanvasPanel({
     <aside
       aria-label={artifact.title}
       style={{ borderColor: 'var(--m3-outline)' }}
-      className="fixed inset-0 z-50 flex flex-col min-h-0 lg:static lg:inset-auto lg:z-auto lg:w-[48%] xl:w-[50%] lg:shrink-0 lg:border-l"
+      className="canvas-pane fixed inset-0 z-50 flex flex-col min-h-0 xl:static xl:inset-auto xl:z-auto xl:w-[58%] xl:shrink-0 xl:border-l"
     >
       {panelBody}
     </aside>

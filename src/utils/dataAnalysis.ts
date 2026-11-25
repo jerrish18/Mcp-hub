@@ -1,3 +1,4 @@
+import { CANVAS_RUNTIME_BRIDGE } from './appArtifact';
 export interface ColumnSummary {
   name: string;
   kind: 'number' | 'string';
@@ -186,6 +187,7 @@ export function buildDatasetSandboxPreviewHtml(params: {
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>${spec.title.replace(/</g, '&lt;')}</title>
+${CANVAS_RUNTIME_BRIDGE}
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #0f172a; color: #e2e8f0; }
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 14px; padding: 14px; margin-bottom: 12px; }

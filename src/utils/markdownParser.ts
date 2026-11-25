@@ -165,15 +165,14 @@ export function parseMarkdownBlocks(content: string): MarkdownBlock[] {
     if (fenceOpen) {
       const marker = fenceOpen[1];
       const fenceChar = marker[0];
-      const fenceLen = marker.length;
+      const closeFence = new RegExp(`^${fenceChar}{${marker.length},}\\s*$`);
       const language = fenceOpen[2] || 'text';
       const codeLines: string[] = [];
       i++;
       let closed = false;
       while (i < lines.length) {
         const curTrimmed = lines[i].trim();
-        const closeRe = new RegExp(`^${fenceChar}{${fenceLen},}\\s*$`);
-        if (closeRe.test(curTrimmed)) {
+        if (closeFence.test(curTrimmed)) {
           closed = true;
           i++;
           break;

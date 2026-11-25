@@ -310,7 +310,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Pro Canvas & Document Export state
   const [canvasOpen, setCanvasOpen] = useState(false);
   const canvasScope = getAccountScope(authUser);
-  const { artifact: canvasArtifact, change: setCanvasArtifact, saveFailed: canvasSaveFailed } = useCanvasDraft(canvasScope, activeConversationId);
+  const {
+    artifact: canvasArtifact, change: setCanvasArtifact, saveFailed: canvasSaveFailed,
+    loaded: canvasDraftLoaded, flush: saveCanvasDraft,
+  } = useCanvasDraft(canvasScope, activeConversationId);
   const [githubConnectOpen, setGithubConnectOpen] = useState(false);
   const [exportingKey, setExportingKey] = useState<string | null>(null);
 
@@ -878,40 +881,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
   };
 
-  const handleOpenInCanvas = (payload: MarkdownCanvasRequest) => {
-    const id = `canvas_${Date.now()}`;
-    if (payload.kind === 'code') {
-      setCanvasArtifact({
-        kind: 'code',
-        id,
-        title: payload.title,
-        language: payload.language,
-        code: payload.code,
-      });
-    } else if (payload.kind === 'app') {
-      setCanvasArtifact({
-        kind: 'app',
-        id,
-        title: payload.title,
-        spec: payload.spec,
-        rawJson: payload.rawJson,
-      });
-    } else if (payload.kind === 'dataset') {
-      setCanvasArtifact({
-        kind: 'dataset',
-        id,
-        title: payload.title,
-        spec: payload.spec,
-      });
-    } else {
-      setCanvasArtifact({
-        kind: 'document',
-        id,
-        title: payload.title,
-        spec: payload.spec,
-        rawJson: payload.rawJson,
-      });
-    }
+  const handleOpenInCanvas = (payload: MarkdownCanvasRequest, messageId: string, block: number) => {
+    const id = JSON.stringify([messageId, block]);
+    if (canvasArtifact?.id !== id) setCanvasArtifact({ ...payload, id });
     setCanvasOpen(true);
     triggerHaptic(settings.hapticsEnabled, 'light');
   };
@@ -938,6 +910,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   const handleToggleHeaderCanvas = () => {
     if (canvasArtifact) {
+      saveCanvasDraft();
       setCanvasOpen((v) => !v);
       return;
     }
@@ -979,7 +952,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
-      className="flex h-full min-h-0"
+      className="chat-workspace flex h-full min-h-0"
       onDragOver={(e) => {
         e.preventDefault();
         setIsDragging(true);
@@ -1001,7 +974,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className={`${canvasOpen || settings.chatLayout === 'focus' ? 'hidden' : 'hidden lg:flex'} w-72 shrink-0 flex-col border-r p-4`}
+        className={`${canvasOpen || settings.chatLayout === 'focus' ? 'hidden' : 'hidden xl:flex'} chat-history shrink-0 flex-col border-r`}
       >
         <div className="mb-3">
           <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
@@ -1040,7 +1013,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             backgroundColor: 'var(--m3-surface-container)',
             borderColor: 'var(--m3-outline)',
           }}
-          className="shrink-0 px-3 sm:px-6 py-2 border-b space-y-2 pt-safe"
+          className="chat-toolbar shrink-0 px-3 sm:px-5 py-2.5 border-b space-y-2"
         >
           {/* Row 1: Primary Model Picker | Separate Agent Picker | History + New Chat */}
           <div className="flex items-center justify-between gap-2">
@@ -1101,7 +1074,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 type="button"
                 onClick={() => setHistoryOpen(true)}
                 aria-label="Open chat history"
-                className={`${settings.chatLayout === 'focus' || canvasOpen ? '' : 'lg:hidden'} min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors`}
+                className={`${settings.chatLayout === 'focus' || canvasOpen ? '' : 'xl:hidden'} min-h-[40px] min-w-[40px] rounded-full flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors`}
               >
                 <History className="w-5 h-5" />
               </button>
@@ -1263,57 +1236,58 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               )}
 
               {activeChatMode === 'professional' && (
-                <>
-                  <button
-                    type="button"
-                    data-testid="pro-plan-toggle"
-                    onClick={() => {
-                      triggerHaptic(settings.hapticsEnabled, 'light');
-                      setPlanMode((v) => !v);
-                    }}
-                    aria-pressed={planMode}
-                    title="Plan-then-execute: draft editable steps before running Pro tasks"
-                    style={
-                      planMode
-                        ? {
-                            backgroundColor: 'var(--m3-primary-container)',
-                            color: 'var(--m3-on-primary-container)',
-                            borderColor: 'var(--m3-primary)',
-                          }
-                        : {
-                            backgroundColor: 'var(--m3-surface-container-high)',
-                            borderColor: 'var(--m3-outline)',
-                          }
-                    }
-                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-                  >
-                    <ListChecks className="w-3.5 h-3.5" />
-                    <span>Plan</span>
-                  </button>
+                <button
+                  type="button"
+                  data-testid="pro-plan-toggle"
+                  onClick={() => {
+                    triggerHaptic(settings.hapticsEnabled, 'light');
+                    setPlanMode((v) => !v);
+                  }}
+                  aria-pressed={planMode}
+                  title="Plan-then-execute: draft editable steps before running Pro tasks"
+                  style={
+                    planMode
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  <ListChecks className="w-3.5 h-3.5" />
+                  <span>Plan</span>
+                </button>
+              )}
 
-                  <button
-                    type="button"
-                    data-testid="pro-canvas-toggle-btn"
-                    onClick={handleToggleHeaderCanvas}
-                    aria-pressed={canvasOpen}
-                    style={
-                      canvasOpen
-                        ? {
-                            backgroundColor: 'var(--m3-primary-container)',
-                            color: 'var(--m3-on-primary-container)',
-                            borderColor: 'var(--m3-primary)',
-                          }
-                        : {
-                            backgroundColor: 'var(--m3-surface-container-high)',
-                            borderColor: 'var(--m3-outline)',
-                          }
-                    }
-                    className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
-                  >
-                    <PanelRight className="w-3.5 h-3.5" />
-                    <span>Canvas</span>
-                  </button>
-                </>
+              {(activeChatMode === 'professional' || canvasArtifact) && (
+                <button
+                  type="button"
+                  data-testid="pro-canvas-toggle-btn"
+                  disabled={!canvasDraftLoaded}
+                  onClick={handleToggleHeaderCanvas}
+                  aria-pressed={canvasOpen}
+                  style={
+                    canvasOpen
+                      ? {
+                          backgroundColor: 'var(--m3-primary-container)',
+                          color: 'var(--m3-on-primary-container)',
+                          borderColor: 'var(--m3-primary)',
+                        }
+                      : {
+                          backgroundColor: 'var(--m3-surface-container-high)',
+                          borderColor: 'var(--m3-outline)',
+                        }
+                  }
+                  className="min-h-[32px] px-2.5 rounded-full border text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 whitespace-nowrap shrink-0 hover:opacity-90"
+                >
+                  <PanelRight className="w-3.5 h-3.5" />
+                  <span>Canvas</span>
+                </button>
               )}
 
               {/* Active Project Workspace Pill */}
@@ -1522,7 +1496,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         {/* Scrollable Editorial Message Stream */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 sm:px-6 py-5 space-y-6">
           {(!activeConv || activeConv.messages.length === 0) && (
-            <div className="max-w-xl mx-auto py-8 sm:py-14 text-center space-y-6">
+            <div className="chat-empty max-w-xl mx-auto py-8 sm:py-12 text-center space-y-6">
               <div
                 style={{
                   backgroundColor: 'var(--m3-primary-container)',
@@ -1590,7 +1564,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </div>
               )}
 
-              <div className="flex flex-col gap-2 text-left w-full min-w-0">
+              <div className="chat-starter-grid text-left w-full min-w-0">
                 {starterPrompts.map((item) => (
                   <button
                     key={item.label}
@@ -1844,6 +1818,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                     >
                       <MarkdownRenderer
                         content={msg.content}
+                        isStreaming={msg.isStreaming}
                         a2uiEnabled={resolvedA2uiMode !== 'off'}
                         a2uiWidgetState={msg.a2uiWidgetState}
                         onUpdateA2uiWidgetState={(patch) => updateMessageA2uiState(msg.id, patch)}
@@ -1857,7 +1832,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                         onOpenInteractiveQuiz={() =>
                           openQuizFromText(activeConv?.title || 'Practice Quiz', msg.content)
                         }
-                        onOpenInCanvas={handleOpenInCanvas}
+                        onOpenInCanvas={(payload, block) => handleOpenInCanvas(payload, msg.id, block)}
                       />
 
                       {msg.citations && msg.citations.length > 0 && (
@@ -2606,7 +2581,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 backgroundColor: 'var(--m3-surface-container-high)',
                 borderColor: 'var(--m3-outline)',
               }}
-              className="rounded-[26px] border px-3 pt-2.5 pb-2 shadow-xs space-y-2"
+              className="chat-composer border px-3.5 pt-3 pb-2.5 space-y-2"
             >
               {uploadError && (
                 <div className="text-xs text-rose-600 dark:text-rose-400 px-1">{uploadError}</div>
@@ -2902,10 +2877,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         )}
         onRequestConnectGithub={() => setGithubConnectOpen(true)}
         onChangeArtifact={setCanvasArtifact}
+        onSaveDraft={saveCanvasDraft}
         onAskCanvasAction={(promptText, label) => {
           void handleQuickPrompt(promptText, label);
         }}
-        onClose={() => setCanvasOpen(false)}
+        onClose={() => { saveCanvasDraft(); setCanvasOpen(false); }}
       />
 
       <QuickConnectSheet

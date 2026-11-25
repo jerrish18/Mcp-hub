@@ -1,20 +1,19 @@
+import { WorkspaceCard, WorkspaceHeading, useWorkspaceTheme, workspaceBlue } from '../../ui/workspace';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useEffect, useState } from 'react';
 import {
   Pressable,
-  SafeAreaView,
   ScrollView,
   Switch,
   Text,
   TextInput,
   View,
-  useColorScheme,
 } from 'react-native';
 import { syncLiveProviderModels } from '@core/services/llm/provider';
 import { loadProviderKeys, saveProviderKeys } from '@core/services/storage/secureStorage';
 import { loadMobilePrefs, saveMobilePrefs } from '../../services/storage/mobilePrefs';
 
 export default function MobileSettingsScreen() {
-  const isDark = useColorScheme() === 'dark';
   const [gemini, setGemini] = useState('');
   const [groq, setGroq] = useState('');
   const [openrouter, setOpenrouter] = useState('');
@@ -37,9 +36,8 @@ export default function MobileSettingsScreen() {
     });
   }, []);
 
-  const bgSurface = isDark ? (oledBlack ? '#000000' : '#020617') : '#F8FAFC';
-  const bgCard = isDark ? (oledBlack ? '#0A0B0E' : '#0F172A') : '#FFFFFF';
-  const border = isDark ? '#1E293B' : '#E2E8F0';
+  const theme = useWorkspaceTheme(oledBlack);
+  const isDark = theme.dark;
 
   const handleSave = async () => {
     await saveProviderKeys({
@@ -78,31 +76,20 @@ export default function MobileSettingsScreen() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: bgSurface }}>
-      <ScrollView contentContainerStyle={{ padding: 16, gap: 14 }}>
-        <Text style={{ fontSize: 24, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A' }}>
-          Settings
-        </Text>
+    <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1, backgroundColor: theme.background }}>
+      <ScrollView contentContainerStyle={{ padding: 20, gap: 14 }}>
+        <WorkspaceHeading title="Settings" subtitle="Manage security, appearance, and provider keys." />
 
-        <View
-          style={{
-            padding: 14,
-            borderRadius: 16,
-            backgroundColor: bgCard,
-            borderWidth: 1,
-            borderColor: border,
-            gap: 12,
-          }}
-        >
-          <Text style={{ fontSize: 15, fontWeight: '600', color: isDark ? '#FFFFFF' : '#0F172A' }}>
+        <WorkspaceCard oledDark={oledBlack}>
+          <Text style={{ fontSize: 15, fontWeight: '600', color: theme.text }}>
             Appearance & Security
           </Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 14, fontWeight: '500', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+              <Text style={{ fontSize: 14, fontWeight: '500', color: theme.text }}>
                 OLED Pure Black Dark Mode
               </Text>
-              <Text style={{ fontSize: 12, color: '#64748B' }}>
+              <Text style={{ fontSize: 12, color: theme.muted }}>
                 True #000000 surface for OLED displays
               </Text>
             </View>
@@ -110,10 +97,10 @@ export default function MobileSettingsScreen() {
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 14, fontWeight: '500', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+              <Text style={{ fontSize: 14, fontWeight: '500', color: theme.text }}>
                 Biometric App Lock
               </Text>
-              <Text style={{ fontSize: 12, color: '#64748B' }}>
+              <Text style={{ fontSize: 12, color: theme.muted }}>
                 Require biometrics on cold start and after 15s in background
               </Text>
             </View>
@@ -124,10 +111,10 @@ export default function MobileSettingsScreen() {
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 14, fontWeight: '500', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+              <Text style={{ fontSize: 14, fontWeight: '500', color: theme.text }}>
                 Confirm before write actions
               </Text>
-              <Text style={{ fontSize: 12, color: '#64748B' }}>
+              <Text style={{ fontSize: 12, color: theme.muted }}>
                 Prompt before running non-read-only MCP tools
               </Text>
             </View>
@@ -136,63 +123,66 @@ export default function MobileSettingsScreen() {
               onValueChange={(v) => void toggleSetting('confirmBeforeWrite', v)}
             />
           </View>
-        </View>
+        </WorkspaceCard>
 
-        <View style={{ gap: 10 }}>
-          <Text style={{ fontSize: 15, fontWeight: '600', color: isDark ? '#FFFFFF' : '#0F172A' }}>
-            Provider API Keys (Keychain / Keystore)
+        <WorkspaceCard oledDark={oledBlack}>
+          <Text style={{ fontSize: 15, fontWeight: '600', color: theme.text }}>
+            Provider API keys
           </Text>
           <TextInput
             value={gemini}
             onChangeText={setGemini}
             secureTextEntry
-            placeholder="Google Gemini API Key"
-            placeholderTextColor="#94A3B8"
+            placeholder="Google Gemini API key"
+            accessibilityLabel="Google Gemini API key"
+            placeholderTextColor={theme.muted}
             style={{
               minHeight: 44,
               paddingHorizontal: 12,
               borderRadius: 12,
-              backgroundColor: bgCard,
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.panel,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: border,
+              borderColor: theme.border,
             }}
           />
           <TextInput
             value={groq}
             onChangeText={setGroq}
             secureTextEntry
-            placeholder="Groq API Key"
-            placeholderTextColor="#94A3B8"
+            placeholder="Groq API key"
+            accessibilityLabel="Groq API key"
+            placeholderTextColor={theme.muted}
             style={{
               minHeight: 44,
               paddingHorizontal: 12,
               borderRadius: 12,
-              backgroundColor: bgCard,
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.panel,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: border,
+              borderColor: theme.border,
             }}
           />
           <TextInput
             value={openrouter}
             onChangeText={setOpenrouter}
             secureTextEntry
-            placeholder="OpenRouter API Key"
-            placeholderTextColor="#94A3B8"
+            placeholder="OpenRouter API key"
+            accessibilityLabel="OpenRouter API key"
+            placeholderTextColor={theme.muted}
             style={{
               minHeight: 44,
               paddingHorizontal: 12,
               borderRadius: 12,
-              backgroundColor: bgCard,
-              color: isDark ? '#FFFFFF' : '#0F172A',
+              backgroundColor: theme.panel,
+              color: theme.text,
               borderWidth: 1,
-              borderColor: border,
+              borderColor: theme.border,
             }}
           />
           <Pressable
             onPress={() => void handleSave()}
-            style={{ minHeight: 46, justifyContent: 'center', backgroundColor: '#2563EB', borderRadius: 12, alignItems: 'center' }}
+            style={{ minHeight: 46, justifyContent: 'center', backgroundColor: workspaceBlue, borderRadius: 12, alignItems: 'center' }}
           >
             <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>
               {saved ? 'Saved to Keychain / Keystore' : 'Save Encrypted Keys'}
@@ -203,11 +193,11 @@ export default function MobileSettingsScreen() {
             style={{
               minHeight: 44,
               justifyContent: 'center',
-              borderColor: border,
+              borderColor: theme.border,
               borderWidth: 1,
               borderRadius: 12,
               alignItems: 'center',
-              backgroundColor: bgCard,
+              backgroundColor: theme.panel,
             }}
           >
             <Text style={{ color: isDark ? '#E2E8F0' : '#0F172A', fontWeight: '600' }}>
@@ -217,7 +207,7 @@ export default function MobileSettingsScreen() {
           {syncNotice ? (
             <Text style={{ fontSize: 12, color: isDark ? '#CBD5E1' : '#334155' }}>{syncNotice}</Text>
           ) : null}
-        </View>
+        </WorkspaceCard>
       </ScrollView>
     </SafeAreaView>
   );

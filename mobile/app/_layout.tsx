@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, type AppStateStatus, Pressable, Text, View, useColorScheme } from 'react-native';
+import { AppState, type AppStateStatus, ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { Fingerprint } from 'lucide-react-native';
+import { useWorkspaceTheme, workspaceBlue } from '../ui/workspace';
 import * as Linking from 'expo-linking';
 import { Stack, useRouter } from 'expo-router';
 import * as LocalAuthentication from 'expo-local-authentication';
@@ -14,7 +16,7 @@ setSecureStorageAdapter(expoSecureStorageAdapter);
 const BIOMETRIC_GRACE_MS = 15_000;
 
 export default function RootLayout() {
-  const scheme = useColorScheme();
+  const theme = useWorkspaceTheme();
   const router = useRouter();
   const incomingUrl = Linking.useURL();
   const [ready, setReady] = useState(false);
@@ -134,11 +136,12 @@ export default function RootLayout() {
           flex: 1,
           justifyContent: 'center',
           alignItems: 'center',
-          backgroundColor: scheme === 'dark' ? '#020617' : '#F8FAFC',
+          backgroundColor: theme.background,
         }}
       >
-        <Text style={{ color: scheme === 'dark' ? '#CBD5E1' : '#475569' }}>
-          Loading MCP Hub...
+        <ActivityIndicator color={theme.accent} size="large" />
+        <Text style={{ color: theme.muted, marginTop: 10 }}>
+          Loading MCP Hub…
         </Text>
       </View>
     );
@@ -152,15 +155,18 @@ export default function RootLayout() {
           justifyContent: 'center',
           alignItems: 'center',
           padding: 24,
-          backgroundColor: scheme === 'dark' ? '#020617' : '#F8FAFC',
+          backgroundColor: theme.background,
         }}
       >
+        <View style={{ padding: 13, backgroundColor: theme.accentSurface, borderRadius: 14, marginBottom: 14 }}>
+          <Fingerprint size={28} color={theme.onAccentSurface} />
+        </View>
         <Text
           style={{
-            fontSize: 22,
+            fontSize: 28,
             fontWeight: '700',
             marginBottom: 8,
-            color: scheme === 'dark' ? '#FFFFFF' : '#0F172A',
+            color: theme.text,
           }}
         >
           MCP Hub Locked
@@ -170,7 +176,7 @@ export default function RootLayout() {
             fontSize: 13,
             textAlign: 'center',
             marginBottom: 18,
-            color: scheme === 'dark' ? '#94A3B8' : '#475569',
+            color: theme.muted,
           }}
         >
           Verify your biometrics or device passcode to unlock encrypted API keys and MCP tools.
@@ -182,7 +188,8 @@ export default function RootLayout() {
         ) : null}
         <Pressable
           onPress={() => void handleUnlock()}
-          style={{ backgroundColor: '#2563EB', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 14 }}
+          accessibilityRole="button"
+          style={{ backgroundColor: workspaceBlue, paddingHorizontal: 24, paddingVertical: 14, borderRadius: 14 }}
         >
           <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Unlock with Biometrics</Text>
         </Pressable>
@@ -194,7 +201,7 @@ export default function RootLayout() {
     <Stack
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: scheme === 'dark' ? '#020617' : '#F8FAFC' },
+        contentStyle: { backgroundColor: theme.background },
       }}
     >
       <Stack.Screen name="(tabs)" />

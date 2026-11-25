@@ -231,16 +231,16 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
-      className="h-full overflow-y-auto p-4 sm:p-6"
+      className="workspace-scroll"
     >
-      <div className="max-w-4xl mx-auto space-y-5 pb-8">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="workspace-content">
+        <div className="workspace-page-heading">
           <div>
             <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
               Agents
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400">
-              Tailored personas with default chat modes, study templates & granular MCP tool scopes
+              Create assistants with tailored instructions and tool access.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -339,7 +339,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="rounded-[24px] border p-8 text-center text-sm text-slate-500 dark:text-slate-400"
+            className="workspace-card border p-8 text-center text-sm text-slate-500 dark:text-slate-400"
           >
             No agents match your search or filter.
           </div>
@@ -348,7 +348,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
             variants={cardStaggerContainer}
             initial="initial"
             animate="animate"
-            className="grid grid-cols-1 md:grid-cols-2 gap-3.5"
+            className="grid grid-cols-1 xl:grid-cols-2 gap-4"
           >
             {filteredAgents.map((agent) => {
               const Icon = AGENT_ICONS[agent.icon] ?? Bot;
@@ -375,7 +375,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                     backgroundColor: 'var(--m3-surface-container)',
                     borderColor: 'var(--m3-outline)',
                   }}
-                  className="rounded-[24px] border p-4 flex flex-col justify-between gap-4"
+                  className="workspace-card border p-4 flex flex-col justify-between gap-4"
                 >
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-2.5">

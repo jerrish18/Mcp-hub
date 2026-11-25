@@ -1,3 +1,4 @@
+import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
 import { redactSecrets } from '../../utils/redact';
 import {
@@ -275,105 +276,94 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     throw new Error('Gemini API returned an empty response stream.');
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
   const collectedCalls: LlmToolCall[] = [];
   const collectedCitations = new Map<string, GroundingCitation>();
   let pendingThoughtSignature: string | undefined;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  for await (const raw of streamSseData(res.body)) {
+    let chunk: {
+      error?: { message?: string; code?: number; status?: string };
+      candidates?: Array<{
+        finishReason?: string;
+        content?: {
+          parts?: Array<{
+            text?: string;
+            thought?: boolean;
+            thoughtSignature?: string;
+            thought_signature?: string;
+            functionCall?: { name: string; args?: Record<string, unknown> };
+          }>;
+        };
+        groundingMetadata?: {
+          groundingChunks?: Array<{
+            web?: { uri?: string; title?: string };
+          }>;
+        };
+      }>;
+    };
+    try {
+      chunk = JSON.parse(raw) as typeof chunk;
+    } catch {
+      continue;
+    }
 
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? '';
-
-    for (const line of lines) {
-      if (!line.startsWith('data:')) continue;
-      const raw = line.slice(5).trim();
-      if (!raw || raw === '[DONE]') continue;
-      let chunk: {
-        error?: { message?: string; code?: number; status?: string };
-        candidates?: Array<{
-          content?: {
-            parts?: Array<{
-              text?: string;
-              thought?: boolean;
-              thoughtSignature?: string;
-              thought_signature?: string;
-              functionCall?: { name: string; args?: Record<string, unknown> };
-            }>;
-          };
-          groundingMetadata?: {
-            groundingChunks?: Array<{
-              web?: { uri?: string; title?: string };
-            }>;
-          };
-        }>;
-      };
-      try {
-        chunk = JSON.parse(raw) as typeof chunk;
-      } catch {
-        continue;
+    if (chunk.error) {
+      const code = Number(chunk.error.code ?? 0);
+      const msg = redactSecrets(chunk.error.message ?? 'Gemini streaming error', [apiKey]);
+      if (code === 429) {
+        throw new RateLimitError(`Gemini rate limit (429): ${msg}`);
       }
-
-      if (chunk.error) {
-        const code = Number(chunk.error.code ?? 0);
-        const msg = redactSecrets(chunk.error.message ?? 'Gemini streaming error', [apiKey]);
-        if (code === 429) {
-          throw new RateLimitError(`Gemini rate limit (429): ${msg}`);
-        }
-        if (code === 401 || code === 403) {
-          throw new ProviderAuthError(`Gemini auth failed (${code}): ${msg}`, code);
-        }
-        if (code === 404 || code === 502 || code === 503 || code === 504 || chunk.error.status === 'UNAVAILABLE') {
-          throw new ModelUnavailableError(`${model.label} unavailable (${code || 503}): ${msg}`, code || 503);
-        }
-        throw new Error(`Gemini stream error: ${msg}`);
+      if (code === 401 || code === 403) {
+        throw new ProviderAuthError(`Gemini auth failed (${code}): ${msg}`, code);
       }
+      if (code === 404 || code === 502 || code === 503 || code === 504 || chunk.error.status === 'UNAVAILABLE') {
+        throw new ModelUnavailableError(`${model.label} unavailable (${code || 503}): ${msg}`, code || 503);
+      }
+      throw new Error(`Gemini stream error: ${msg}`);
+    }
 
-      const candidate = chunk.candidates?.[0];
-      const parts = candidate?.content?.parts ?? [];
-      for (const part of parts) {
-        const partSig = part.thoughtSignature ?? part.thought_signature;
-        if (part.thought && part.text) {
-          onEvent({ type: 'reasoning_delta', delta: part.text });
-        } else if (part.text) {
-          onEvent({ type: 'text_delta', delta: part.text });
-        }
-        if (partSig && !part.functionCall) {
-          const firstUnsigned = collectedCalls.find((c) => !c.thoughtSignature);
-          if (firstUnsigned) {
-            firstUnsigned.thoughtSignature = partSig;
-          } else {
-            pendingThoughtSignature = partSig;
-          }
-        }
-        if (part.functionCall) {
-          const argsObj = part.functionCall.args ?? {};
-          const sig = partSig ?? pendingThoughtSignature;
-          pendingThoughtSignature = undefined;
-          collectedCalls.push({
-            id: `call_${Date.now()}_${collectedCalls.length}`,
-            name: part.functionCall.name,
-            rawArguments: JSON.stringify(argsObj),
-            parsedArguments: argsObj,
-            ...(sig ? { thoughtSignature: sig } : {}),
-          });
+    const candidate = chunk.candidates?.[0];
+    const parts = candidate?.content?.parts ?? [];
+    for (const part of parts) {
+      const partSig = part.thoughtSignature ?? part.thought_signature;
+      if (part.thought && part.text) {
+        onEvent({ type: 'reasoning_delta', delta: part.text });
+      } else if (part.text) {
+        onEvent({ type: 'text_delta', delta: part.text });
+      }
+      if (partSig && !part.functionCall) {
+        const firstUnsigned = collectedCalls.find((c) => !c.thoughtSignature);
+        if (firstUnsigned) {
+          firstUnsigned.thoughtSignature = partSig;
+        } else {
+          pendingThoughtSignature = partSig;
         }
       }
-
-      const groundingChunks = candidate?.groundingMetadata?.groundingChunks ?? [];
-      for (const gc of groundingChunks) {
-        if (gc.web?.uri) {
-          collectedCitations.set(gc.web.uri, {
-            title: gc.web.title || gc.web.uri,
-            url: gc.web.uri,
-          });
-        }
+      if (part.functionCall) {
+        const argsObj = part.functionCall.args ?? {};
+        const sig = partSig ?? pendingThoughtSignature;
+        pendingThoughtSignature = undefined;
+        collectedCalls.push({
+          id: `call_${Date.now()}_${collectedCalls.length}`,
+          name: part.functionCall.name,
+          rawArguments: JSON.stringify(argsObj),
+          parsedArguments: argsObj,
+          ...(sig ? { thoughtSignature: sig } : {}),
+        });
       }
+    }
+
+    const groundingChunks = candidate?.groundingMetadata?.groundingChunks ?? [];
+    for (const gc of groundingChunks) {
+      if (gc.web?.uri) {
+        collectedCitations.set(gc.web.uri, {
+          title: gc.web.title || gc.web.uri,
+          url: gc.web.uri,
+        });
+      }
+    }
+    if (candidate?.finishReason === 'MAX_TOKENS') {
+      throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
     }
   }
 

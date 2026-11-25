@@ -11,11 +11,16 @@ export const CANVAS_SCRIPT_ORIGINS = [
 ] as const;
 
 export function openCanvasPreviewInNewTab(html: string): void {
-  window.open(
-    `${CANVAS_PREVIEW_PATH}?standalone=1#${encodeURIComponent(html)}`,
-    '_blank',
-    'noopener,noreferrer'
-  );
+  const id = Array.from(crypto.getRandomValues(new Uint8Array(18)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const channel = new BroadcastChannel(`mcphub-preview:${id}`);
+  const timer = window.setTimeout(() => channel.close(), 20000);
+  channel.onmessage = (event) => {
+    if (event.data?.type !== 'ready') return;
+    channel.postMessage({ type: 'render', html });
+    window.clearTimeout(timer);
+    channel.close();
+  };
+  window.open(`${CANVAS_PREVIEW_PATH}?standalone=1#${id}`, '_blank', 'noopener,noreferrer');
 }
 
 export type CanvasPreviewStatus = 'loading' | 'loaded' | 'failed';

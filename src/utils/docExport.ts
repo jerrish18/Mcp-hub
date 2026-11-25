@@ -1,21 +1,5 @@
-import {
-  AlignmentType,
-  BorderStyle,
-  Document,
-  HeadingLevel,
-  Packer,
-  Paragraph,
-  ShadingType,
-  Table,
-  TableCell,
-  TableRow,
-  TextRun,
-  WidthType,
-} from 'docx';
-import ExcelJS from 'exceljs';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
-import PptxGenJS from 'pptxgenjs';
+import type { Paragraph as DocxParagraph, Table as DocxTable } from 'docx';
+import type PptxGenJS from 'pptxgenjs';
 import { parseMarkdownBlocks } from './markdownParser';
 
 export type DocFormat = 'pptx' | 'docx' | 'xlsx' | 'pdf';
@@ -470,7 +454,8 @@ export function markdownToDocSpec(
  * native typography, KPI cards, native tables, and speaker notes.
  */
 export async function buildPptxBlob(spec: PptxSpec): Promise<Blob> {
-  const pptx = new PptxGenJS();
+  const { default: PowerPoint } = await import('pptxgenjs');
+  const pptx = new PowerPoint();
   pptx.layout = 'LAYOUT_WIDE'; // 13.33 x 7.5 in
   pptx.author = spec.author ?? 'MCP Hub Pro Studio';
   pptx.title = spec.title;
@@ -819,25 +804,30 @@ function parseBoldSegments(text: string): Array<{ text: string; bold: boolean }>
   return segments.length > 0 ? segments : [{ text, bold: false }];
 }
 
-function buildDocxRuns(text: string, size = 22, color?: string): TextRun[] {
-  return parseBoldSegments(text).map(
-    (seg) =>
-      new TextRun({
-        text: seg.text,
-        bold: seg.bold,
-        size,
-        ...(color ? { color } : {}),
-      })
-  );
-}
-
 /**
  * Generates a real Microsoft Word .docx binary with styled headings, callouts,
  * inline bold runs, KPI summary strips, bullet lists, and formatted tables.
  */
 export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
+  const {
+    AlignmentType, BorderStyle, Document, HeadingLevel, Packer, Paragraph,
+    ShadingType, Table, TableCell, TableRow, TextRun, WidthType,
+  } = await import('docx');
+
+  function buildDocxRuns(text: string, size = 22, color?: string) {
+    return parseBoldSegments(text).map(
+      (seg) =>
+        new TextRun({
+          text: seg.text,
+          bold: seg.bold,
+          size,
+          ...(color ? { color } : {}),
+        })
+    );
+  }
+
   const accent = normalizeHexColor(spec.themeColor, '0B57D0');
-  const children: Array<Paragraph | Table> = [
+  const children: Array<DocxParagraph | DocxTable> = [
     new Paragraph({
       text: spec.title,
       heading: HeadingLevel.TITLE,
@@ -992,6 +982,7 @@ export async function buildDocxBlob(spec: DocxSpec): Promise<Blob> {
  * Generates a multi-sheet Microsoft Excel .xlsx workbook using ExcelJS with styled headers & auto-sized widths.
  */
 export async function buildXlsxBlob(spec: XlsxSpec): Promise<Blob> {
+  const { default: ExcelJS } = await import('exceljs');
   const wb = new ExcelJS.Workbook();
   wb.title = spec.title;
   wb.creator = 'MCP Hub Pro Studio';
@@ -1041,7 +1032,8 @@ function hexToRgbTuple(hex?: string): [number, number, number] {
  * Generates an executive-grade, cleanly typeset PDF document using jsPDF + jspdf-autotable,
  * with KPI metric strips, bold lead-in rendering, callout cards, repeating table headers, and page footers.
  */
-export function buildPdfBlob(spec: PdfSpec): Blob {
+export async function buildPdfBlob(spec: PdfSpec): Promise<Blob> {
+  const [{ jsPDF }, { default: autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();

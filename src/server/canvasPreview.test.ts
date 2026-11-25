@@ -10,6 +10,10 @@ import {
 
 test('buildCanvasPreviewCsp includes unsafe-inline, frame-ancestors self, and allowed CDNs', () => {
   const csp = buildCanvasPreviewCsp();
+  const sandbox = csp.split('; ').find((part) => part.startsWith('sandbox '));
+  assert.ok(sandbox?.includes('allow-scripts'));
+  assert.ok(sandbox);
+  assert.ok(!sandbox.includes('allow-same-origin'));
   assert.ok(csp.includes("default-src 'none'"));
   assert.ok(csp.includes("'unsafe-inline'"));
   assert.ok(csp.includes("'unsafe-eval'"));
@@ -40,6 +44,10 @@ test('handleCanvasPreviewRequest serves loader HTML with isolated CSP, Referrer-
     assert.ok(html.includes('mcphub-canvas-ready'));
     assert.ok(html.includes('mcphub-canvas-render'));
     assert.equal(html, renderCanvasPreviewLoaderHtml());
+
+    const standalone = await fetch(`http://127.0.0.1:${addr.port}/__canvas-preview?standalone=1`);
+    assert.equal(standalone.headers.get('content-security-policy'), buildCanvasPreviewCsp(true));
+    assert.match(await standalone.text(), /BroadcastChannel/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

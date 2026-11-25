@@ -110,100 +110,51 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
-      className="h-full overflow-y-auto p-4 sm:p-6"
+      className="workspace-scroll"
     >
       <motion.div
         variants={cardStaggerContainer}
         initial="initial"
         animate="animate"
-        className="max-w-6xl mx-auto space-y-6 pb-8"
+        className="workspace-content dashboard-content"
       >
-        {/* Hero Workspace Action Header */}
-        <motion.section
-          variants={cardStaggerItem}
-          style={{
-            backgroundColor: 'var(--m3-surface-container)',
-            borderColor: 'var(--m3-outline)',
-          }}
-          className="rounded-[28px] border p-5 sm:p-6 space-y-5"
-        >
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="space-y-1">
-              <h1 className="font-display text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white tracking-tight text-balance">
-                MCP Hub Workspace
-              </h1>
-              <p className="text-sm text-slate-600 dark:text-slate-300">
-                Direct HTTPS orchestration across your connected MCP servers and free-tier cloud models
-              </p>
-            </div>
-            <div className="flex items-center gap-2 shrink-0 flex-wrap">
-              <button
-                type="button"
-                onClick={() => setAppApiSheetOpen(true)}
-                data-testid="dashboard-app-api-btn"
-                aria-label="App API Keys & External Control"
-                style={{
-                  backgroundColor: 'var(--m3-surface-container-high)',
-                  borderColor: 'var(--m3-outline)',
-                }}
-                className="min-h-[46px] px-4 rounded-full border text-sm font-semibold text-slate-900 dark:text-white inline-flex items-center justify-center gap-2 shrink-0 whitespace-nowrap transition-transform active:scale-[0.98]"
-              >
-                <Terminal className="w-4 h-4" />
-                <span>App API</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
+        <motion.section variants={cardStaggerItem} className="dashboard-hero">
+          <div className="dashboard-hero-pattern" aria-hidden="true" />
+          <div className="dashboard-hero-content">
+            <div className="dashboard-hero-heading">
+              <div>
+                <h1>Your AI workspace</h1>
+                <p>Work with AI agents, connect MCP tools, and build in Canvas.</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => setAppApiSheetOpen(true)}
+                  data-testid="dashboard-app-api-btn" aria-label="App API Keys & External Control" className="dashboard-hero-secondary">
+                  <Terminal aria-hidden="true" className="size-4" />
+                  App API
+                </button>
+                <button type="button" onClick={() => {
                   startNewConversation(activeAgent?.id);
                   onNavigateTab('chat');
-                }}
-                style={{
-                  backgroundColor: 'var(--m3-primary)',
-                  color: 'var(--m3-on-primary)',
-                }}
-                className="min-h-[46px] px-5 rounded-full text-sm font-semibold inline-flex items-center justify-center gap-2 shrink-0 whitespace-nowrap transition-transform active:scale-[0.98]"
-              >
-                <MessageSquarePlus className="w-4 h-4" />
-                <span>New Chat</span>
-              </button>
+                }} className="dashboard-hero-primary">
+                  <MessageSquarePlus aria-hidden="true" className="size-4" />
+                  New Chat
+                </button>
+              </div>
             </div>
+            <form onSubmit={handleQuickLaunch} className="dashboard-quick-launch">
+              <input type="text" value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)}
+                placeholder="Ask an agent to research, analyze, or build something"
+                aria-label="Quick launch prompt" />
+              <button type="submit" aria-label="Run in Chat" className="dashboard-hero-primary">
+                <span className="hidden sm:inline">Run in Chat</span>
+                <ArrowRight aria-hidden="true" className="size-4" />
+              </button>
+            </form>
           </div>
-
-          <form onSubmit={handleQuickLaunch} className="flex flex-col sm:flex-row gap-2.5">
-            <input
-              type="text"
-              value={quickPrompt}
-              onChange={(e) => setQuickPrompt(e.target.value)}
-              placeholder="Ask an agent to search YouTube, check GitHub issues, or query notes..."
-              aria-label="Quick launch prompt"
-              style={{
-                backgroundColor: 'var(--m3-surface)',
-                borderColor: 'var(--m3-outline)',
-              }}
-              className="flex-1 min-h-[48px] px-4 rounded-2xl border text-sm text-slate-900 dark:text-white placeholder:text-slate-500 dark:placeholder:text-slate-400"
-            />
-            <button
-              type="submit"
-              style={{
-                backgroundColor: 'var(--m3-primary-container)',
-                color: 'var(--m3-on-primary-container)',
-              }}
-              className="min-h-[48px] px-5 rounded-2xl text-sm font-semibold inline-flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap transition-transform active:scale-[0.98]"
-            >
-              <span>Run in Chat</span>
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          </form>
-        </motion.section>
-
-        <motion.section variants={cardStaggerItem} className="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
-          <h2 className="font-semibold">Model usage</h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">Estimated prompt tokens and recorded run latency, not provider billing or answer quality.</p>
-          {!usage.length ? <p className="text-sm">Complete a chat to see your usage.</p> : <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr><th>Model</th><th>Runs</th><th>Est. tokens</th><th>Avg. latency</th><th>Errors</th></tr></thead><tbody>{usage.map(row => <tr key={row.modelId}><td className="py-2 pr-2">{getModelById(row.modelId, dynamicModels)?.label ?? row.modelId}</td><td>{row.runs}</td><td>{row.promptTokens.toLocaleString()}</td><td>{(row.averageMs / 1000).toFixed(2)}s</td><td>{row.errors}</td></tr>)}</tbody></table></div>}
         </motion.section>
 
         {/* 4-Column Real Data KPI Strip */}
-        <motion.section variants={cardStaggerItem} className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <motion.section variants={cardStaggerItem} className="dashboard-card-grid">
           <button
             type="button"
             onClick={() => onNavigateTab('servers')}
@@ -211,7 +162,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="rounded-[24px] border p-4 text-left transition-transform hover:-translate-y-0.5 active:scale-[0.99]"
+            className="workspace-card dashboard-stat rounded-2xl border p-4 text-left"
           >
             <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
               <span>Connected Servers</span>
@@ -232,7 +183,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="rounded-[24px] border p-4 text-left transition-transform hover:-translate-y-0.5 active:scale-[0.99]"
+            className="workspace-card dashboard-stat rounded-2xl border p-4 text-left"
           >
             <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
               <span>Active MCP Tools</span>
@@ -253,7 +204,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="rounded-[24px] border p-4 text-left transition-transform hover:-translate-y-0.5 active:scale-[0.99]"
+            className="workspace-card dashboard-stat rounded-2xl border p-4 text-left"
           >
             <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
               <span>LLM API Keys</span>
@@ -263,7 +214,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               {configuredProviderCount} / 3
             </div>
             <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              {configuredProviderCount > 0 ? 'Cloud models active' : 'Using Simulator'}
+              {configuredProviderCount > 0 ? 'Cloud models active' : 'Set up providers in Settings'}
             </div>
           </button>
 
@@ -274,7 +225,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               backgroundColor: 'var(--m3-surface-container)',
               borderColor: 'var(--m3-outline)',
             }}
-            className="rounded-[24px] border p-4 text-left transition-transform hover:-translate-y-0.5 active:scale-[0.99]"
+            className="workspace-card dashboard-stat rounded-2xl border p-4 text-left"
           >
             <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
               <span>Saved Chats</span>
@@ -284,7 +235,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               {conversations.length}
             </div>
             <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Local encrypted history
+              Conversation history
             </div>
           </button>
         </motion.section>
@@ -294,40 +245,40 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="font-display text-lg font-bold text-slate-900 dark:text-white">
-                Pro Document & Canvas Studio
+                Create in Canvas
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Create real PowerPoint decks, Excel workbooks, Word/PDF briefs & live HTML apps
+                Start with a document, workbook, presentation, or website.
               </p>
             </div>
           </div>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="dashboard-card-grid">
             {[
               {
                 id: 'pptx',
-                title: 'Presentation (.PPTX)',
+                title: 'Presentation',
                 subtitle: 'Slides, KPI cards & speaker notes',
                 Icon: Presentation,
                 prompt: 'Build a 4-slide Q3 executive presentation deck (.pptx) with KPI metrics and rollout milestones.',
               },
               {
                 id: 'xlsx',
-                title: 'Excel Workbook (.XLSX)',
+                title: 'Excel workbook',
                 subtitle: 'Multi-sheet models & budgets',
                 Icon: FileSpreadsheet,
                 prompt: 'Generate a multi-sheet Q3 financial Excel workbook (.xlsx) with P&L and department budgets.',
               },
               {
                 id: 'pdf_docx',
-                title: 'PDF & Word Report',
+                title: 'PDF or Word report',
                 subtitle: 'Executive briefs & tables',
                 Icon: FileText,
                 prompt: 'Write an Enterprise MCP Implementation Brief report as a downloadable PDF.',
               },
               {
                 id: 'canvas',
-                title: 'App IDE & GitHub Sync',
-                subtitle: 'Multi-file HTML/JS/CSS & push',
+                title: 'Website project',
+                subtitle: 'Live preview, source & GitHub sync',
                 Icon: Code2,
                 prompt: 'Build a multi-file web app Sprint Taskboard (index.html, styles.css, app.js) ready for Pro Canvas IDE and GitHub sync.',
               },
@@ -341,7 +292,7 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
                   backgroundColor: 'var(--m3-surface-container)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="rounded-[24px] border p-4 text-left space-y-2 transition-transform hover:-translate-y-0.5 active:scale-[0.99]"
+                className="workspace-card dashboard-studio-card rounded-2xl border p-4 text-left space-y-2"
               >
                 <span
                   style={{
@@ -636,6 +587,11 @@ export function DashboardScreen({ onNavigateTab }: DashboardScreenProps) {
               })}
             </div>
           </div>
+        </motion.section>
+        <motion.section variants={cardStaggerItem} className="workspace-card border p-5 space-y-3">
+          <h2 className="font-semibold">Model usage</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400">Estimated prompt tokens and recorded response times.</p>
+          {!usage.length ? <p className="text-sm">Complete a chat to see your usage.</p> : <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr><th>Model</th><th>Runs</th><th>Est. tokens</th><th>Avg. latency</th><th>Errors</th></tr></thead><tbody>{usage.map(row => <tr key={row.modelId}><td className="py-2 pr-2">{getModelById(row.modelId, dynamicModels)?.label ?? row.modelId}</td><td>{row.runs}</td><td>{row.promptTokens.toLocaleString()}</td><td>{(row.averageMs / 1000).toFixed(2)}s</td><td>{row.errors}</td></tr>)}</tbody></table></div>}
         </motion.section>
       </motion.div>
 
