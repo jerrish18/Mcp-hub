@@ -35,4 +35,8 @@ jobs:
             echo "::notice::Live test skipped. Missing environment secret MODELSCOPE_API_TOKEN."
             exit 0
           fi
-          node --import tsx scripts/probe-modelscope.ts
+          failed=0
+          for model in zai-org/GLM-4.7-Flash zai-org/GLM-5.2 deepseek-ai/DeepSeek-V4.1-Flash-1017; do
+            npm run --silent verify:free-route -- modelscope "$model" || failed=1
+          done
+          exit "$failed"
