@@ -27,7 +27,7 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts
-      - name: Diagnose ModelScope inference access
+      - name: Verify ModelScope free routes
         env:
           MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
         run: |
@@ -35,46 +35,8 @@ jobs:
             echo "::notice::Live test skipped. Missing environment secret MODELSCOPE_API_TOKEN."
             exit 0
           fi
-          node --import tsx --input-type=module <<'EOF_PROBE'
-          import { catalogRoute, providerEndpoint, readProviderCatalog } from './src/services/llm/freeRegistry.ts';
-
-          const provider = 'modelscope';
-          const modelscope = process.env.MODELSCOPE_API_TOKEN.trim();
-          const model = 'zai-org/GLM-4.7-Flash';
-          const row = (await readProviderCatalog(provider, { modelscope }, fetch, AbortSignal.timeout(15_000)))
-            .find((entry) => entry.id === model);
-          if (!row || !catalogRoute(provider, row)) throw new Error('The test model is no longer in the eligible catalog.');
-
-          const issues = [
-            ['account binding', /绑定|bind(?:ing)?[^.]{0,45}(?:alibaba|account)|alibaba[^.]{0,45}link/i],
-            ['identity verification', /实名|real.?name|identity verific/i],
-            ['scope or permission', /scope|permission|accessdenied/i],
-            ['quota', /quota|insufficient|余额|额度|grain/i],
-            ['token rejected', /access.?token|invalid.?key|unauthenticated|authenti[cz]ation/i],
-            ['security filter', /cloudflare|security (?:policy|check)|request (?:blocked|rejected)|waf/i],
-            ['location or region', /region|country|location|地区/i],
-          ];
-          for (const [path, body] of [
-            ['chat/completions', { model, messages: [{ role: 'user', content: 'Hello. Reply with one word.' }], max_tokens: 128 }],
-            ['responses', { model, input: 'Hello. Reply with one word.', max_output_tokens: 128 }],
-          ]) {
-            const res = await fetch(providerEndpoint(provider) + '/' + path, {
-              method: 'POST', redirect: 'error', signal: AbortSignal.timeout(20_000),
-              headers: { Authorization: 'Bearer ' + modelscope, 'Content-Type': 'application/json', Accept: 'application/json' },
-              body: JSON.stringify(body),
-            });
-            const mime = res.headers.get('content-type') ?? '';
-            const payload = await res.text();
-            let issue;
-            let code;
-            if (!res.ok && mime.includes('json')) {
-              const parsed = JSON.parse(payload);
-              const source = parsed.error ?? parsed;
-              const value = source.code ?? source.Code;
-              if (typeof value === 'number') code = value;
-              issue = issues.find(([, expression]) => expression.test(String(source.message ?? source.Message ?? '')))?.[0];
-            }
-            if (!res.ok && !issue && /html/i.test(mime)) issue = 'HTML gateway response';
-            console.log(JSON.stringify({ path, status: res.status, issue, code, json: mime.includes('json') }));
-          }
-          EOF_PROBE
+          failed=0
+          for model in zai-org/GLM-4.7-Flash zai-org/GLM-5.2 moonshotai/Kimi-K3.1-Pro MiniMax/MiniMax-M3 deepseek-ai/DeepSeek-V4.1-Flash-1017; do
+            npm run --silent verify:free-route -- modelscope "$model" || failed=1
+          done
+          exit "$failed"
