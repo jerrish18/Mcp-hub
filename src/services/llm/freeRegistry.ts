@@ -5,6 +5,8 @@ import type { CloudProvider, ModelConfig, ModelRoute, ProviderKeys } from '../..
 export const CATALOG_TTL = 15 * 60_000;
 // NVIDIA Build's hosted developer endpoint is distinct from partner deployments.
 const NIM_FREE_MODELS = new Map([
+  ['moonshotai/kimi-k3.1-pro', { images: true, tools: true, reasoning: true }],
+  ['minimaxai/minimax-m3.1-flash', { images: true, tools: true, reasoning: true }],
   ['z-ai/glm-5.3-flash', { images: true, tools: true, reasoning: true }],
   ['z-ai/glm-5.3', { images: true, tools: true, reasoning: true }],
   ['nvidia/nemotron-3-ultra-550b-a55b', { images: false, tools: true, reasoning: true }],

@@ -1,0 +1,53 @@
+name: Requested models live verification
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'jerrish18/Mcp-hub' &&
+      github.event.pull_request.number == 2 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'feat/free-provider-expansion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: free-provider-testing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: nvidia
+            model: moonshotai/kimi-k3.1-pro
+            secret: NVIDIA_API_KEY
+          - provider: nvidia
+            model: minimaxai/minimax-m3.1-flash
+            secret: NVIDIA_API_KEY
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify free model
+        env:
+          PROVIDER: ${{ matrix.provider }}
+          MODEL: ${{ matrix.model }}
+          TEST_API_KEY: ${{ secrets[matrix.secret] }}
+          TEST_SECRET_NAME: ${{ matrix.secret }}
+        run: |
+          if [ -z "$TEST_API_KEY" ]; then
+            echo "::notice::Live test skipped. Missing environment secret $TEST_SECRET_NAME."
+            exit 0
+          fi
+          export "$TEST_SECRET_NAME=$TEST_API_KEY"
+          unset TEST_API_KEY
+          npm run --silent verify:free-route -- "$PROVIDER" "$MODEL"
