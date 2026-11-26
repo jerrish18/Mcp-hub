@@ -1,3 +1,4 @@
+import { nvidiaGlmFlashOptions } from './nvidiaOptions';
 import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
 import { providerEndpoint } from './freeRegistry';
@@ -118,8 +119,10 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     }
   }
 
+  const upstreamModelId = model.provider === 'local' ? model.id.replace(/^local:/, '') : route?.modelId ?? model.id;
+  const glmOptions = model.provider === 'nvidia' ? nvidiaGlmFlashOptions(upstreamModelId, effort) : undefined;
   const body: Record<string, unknown> = {
-    model: model.provider === 'local' ? model.id.replace(/^local:/, '') : route?.modelId ?? model.id,
+    model: upstreamModelId,
     messages: formattedMessages,
     stream: true,
   };
@@ -128,6 +131,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   if (model.supportsReasoningEffort && model.provider !== 'openrouter') {
     body.reasoning_effort = effort;
   }
+  if (glmOptions) Object.assign(body, glmOptions);
 
   if (model.provider !== 'local' && tools.length > 0) {
     body.tools = tools.map((t) => ({
@@ -175,7 +179,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       await sleep(650, signal);
       continue;
     }
-    if (res.status === 400 && attempt === 0 && 'reasoning_effort' in body) {
+    if (res.status === 400 && attempt === 0 && !glmOptions && 'reasoning_effort' in body) {
       const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
       if (errPreview.includes('reasoning')) {
         delete body.reasoning_effort;

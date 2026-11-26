@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
 import { Router, json } from 'express';
+import { nvidiaGlmFlashOptions } from '../services/llm/nvidiaOptions.ts';
 import { catalogRoute, evidenceFor, providerEndpoint } from '../services/llm/freeRegistry.ts';
 
 const PROVIDERS = ['cloudflare', 'nvidia', 'kilo'] as const;
@@ -78,10 +79,11 @@ async function relayInference(
     return;
   }
   const requestedMax = typeof body.max_tokens === 'number' && body.max_tokens > 0 ? Math.floor(body.max_tokens) : 24576;
+  const glmOptions = provider === 'nvidia' ? nvidiaGlmFlashOptions(modelId, body.reasoning_effort) : undefined;
   const upstream = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST', headers, signal, redirect: 'error',
     body: JSON.stringify({ model: modelId, messages: body.messages, stream: true,
-      max_tokens: Math.min(requestedMax, route.maxOutput ?? 24576, 24576), tools: body.tools, tool_choice: body.tool_choice }),
+      max_tokens: Math.min(requestedMax, route.maxOutput ?? 24576, 24576), tools: body.tools, tool_choice: body.tool_choice, ...glmOptions }),
   });
   for (const name of ['retry-after', 'x-ratelimit-remaining-requests']) {
     const value = upstream.headers.get(name);

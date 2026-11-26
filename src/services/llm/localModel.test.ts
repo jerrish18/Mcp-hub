@@ -55,3 +55,21 @@ test('distinguishes OpenRouter stream interruption from an explicit completion',
   await run(delta + 'data: [DONE]');
   await assert.rejects(run(delta + 'data: {"choices":[{"finish_reason":"error"}]}'), /stopped generating/);
 });
+
+test('NVIDIA GLM 5.3 Flash bounds its default reasoning and clears prior thinking', async () => {
+  const model = { ...getModelById('z-ai/glm-5.3-flash'), provider: 'nvidia' as const };
+  const inspect = async (effort: 'medium' | 'high') => streamOpenAiCompatibleCompletion({
+    model, apiKey: 'fixture', effort, systemPrompt: '', messages: [{ role: 'user', text: 'Hello' }],
+    tools: [], onEvent: () => {},
+    fetchFn: async (url, init) => {
+      assert.equal(String(url), 'https://integrate.api.nvidia.com/v1/chat/completions');
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.model, 'z-ai/glm-5.3-flash');
+      assert.equal(body.reasoning_effort, effort === 'high' ? 'high' : 'low');
+      assert.deepEqual(body.chat_template_kwargs, { clear_thinking: true });
+      return new Response('data: [DONE]\n\n');
+    },
+  });
+  await inspect('medium');
+  await inspect('high');
+});
