@@ -44,6 +44,7 @@ test('regeneration excludes the source answer model from rate-limit fallbacks', 
     keys: { groq: 'fixture' }, systemPrompt: '', effort: 'low', tools: [],
     messages: [{ role: 'user', text: 'Repeat the analysis' }], onEvent: () => {},
     onModelAttemptStart: (model) => { attempted.push(model.id); },
+    routeFixture: () => [chosen, original],
     fetchFn: async () => new Response('{"error":{"message":"Rate limited"}}', { status: 429 }),
   }), /Rate limit/i);
   assert.equal(attempted[0], chosen.id);

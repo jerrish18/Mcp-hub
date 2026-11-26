@@ -58,7 +58,7 @@ import {
 import { getModelById, getShortModelName } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
 import { getMcpPrompt, readMcpResource } from '../../services/mcp/client';
-import { mergeModelCatalog } from '../../services/llm/provider';
+import { getAvailableModels } from '../../services/llm/provider';
 import { loadServerSecrets, saveServerSecrets } from '../../services/storage/secureStorage';
 import { DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
 import { type CompareResultItem, useHubStore } from '../../store/useHubStore';
@@ -143,6 +143,7 @@ const CHAT_MODE_CONFIG: Array<{
   { id: 'general', label: 'General', Icon: MessageCircle },
   { id: 'professional', label: 'Pro', Icon: Briefcase },
   { id: 'study', label: 'Study', Icon: BookOpen },
+  { id: 'coding', label: 'Code', Icon: Terminal },
 ];
 
 const KNOWLEDGE_SOURCE_OPTIONS: Array<{
@@ -177,6 +178,8 @@ const KNOWLEDGE_SOURCE_OPTIONS: Array<{
 ];
 
 const STARTER_PROMPTS_BY_MODE: Record<ChatMode, Array<{ label: string; prompt: string }>> = {
+  coding: [{ label: 'Build a website', prompt: 'Build a responsive project dashboard with a runnable HTML, CSS, and JavaScript preview.' },
+    { label: 'Review a repository', prompt: 'Inspect the repository and existing tests. Identify the highest-impact correctness issue and suggest a focused fix.' }],
   general: [
     {
       label: 'Plan my week clearly',
@@ -389,7 +392,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const activeProject = activeConv?.projectId
     ? projects.find((p) => p.id === activeConv.projectId) ?? null
     : null;
-  const allCatalogModels = useMemo(() => mergeModelCatalog(dynamicModels), [dynamicModels]);
+  const allCatalogModels = useMemo(() => getAvailableModels(providerKeys, dynamicModels), [dynamicModels, providerKeys]);
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeModelShort = getShortModelName(activeModel);
   const activeEffort: EffortLevel = activeConv?.effort ?? activeAgent.defaultEffort;
@@ -418,7 +421,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     servers,
     activeProject?.allowedServerIds ?? null
   );
-  const activeToolsCount = activeChatMode === 'professional' ? tools.length : 0;
+  const activeToolsCount = (activeChatMode === 'professional' || activeChatMode === 'coding') ? tools.length : 0;
   const lastMsg = activeConv?.messages[activeConv.messages.length - 1];
   useEffect(() => {
     if (!voiceReplies || voiceConversationId.current !== activeConversationId || isRunning || lastMsg?.role !== 'assistant' || lastMsg.isStreaming || lastMsg.error || !lastMsg.content || spokenReplyId.current === lastMsg.id || !('speechSynthesis' in window)) return;
@@ -628,7 +631,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     triggerHaptic(settings.hapticsEnabled, 'light');
 
     if (
-      activeChatMode === 'professional' &&
+      (activeChatMode === 'professional' || activeChatMode === 'coding') &&
       planMode &&
       !compareEnabled &&
       msg.trim().length > 0
@@ -1104,7 +1107,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               role="tablist"
               aria-label="Chat mode"
               style={{ backgroundColor: 'var(--m3-surface-container-high)' }}
-              className="inline-flex items-center gap-0.5 p-0.5 rounded-full shrink-0"
+              className="inline-flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] p-0.5 rounded-full"
             >
               {CHAT_MODE_CONFIG.map(({ id, label, Icon }) => {
                 const active = activeChatMode === id;
@@ -1135,8 +1138,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   >
                     <Icon className="w-3.5 h-3.5 shrink-0" />
                     <span>{label}</span>
-                    {id === 'professional' && (
-                      <span className="text-[10px] opacity-75 font-mono tabular-nums">
+                    {(id === 'professional' || id === 'coding') && (
+                      <span className="tab-tool-count text-[10px] opacity-75 font-mono tabular-nums">
                         {tools.length}
                       </span>
                     )}
@@ -1146,7 +1149,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             </div>
 
             <div className="chat-toolbar-actions">
-              {(activeChatMode === 'professional' || canvasArtifact) && (
+              {((activeChatMode === 'professional' || activeChatMode === 'coding') || canvasArtifact) && (
                 <button
                   type="button"
                   data-testid="pro-canvas-toggle-btn"
@@ -1272,7 +1275,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   </>
                 )}
 
-                {activeChatMode === 'professional' && (
+                {(activeChatMode === 'professional' || activeChatMode === 'coding') && (
                   <button
                     type="button"
                     data-testid="pro-plan-toggle"
@@ -1537,7 +1540,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 </h1>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
                   {activeModelShort} ·{' '}
-                  {activeChatMode === 'professional'
+                  {(activeChatMode === 'professional' || activeChatMode === 'coding')
                     ? `${activeToolsCount} active MCP tool${activeToolsCount === 1 ? '' : 's'}`
                     : activeChatMode === 'study'
                       ? 'Study Mode with Flashcards, Quizzes & Reader'
@@ -2091,7 +2094,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                             <span>Fork</span>
                           </button>
 
-                          {(msg.chatMode ?? activeChatMode) === 'professional' && (
+                          {['professional', 'coding'].includes(msg.chatMode ?? activeChatMode) && (
                             <div className="ml-1 flex items-center gap-1 flex-wrap">
                               {(
                                 [

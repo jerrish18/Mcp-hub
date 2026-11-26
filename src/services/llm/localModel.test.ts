@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getFallbackModelCandidates, dispatchStreamCompletion, getApiKeyForProvider } from './provider';
+import { streamOpenAiCompatibleCompletion } from './openaiCompatible';
 import { getModelById } from '../../config/models';
 
 test('local model never falls back to a cloud model even if its configuration is missing', () => {
@@ -40,10 +41,10 @@ test('stream retains the last text frame and reports an explicit generation limi
 });
 
 test('distinguishes OpenRouter stream interruption from an explicit completion', async () => {
-  const model = getModelById('openrouter/free');
+  const model = { ...getModelById('cloud-auto'), id: 'example/fixture:free' };
   const delta = 'data: {"choices":[{"delta":{"content":"partial project"}}]}\n\n';
   const text: string[] = [];
-  const run = (payload: string) => dispatchStreamCompletion({
+  const run = (payload: string) => streamOpenAiCompatibleCompletion({
     model, apiKey: 'fixture', effort: 'low', systemPrompt: '',
     messages: [{ role: 'user', text: 'Build a website' }], tools: [],
     fetchFn: async () => new Response(payload),
@@ -53,4 +54,43 @@ test('distinguishes OpenRouter stream interruption from an explicit completion',
   assert.deepEqual(text, ['partial project']);
   await run(delta + 'data: [DONE]');
   await assert.rejects(run(delta + 'data: {"choices":[{"finish_reason":"error"}]}'), /stopped generating/);
+});
+
+test('NVIDIA GLM 5.3 Flash bounds its default reasoning and clears prior thinking', async () => {
+  const model = { ...getModelById('z-ai/glm-5.3-flash'), provider: 'nvidia' as const };
+  const inspect = async (effort: 'medium' | 'high') => streamOpenAiCompatibleCompletion({
+    model, apiKey: 'fixture', effort, systemPrompt: '', messages: [{ role: 'user', text: 'Hello' }],
+    tools: [], onEvent: () => {},
+    fetchFn: async (url, init) => {
+      assert.equal(String(url), 'https://integrate.api.nvidia.com/v1/chat/completions');
+      const body = JSON.parse(String(init?.body));
+      assert.equal(new Headers(init?.headers).get('accept'), 'text/event-stream');
+      assert.equal(body.model, 'z-ai/glm-5.3-flash');
+      assert.equal(body.reasoning_effort, effort === 'high' ? 'high' : 'low');
+      assert.deepEqual(body.chat_template_kwargs, { clear_thinking: true });
+      return new Response('data: [DONE]\n\n');
+    },
+  });
+  await inspect('medium');
+  await inspect('high');
+});
+
+test('Kimi keeps reasoning from its own tool call turn in the NVIDIA continuation', async () => {
+  const model = { ...getModelById('moonshotai/kimi-k3.1-pro'), provider: 'nvidia' as const };
+  await streamOpenAiCompatibleCompletion({
+    model, apiKey: 'fixture', effort: 'low', systemPrompt: '', tools: [], onEvent: () => {},
+    messages: [
+      { role: 'assistant', text: '', toolCalls: [{ id: 'native', name: 'read', rawArguments: '{}' }],
+        providerReasoning: { provider: 'nvidia', text: 'native reasoning' } },
+      { role: 'assistant', text: '', toolCalls: [{ id: 'other', name: 'read', rawArguments: '{}' }],
+        providerReasoning: { provider: 'modelscope', text: 'other reasoning' } },
+    ],
+    fetchFn: async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.reasoning_effort, 'low');
+      assert.equal(body.messages[1].reasoning_content, 'native reasoning');
+      assert.equal(body.messages[2].reasoning_content, undefined);
+      return new Response('data: [DONE]\n\n');
+    },
+  });
 });

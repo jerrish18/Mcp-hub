@@ -5,6 +5,8 @@ import type {
   GroundingCitation,
   KnowledgeSourceMode,
   ModelConfig,
+  ProviderKeys,
+  ProviderId,
   ToolMediaBlock,
 } from '../../types';
 
@@ -33,6 +35,7 @@ export type LlmConversationItem =
   | {
       role: 'assistant';
       text: string;
+      providerReasoning?: { provider: ProviderId; text: string };
       toolCalls?: LlmToolCall[];
     }
   | {
@@ -54,6 +57,8 @@ export type LlmStreamEvent =
 export interface StreamCompletionRequest {
   model: ModelConfig;
   apiKey: string;
+  credentials?: ProviderKeys;
+  onQuota?: (headers: Headers) => void;
   systemPrompt: string;
   effort: EffortLevel;
   chatMode?: ChatMode;
@@ -69,9 +74,11 @@ export interface StreamCompletionRequest {
 
 export class RateLimitError extends Error {
   status = 429;
-  constructor(message: string) {
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryAfterMs?: number) {
     super(message);
     this.name = 'RateLimitError';
+    this.retryAfterMs = retryAfterMs;
   }
 }
 

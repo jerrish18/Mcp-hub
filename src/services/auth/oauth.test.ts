@@ -208,8 +208,8 @@ test('extractAuthCodeFromInput extracts ?code from full redirect URLs or raw cod
 });
 
 test('normalizeModelId migrates deprecated model slugs automatically', () => {
-  assert.equal(normalizeModelId('llama-3.3-70b-versatile'), 'openai/gpt-oss-120b');
-  assert.equal(normalizeModelId('qwen/qwen3-235b-a22b:free'), 'qwen/qwen3.7-plus:free');
+  assert.equal(normalizeModelId('llama-3.3-70b-versatile'), 'llama-3.3-70b-versatile');
+  assert.equal(normalizeModelId('qwen/qwen3-235b-a22b:free'), 'qwen/qwen3-235b-a22b:free');
   assert.equal(normalizeModelId('gemini-4-hydrogen'), 'gemini-4-hydrogen');
 });
 

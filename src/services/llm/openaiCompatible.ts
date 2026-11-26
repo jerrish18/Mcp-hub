@@ -1,5 +1,7 @@
+import { nvidiaRequestOptions } from './nvidiaOptions';
 import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
+import { providerEndpoint, usesFreeAiRelay } from './freeRegistry';
 import { redactSecrets } from '../../utils/redact';
 import {
   extractReadableApiError,
@@ -30,11 +32,16 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequest): Promise<void> {
   const { model, apiKey, systemPrompt, effort, messages, tools, signal, onEvent, fetchFn = fetch } = req;
-  if (!apiKey) {
+  if (!apiKey && model.provider !== 'kilo') {
     throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} API key is not configured.`);
   }
 
-  const baseUrl = PROVIDER_INFO[model.provider].baseUrl;
+  const route = model.routes?.[0];
+  const baseUrl = model.provider === 'local' || model.provider === 'demo'
+    ? PROVIDER_INFO[model.provider].baseUrl : providerEndpoint(model.provider, req.credentials?.cloudflareAccountId);
+  if (!baseUrl) throw new ProviderAuthError('A valid Cloudflare account ID is required.');
+  const webRelay = model.provider !== 'local' && model.provider !== 'demo' && usesFreeAiRelay(model.provider, fetchFn);
+  const url = webRelay ? `/api/free-ai/${model.provider}/chat/completions` : `${baseUrl}/chat/completions`;
   const formattedMessages: Array<Record<string, unknown>> = [
     { role: 'system', content: systemPrompt },
   ];
@@ -76,6 +83,10 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
         content: msg.text || null,
       };
       if (msg.toolCalls && msg.toolCalls.length > 0) {
+        if (model.provider === 'nvidia' && (route?.modelId ?? model.id) === 'moonshotai/kimi-k3.1-pro'
+          && msg.providerReasoning?.provider === model.provider) {
+          entry.reasoning_content = msg.providerReasoning.text;
+        }
         entry.tool_calls = msg.toolCalls.map((tc) => ({
           id: tc.id,
           type: 'function',
@@ -111,15 +122,19 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     }
   }
 
+  const upstreamModelId = model.provider === 'local' ? model.id.replace(/^local:/, '') : route?.modelId ?? model.id;
+  const nvidiaOptions = model.provider === 'nvidia' ? nvidiaRequestOptions(upstreamModelId, effort) : undefined;
   const body: Record<string, unknown> = {
-    model: model.provider === 'local' ? model.id.replace(/^local:/, '') : model.id,
+    model: upstreamModelId,
     messages: formattedMessages,
     stream: true,
   };
 
-  if (model.supportsReasoningEffort) {
+  if (route?.maxOutput) body.max_tokens = Math.min(route.maxOutput, 24576);
+  if (model.supportsReasoningEffort && model.provider !== 'openrouter') {
     body.reasoning_effort = effort;
   }
+  if (nvidiaOptions) Object.assign(body, nvidiaOptions);
 
   if (model.provider !== 'local' && tools.length > 0) {
     body.tools = tools.map((t) => ({
@@ -135,9 +150,13 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(model.provider !== 'local' ? { Authorization: `Bearer ${apiKey}` } : {}),
+    ...(nvidiaOptions ? { Accept: 'text/event-stream' } : {}),
+    ...(model.provider !== 'local' && model.provider !== 'kilo' ? { Authorization: `Bearer ${apiKey}` } : {}),
+    ...(webRelay ? { 'X-MCPHub-UI': '1' } : {}),
   };
   if (model.provider === 'openrouter') {
+    body.provider = { max_price: { prompt: 0, completion: 0, request: 0, image: 0 }, require_parameters: true };
+    if (model.supportsReasoningEffort) body.reasoning = { effort };
     headers['HTTP-Referer'] = 'https://mcphub.app';
     headers['X-Title'] = 'MCP Hub';
   }
@@ -145,25 +164,26 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   let res: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      res = await fetchFn(`${baseUrl}/chat/completions`, {
+      res = await fetchFn(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
         signal,
+        redirect: 'error',
       });
     } catch (error) {
-      if (model.provider !== 'openrouter' || signal?.aborted || !(error instanceof TypeError)) throw error;
+      if (model.provider === 'local' || signal?.aborted || !(error instanceof TypeError)) throw error;
       if (attempt === 0) {
         await sleep(650, signal);
         continue;
       }
-      throw new ModelUnavailableError('Could not reach OpenRouter. Check your connection and try again.', 503, { cause: error });
+      throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} could not be reached.`, 503, { cause: error });
     }
     if (res.status === 503 && attempt === 0) {
       await sleep(650, signal);
       continue;
     }
-    if (res.status === 400 && attempt === 0 && 'reasoning_effort' in body) {
+    if (res.status === 400 && attempt === 0 && !nvidiaOptions && 'reasoning_effort' in body) {
       const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
       if (errPreview.includes('reasoning')) {
         delete body.reasoning_effort;
@@ -177,15 +197,18 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} failed to respond.`, 503);
   }
 
+  req.onQuota?.(res.headers);
   if (res.status === 429) {
+    const retryAfter = res.headers.get('retry-after');
+    const delay = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : undefined;
     const errText = extractReadableApiError(await res.text());
-    throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${redactSecrets(errText, [apiKey])}`);
+    throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${redactSecrets(errText, [apiKey])}`, delay);
   }
   if (res.status === 401 || res.status === 403) {
     const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
   }
-  if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+  if (res.status === 402 || res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
     const errText = extractReadableApiError(await res.text());
     throw new ModelUnavailableError(
       `${model.label} unavailable (${res.status}): ${redactSecrets(errText, [apiKey])}`,
@@ -276,13 +299,13 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       }
     }
   } catch (error) {
-    if (model.provider === 'openrouter' && !signal?.aborted && error instanceof TypeError) {
-      throw new ModelUnavailableError('OpenRouter disconnected while generating the reply. Any received source is kept.', 503, { cause: error });
+    if (model.provider !== 'local' && !signal?.aborted && error instanceof TypeError) {
+      throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} disconnected while generating the reply. Any received source is kept.`, 503, { cause: error });
     }
     throw error;
   }
-  if (model.provider === 'openrouter' && !finished) {
-    throw new ModelUnavailableError('OpenRouter ended the response before completion. Any received source is kept.');
+  if (model.provider !== 'local' && !finished) {
+    throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} ended the response before completion. Any received source is kept.`);
   }
 
   if (model.provider !== 'local' && toolAcc.size > 0) {

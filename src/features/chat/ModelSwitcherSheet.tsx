@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Check, Cpu, KeyRound, Search, Sparkles } from 'lucide-react';
 import { getShortModelName, PROVIDER_INFO } from '../../config/models';
-import { getApiKeyForProvider, mergeModelCatalog } from '../../services/llm/provider';
+import { getAvailableModels, getApiKeyForProvider } from '../../services/llm/provider';
 import type { ModelConfig, ProviderId, ProviderKeys } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { getProviderQuotaStatus } from '../../utils/quotaTracker';
@@ -16,7 +16,7 @@ interface ModelSwitcherSheetProps {
   onOpenSettings?: () => void;
 }
 
-const PROVIDER_ORDER: ProviderId[] = ['gemini', 'groq', 'openrouter', 'local', 'demo'];
+const PROVIDER_ORDER: ProviderId[] = ['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'modelscope', 'amd', 'local', 'demo'];
 
 function formatContextWindow(tokens: number): string {
   if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M ctx`;
@@ -34,7 +34,7 @@ export function ModelSwitcherSheet({
   onOpenSettings,
 }: ModelSwitcherSheetProps) {
   const [query, setQuery] = useState('');
-  const allModels = useMemo(() => mergeModelCatalog(dynamicModels), [dynamicModels]);
+  const allModels = useMemo(() => getAvailableModels(providerKeys, dynamicModels), [dynamicModels, providerKeys]);
 
   const filteredModels = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -81,6 +81,14 @@ export function ModelSwitcherSheet({
           />
         </div>
 
+        {allModels.some((item) => item.routes?.length) && (
+          <button type="button" onClick={() => { onSelectModel('cloud-auto'); onClose(); }} className="workspace-secondary">
+            Automatic free model
+          </button>
+        )}
+        {!allModels.some((item) => item.routes?.length) && <p className="text-sm text-slate-500 dark:text-slate-400">
+          Verified cloud models appear here after their free routes pass verification.
+        </p>}
         <div className="space-y-5">
           {grouped.map((group) => {
             const quota = open ? getProviderQuotaStatus(group.provider) : null;
@@ -171,7 +179,7 @@ export function ModelSwitcherSheet({
                           ) : (
                             <Cpu className="w-4 h-4" />
                           )}
-                        </span>
+                        </span>{model.routes?.some((route) => route.dataTerms) && <span className="block text-[11px] text-amber-700 dark:text-amber-300">A free route may retain prompts for training.</span>}
                         <div className="min-w-0">
                           <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                             {shortName}

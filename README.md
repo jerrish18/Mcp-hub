@@ -58,21 +58,11 @@ Local-first **Model Context Protocol (MCP)** and AI workspace for Android/iOS (R
 
 ## How to Get Free API Keys (Zero Cost)
 
-1. **Google Gemini (Free Tier)**
-   - Visit [Google AI Studio](https://aistudio.google.com/apikey) and sign in with a Google account.
-   - Click **Create API key** and paste it into **Settings -> Google Gemini API Key**.
-   - Includes generous free RPM/RPD quotas on Gemini Flash & Pro models.
+Use **Settings → Provider API keys** for authenticated providers. Kilo Gateway uses anonymous free access. OpenRouter and NVIDIA Build keys can be saved in the existing encrypted vault. Cloud models appear after their exact routes pass live verification and still qualify for no-charge inference. The model selector lists one entry for each model.
 
-2. **Groq Cloud (Free Tier)**
-   - Visit [Groq Console](https://console.groq.com/keys) and create a free account.
-   - Generate an API key (`gsk_...`) and paste it into **Settings -> Groq API Key**.
-   - Provides ultra-fast free inference for Llama 3.3 70B, Qwen 3 32B, and GPT-OSS 120B.
+Choose **Code** in Chat to prioritize verified coding models for implementation, debugging, and repository work. Coding mode uses your existing MCP tool permissions and approvals.
 
-3. **OpenRouter (Free Models)**
-   - Visit [OpenRouter Keys](https://openrouter.ai/keys), create a free account, and click **Create Key** (`sk-or-v1-...`).
-   - Free `:free` suffix models require zero credit balance.
-
-> **Tip:** Free model IDs evolve quickly. Edit `src/config/models.ts` to update or swap model slugs in one place.
+See [free provider documentation](docs/free-providers.md) for provider status, exact IDs, routing rules, and the live test command.
 
 ---
 

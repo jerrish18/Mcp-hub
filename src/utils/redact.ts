@@ -3,6 +3,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/Basic\s+[A-Za-z0-9+/=]{8,}/gi, 'Basic [REDACTED]'],
   [/AIza[0-9A-Za-z\-_]{20,}/g, 'AIza[REDACTED]'],
   [/mcphub_live_[0-9A-Za-z\-_]{16,}/g, 'mcphub_live_[REDACTED]'],
+  [/nvapi-[0-9A-Za-z_-]{16,}/g, 'nvapi-[REDACTED]'],
   [/gsk_[0-9A-Za-z]{16,}/g, 'gsk_[REDACTED]'],
   [/sk-or-v1-[0-9A-Za-z]{16,}/g, 'sk-or-v1-[REDACTED]'],
   [/sk-[0-9A-Za-z]{20,}/g, 'sk-[REDACTED]'],

@@ -14,10 +14,10 @@ export type AuthType = z.infer<typeof AuthTypeSchema>;
 export const EffortLevelSchema = z.enum(['low', 'medium', 'high']);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
-export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'local', 'demo']);
+export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'modelscope', 'amd', 'local', 'demo']);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
-export const ChatModeSchema = z.enum(['general', 'professional', 'study']);
+export const ChatModeSchema = z.enum(['general', 'professional', 'study', 'coding']);
 export type ChatMode = z.infer<typeof ChatModeSchema>;
 
 export const KnowledgeSourceModeSchema = z.enum(['auto', 'uploaded', 'web', 'general']);
@@ -39,6 +39,21 @@ export interface GroundingCitation {
   url: string;
 }
 
+export type CloudProvider = Exclude<ProviderId, 'local' | 'demo'>;
+
+export interface ModelRoute {
+  provider: CloudProvider;
+  modelId: string;
+  contextWindow: number;
+  maxOutput?: number;
+  tools: boolean;
+  images: boolean;
+  reasoning: boolean;
+  dataTerms?: string;
+  checkedAt: number;
+  expiresAt: number;
+}
+
 export interface ModelConfig {
   id: string;
   provider: ProviderId;
@@ -48,6 +63,7 @@ export interface ModelConfig {
   supportsThinkingLevel?: boolean;
   supportsReasoningEffort?: boolean;
   isFreeTier: boolean;
+  routes?: ModelRoute[];
 }
 
 export interface McpToolAnnotations {
@@ -267,6 +283,7 @@ export type RunTraceStep =
       startedAt: number;
       durationMs: number;
       modelId: string;
+      provider?: ProviderId;
       status: 'running' | 'ok' | 'error';
       estimatedTokens?: number;
       error?: string;
@@ -429,6 +446,11 @@ export interface ProviderKeys {
   gemini?: string;
   groq?: string;
   openrouter?: string;
+  cloudflare?: string;
+  cloudflareAccountId?: string;
+  nvidia?: string;
+  modelscope?: string;
+  amd?: string;
 }
 
 export type ApprovalDecision = 'approve' | 'always_allow' | 'deny';

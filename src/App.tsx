@@ -8,6 +8,7 @@ import { parseMcpAddDeepLink } from './config/connectors';
 import { subscribeGoogleAuth } from './services/auth/appAuth';
 import { startBrowserControlBridge } from './services/control/browserBridge';
 import { useHubStore, type HubTabId } from './store/useHubStore';
+import { CATALOG_TTL } from './services/llm/freeRegistry';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { applyPixelThemeVars } from './utils/theme';
 
@@ -106,6 +107,20 @@ export default function App() {
     if (!initialized || (!authUser && !authGuestMode)) return;
     return startBrowserControlBridge();
   }, [initialized, authUser, authGuestMode]);
+
+  useEffect(() => {
+    if (!initialized || isLocked || vaultLocked || (!authUser && !authGuestMode)) return;
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void useHubStore.getState().syncModels();
+    };
+    refresh();
+    const timer = window.setInterval(refresh, CATALOG_TTL - 60_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [initialized, isLocked, vaultLocked, authUser, authGuestMode]);
 
   // System + manual theme + Pixel Material You dynamic color sync
   useEffect(() => {

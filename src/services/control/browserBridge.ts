@@ -13,7 +13,7 @@ import {
 } from '../../types';
 import { getAppSessionToken, refreshAppSession } from '../auth/appAuth';
 import { streamSseData } from '../llm/sse';
-import { mergeModelCatalog } from '../llm/provider';
+import { getAvailableModels } from '../llm/provider';
 import { callMcpTool } from '../mcp/client';
 import { loadServerSecrets, saveServerSecrets } from '../storage/secureStorage';
 import type { ControlKeyScope } from './actionsCatalog';
@@ -150,7 +150,7 @@ export function buildSanitizedMirrorState(): BridgeWorkspaceMirror {
       hapticsEnabled: s.settings.hapticsEnabled,
       biometricLockEnabled: s.settings.biometricLockEnabled,
     },
-    modelsCount: mergeModelCatalog(s.dynamicModels).length,
+    modelsCount: getAvailableModels(s.providerKeys, s.dynamicModels).length,
     updatedAt: Date.now(),
   };
 }
@@ -457,7 +457,7 @@ export async function executeStoreControlAction(
     }
 
     case 'list_models':
-      return { models: mergeModelCatalog(store.dynamicModels) };
+      return { models: getAvailableModels(store.providerKeys, store.dynamicModels) };
 
     case 'update_app_settings': {
       const patch: Record<string, unknown> = {};

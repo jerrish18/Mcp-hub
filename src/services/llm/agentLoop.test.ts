@@ -5,10 +5,21 @@ import {
   compactConversationHistory,
   composeEffectiveSystemPrompt,
   detectPromptInjectionSignals,
-  runAgentLoop,
+  runAgentLoop as runLoop,
   truncateToolOutput,
 } from './agentLoop';
-import { syncLiveProviderModels } from './provider';
+import { getApiKeyForProvider, mergeModelCatalog, syncLiveProviderModels } from './provider';
+import { getModelById } from '../../config/models';
+
+const runAgentLoop = (params: Parameters<typeof runLoop>[0]) => runLoop({
+  ...params,
+  routeFixture: (id, keys, dynamicModels) => {
+    const primary = getModelById(id, dynamicModels);
+    return [primary, ...mergeModelCatalog(dynamicModels).filter((model) => model.id !== primary.id && model.provider !== primary.provider
+      && model.provider !== 'local' && model.provider !== 'demo' && getApiKeyForProvider(model.provider, keys))];
+  },
+});
+
 import { extractReadableApiError } from './types';
 import { parseA2uiBlock } from '../../utils/a2ui';
 import type { AgentProfile, McpServerConfig, ProviderKeys } from '../../types';
@@ -199,7 +210,7 @@ test('agentLoop automatically falls back on 429 rate-limit error', async () => {
     },
   });
 
-  assert.ok(fallbackNoticed.startsWith('openai/gpt-oss-120b->'));
+  assert.ok(fallbackNoticed.startsWith('openai/gpt-oss-120b->'), JSON.stringify({ fallbackNoticed, modelsHit }));
   assert.equal(res.finalText, 'Fallback worked!');
 });
 
@@ -282,7 +293,7 @@ test('agentLoop falls back automatically on 503 high demand or 404 deprecated mo
   });
 
   assert.equal(groqCalls, 1);
-  assert.ok(fallbackNotice.startsWith('gemini-4-hydrogen->'));
+  assert.ok(fallbackNotice.startsWith('gemini-4-hydrogen->'), JSON.stringify({ fallbackNotice, groqCalls }));
   assert.equal(res.finalText, 'Recovered via Groq!');
 });
 
@@ -297,7 +308,7 @@ test('extractReadableApiError unwraps nested JSON API error payloads cleanly', (
   assert.equal(extractReadableApiError(raw), 'Qwen3 235B A22B was deprecated on Oct 9, 2026.');
 });
 
-test('syncLiveProviderModels discovers active free tool-calling models from configured providers', async () => {
+test('syncLiveProviderModels reports zero-price candidates and excludes routes without live verification', async () => {
   const mockFetch = (async (input: string | URL | Request) => {
     const url = String(input);
     if (url.includes('openrouter.ai/api/v1/models')) {
@@ -308,6 +319,7 @@ test('syncLiveProviderModels discovers active free tool-calling models from conf
               id: 'qwen/qwen3.7-plus:free',
               name: 'Qwen 3.7 Plus',
               context_length: 131072,
+              pricing: { prompt: '0', completion: '0' },
               supported_parameters: ['tools', 'reasoning'],
             },
             {
@@ -328,9 +340,8 @@ test('syncLiveProviderModels discovers active free tool-calling models from conf
     mockFetch
   );
   assert.deepEqual(synced.syncedProviders, ['OpenRouter']);
-  assert.equal(synced.models.length, 1);
-  assert.equal(synced.models[0].id, 'qwen/qwen3.7-plus:free');
-  assert.equal(synced.models[0].supportsReasoningEffort, true);
+  assert.deepEqual(synced.models, []);
+  assert.deepEqual(synced.pending, ['OpenRouter · qwen/qwen3.7-plus:free']);
 });
 
 test('buildAgentToolCatalog deduplicates long qualified tool names exceeding 64 chars', () => {

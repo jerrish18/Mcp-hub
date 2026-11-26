@@ -34,7 +34,7 @@ import {
   type StudyWebImage,
 } from '../../utils/studyImages';
 import { callMcpTool } from '../mcp/client';
-import { streamWithRateLimitFallback } from './provider';
+import { getFallbackModelCandidates, streamWithRateLimitFallback } from './provider';
 import type { LlmConversationItem, LlmToolCall, LlmToolDefinition } from './types';
 
 export const DEFAULT_TOOL_OUTPUT_BUDGET_CHARS = 8000;
@@ -482,6 +482,7 @@ export interface RunAgentLoopParams {
   modelId: string;
   effort: EffortLevel;
   chatMode?: ChatMode;
+  routeFixture?: typeof getFallbackModelCandidates;
   studyInstructions?: string;
   knowledgeSource?: KnowledgeSourceMode;
   a2uiEnabled?: boolean;
@@ -555,12 +556,12 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const runStartedAt = Date.now();
   const localAlwaysAllow = new Set(params.alwaysAllowedTools);
   const localAlwaysAllowRules: AlwaysAllowRule[] = [...(params.alwaysAllowedRules ?? [])];
-  // Only expose MCP tools in Professional mode; General and Study Session never invoke MCPs
+  // Share the existing MCP catalog and approval rules between Professional and Coding modes.
   const built = buildAgentToolCatalog(agent, servers, project?.allowedServerIds ?? null);
   const localModel = getModelById(modelId, dynamicModels).provider === 'local';
   const buildingWebsite = /\b(?:build|create|generate|implement|design|rebuild|make)\b[\s\S]{0,120}\b(?:website|web app|html|dashboard|landing page)\b/i.test(lastUserText);
   const explicitlySavingNote = /\b(?:save|create|store)\b[\s\S]{0,40}\bnotes?\b/i.test(lastUserText);
-  const tools = !localModel && chatMode === 'professional'
+  const tools = !localModel && (chatMode === 'professional' || chatMode === 'coding')
     ? built.tools.filter((tool) => !buildingWebsite || explicitlySavingNote || tool.originalName !== 'workspace_create_note')
     : [];
   const exposedTools = new Set(tools.map((tool) => tool.qualifiedName));
@@ -577,6 +578,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     project,
   });
 
+  if (chatMode === 'coding') {
+    effectiveSystemPrompt += '\n[CODING MODE] Inspect relevant repository files and existing tests before proposing edits. Use read-only MCP operations for discovery. Identify the cause of bugs, preserve existing behavior, and validate runnable code or Canvas output. Follow the workspace approval policy for writes.';
+  }
   if (buildingWebsite) {
     effectiveSystemPrompt += '\nFor this website request, start directly with the fenced artifact-app JSON. Put the runnable HTML entry first. Write each complete file before starting the next, use compact source, and close the fence before any explanation.';
   }
@@ -620,7 +624,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const allCitations = new Map<string, GroundingCitation>();
   const fallbacks: RunTraceFallback[] = [];
   const traceSteps: RunTraceStep[] = [];
-  const knownSecrets = [keys.gemini ?? '', keys.groq ?? '', keys.openrouter ?? ''];
+  const knownSecrets = Object.values(keys).filter((value): value is string => typeof value === 'string' && value.length > 0);
   let taintedInjectionWarning: string | null = null;
 
   if (ragProcessed.usedRag) {
@@ -732,6 +736,8 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
     stepsExecuted++;
     let stepText = '';
+    let stepReasoning = '';
+    let modelProvider: ModelConfig['provider'] | undefined;
     let proposedCalls: LlmToolCall[] = [];
 
     const modelStepStartedAt = Date.now();
@@ -758,14 +764,16 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         knowledgeSource,
         a2uiEnabled: offerA2ui,
         websiteBuild: buildingWebsite,
+        routeFixture: params.routeFixture,
         messages: workingMessages,
+        prepareMessages: (model) => compactConversationHistory(workingMessages, model.contextWindow).messages,
         tools,
         signal,
         fetchFn,
         onModelFallback: (from, to, reason) => {
           activeModelId = to.id;
           const fbAt = Date.now();
-          fallbacks.push({ from: from.id, to: to.id, reason, at: fbAt });
+          fallbacks.push({ from: from.id, to: to.id, reason: safeErrorMessage(reason, knownSecrets), at: fbAt });
           traceSteps.push({
             kind: 'fallback',
             id: `fb_${stepsExecuted}_${fbAt}`,
@@ -776,7 +784,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             reason: redactAndPreview(reason, 200, knownSecrets),
           });
           emitLiveTrace();
-          callbacks.onFallbackNotice(from, to, reason);
+          callbacks.onFallbackNotice(from, to, safeErrorMessage(reason, knownSecrets));
         },
         onEvent: (ev) => {
           if (ev.type === 'text_delta') {
@@ -784,6 +792,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             accumulatedText += ev.delta;
             callbacks.onTextDelta(accumulatedText);
           } else if (ev.type === 'reasoning_delta') {
+            stepReasoning += ev.delta;
             accumulatedReasoning += ev.delta;
             callbacks.onReasoningDelta(accumulatedReasoning);
           } else if (ev.type === 'citations') {
@@ -797,7 +806,9 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         },
       });
       activeModelId = usedModel.id;
+      modelProvider = usedModel.provider;
       modelStep.modelId = usedModel.id;
+      modelStep.provider = usedModel.provider;
       modelStep.durationMs = Math.max(0, Date.now() - modelStepStartedAt);
       modelStep.status = 'ok';
       emitLiveTrace();
@@ -824,6 +835,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     workingMessages.push({
       role: 'assistant',
       text: stepText,
+      providerReasoning: modelProvider && stepReasoning ? { provider: modelProvider, text: stepReasoning } : undefined,
       toolCalls: proposedCalls.length > 0 ? proposedCalls : undefined,
     });
 
