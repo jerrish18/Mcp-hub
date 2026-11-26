@@ -32,4 +32,45 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
           test -n "$NVIDIA_API_KEY" || { echo "::error::NVIDIA_API_KEY is missing."; exit 1; }
+          node --import tsx --input-type=module <<'EOF_PROBE'
+          import { catalogRoute, providerEndpoint, readProviderCatalog } from './src/services/llm/freeRegistry.ts';
+          import { nvidiaGlmFlashOptions } from './src/services/llm/nvidiaOptions.ts';
+          import { streamSseData } from './src/services/llm/sse.ts';
+
+          const model = 'z-ai/glm-5.3-flash';
+          const nvidia = process.env.NVIDIA_API_KEY;
+          const row = (await readProviderCatalog('nvidia', { nvidia }, fetch, AbortSignal.timeout(12_000)))
+            .find((item) => item.id === model);
+          if (!row || !catalogRoute('nvidia', row)) {
+            console.log(JSON.stringify({ model, catalogEligible: false }));
+            process.exit(1);
+          }
+          const results = await Promise.all([true, false].map(async (stream) => {
+            let status;
+            try {
+              const response = await fetch(providerEndpoint('nvidia') + '/chat/completions', {
+                method: 'POST', redirect: 'error', signal: AbortSignal.timeout(35_000),
+                headers: { Authorization: 'Bearer ' + nvidia, 'Content-Type': 'application/json',
+                  Accept: stream ? 'text/event-stream' : 'application/json' },
+                body: JSON.stringify({ model, stream, max_tokens: 1024, temperature: 0.5, top_p: 1,
+                  messages: [{ role: 'user', content: 'Which number is larger, 9.11 or 9.8?' }],
+                  ...nvidiaGlmFlashOptions(model, 'low') }),
+              });
+              status = response.status;
+              if (!response.ok) {
+                await response.body?.cancel();
+                return { stream, status, receivedText: false };
+              }
+              if (!stream) return { stream, status, receivedText: Boolean((await response.json()).choices?.[0]?.message?.content) };
+              for await (const frame of streamSseData(response.body)) {
+                if (JSON.parse(frame).choices?.[0]?.delta?.content) return { stream, status, receivedText: true };
+              }
+              return { stream, status, receivedText: false };
+            } catch (error) {
+              return { stream, status, receivedText: false, timeout: error.name === 'TimeoutError' || error.name === 'AbortError' };
+            }
+          }));
+          for (const result of results) console.log(JSON.stringify(result));
+          if (!results[0].receivedText) process.exitCode = 1;
+          EOF_PROBE
           npm run --silent verify:free-route -- nvidia z-ai/glm-5.3-flash

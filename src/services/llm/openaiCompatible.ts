@@ -147,6 +147,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...(glmOptions ? { Accept: 'text/event-stream' } : {}),
     ...(model.provider !== 'local' && model.provider !== 'kilo' ? { Authorization: `Bearer ${apiKey}` } : {}),
     ...(webRelay ? { 'X-MCPHub-UI': '1' } : {}),
   };

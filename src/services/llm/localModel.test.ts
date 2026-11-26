@@ -64,6 +64,7 @@ test('NVIDIA GLM 5.3 Flash bounds its default reasoning and clears prior thinkin
     fetchFn: async (url, init) => {
       assert.equal(String(url), 'https://integrate.api.nvidia.com/v1/chat/completions');
       const body = JSON.parse(String(init?.body));
+      assert.equal(new Headers(init?.headers).get('accept'), 'text/event-stream');
       assert.equal(body.model, 'z-ai/glm-5.3-flash');
       assert.equal(body.reasoning_effort, effort === 'high' ? 'high' : 'low');
       assert.deepEqual(body.chat_template_kwargs, { clear_thinking: true });
