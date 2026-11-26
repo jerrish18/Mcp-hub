@@ -6,6 +6,7 @@ import type {
   KnowledgeSourceMode,
   ModelConfig,
   ProviderKeys,
+  ProviderId,
   ToolMediaBlock,
 } from '../../types';
 
@@ -34,6 +35,7 @@ export type LlmConversationItem =
   | {
       role: 'assistant';
       text: string;
+      providerReasoning?: { provider: ProviderId; text: string };
       toolCalls?: LlmToolCall[];
     }
   | {

@@ -51,3 +51,35 @@ jobs:
           export "$TEST_SECRET_NAME=$TEST_API_KEY"
           unset TEST_API_KEY
           npm run --silent verify:free-route -- "$PROVIDER" "$MODEL"
+
+  verify-modelscope:
+    if: >-
+      github.repository == 'jerrish18/Mcp-hub' &&
+      github.event.pull_request.number == 2 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'feat/free-provider-expansion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: free-provider-testing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify ModelScope free routes
+        env:
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+        run: |
+          if [ -z "$MODELSCOPE_API_TOKEN" ]; then
+            echo "::notice::Live test skipped. Missing environment secret MODELSCOPE_API_TOKEN."
+            exit 0
+          fi
+          failed=0
+          for model in zai-org/GLM-4.7-Flash zai-org/GLM-5.2 moonshotai/Kimi-K3.1-Pro MiniMax/MiniMax-M3 deepseek-ai/DeepSeek-V4.1-Flash-1017; do
+            npm run --silent verify:free-route -- modelscope "$model" || failed=1
+          done
+          exit "$failed"

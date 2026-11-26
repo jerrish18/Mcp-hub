@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeModelId } from '../../config/models';
-import { catalogRoute } from './freeRegistry';
+import { catalogRoute, readProviderCatalog } from './freeRegistry';
 import { dispatchStreamCompletion, getAvailableModels, streamWithRateLimitFallback, syncLiveProviderModels } from './provider';
 import type { ModelConfig } from '../../types';
 
@@ -103,4 +103,28 @@ test('fallback preserves partial source after a cloud stream disconnects', async
   }), /ended the response before completion/);
   assert.equal(text, 'ok');
   assert.equal(requests.length, 1);
+});
+
+test('ModelScope only accepts first-party catalog rows without a nonzero price', () => {
+  const row = { id: 'MiniMax/MiniMax-M3', owned_by: 'system' };
+  assert.ok(catalogRoute('modelscope', row));
+  assert.equal(catalogRoute('modelscope', { ...row, owned_by: 'external' }), undefined);
+  assert.equal(catalogRoute('modelscope', { ...row, pricing: { prompt: '0.2', completion: '0' } }), undefined);
+  assert.equal(normalizeModelId('moonshotai/Kimi-K3.1-Pro'), normalizeModelId('moonshotai/kimi-k3.1-pro'));
+});
+
+test('AMD rejects a listed route when its model details conflict with a public free badge', async () => {
+  const rows = await readProviderCatalog('amd', { amd: 'fixture' }, async (url, init) => {
+    const target = new URL(String(url));
+    if (target.pathname === '/radeon/api/v1/models') {
+      assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer fixture');
+      return Response.json({ data: [{ id: 'GLM-5.3-Flash' }] });
+    }
+    assert.equal(target.searchParams.get('id'), 'model_gateway:GLM-5.3-Flash');
+    assert.equal(new Headers(init?.headers).has('authorization'), false);
+    return Response.json({ model: { model: 'GLM-5.3-Flash', enabled: true, status: 'online',
+      free: false, pricing: { prompt: '1.4e-7', completion: '2.8e-7' }, display_status: 'free_endpoint' } });
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(catalogRoute('amd', rows[0]), undefined);
 });

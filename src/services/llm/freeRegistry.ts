@@ -14,7 +14,23 @@ const NIM_FREE_MODELS = new Map([
   ['nvidia/nemotron-3.5-super-vl-120b-a12b', { images: true, tools: true, reasoning: true }],
 ]);
 
-export const CLOUD_PROVIDERS = ['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo'] as const;
+// Only ModelScope-hosted routes from its own free inference API are eligible.
+const MODELSCOPE_MODELS = new Map([
+  ['zai-org/GLM-4.7-Flash', { images: false, tools: true, reasoning: true, contextWindow: 200_000 }],
+  ['zai-org/GLM-5.2', { images: false, tools: true, reasoning: true, contextWindow: 200_000 }],
+  ['moonshotai/Kimi-K3.1-Pro', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
+  ['MiniMax/MiniMax-M3', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
+  ['deepseek-ai/DeepSeek-V4.1-Flash-1017', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
+]);
+const AMD_MODELS = new Set(['GLM-5.3-Flash', 'DeepSeek-V4.1-Flash']);
+
+export const CLOUD_PROVIDERS = ['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'modelscope', 'amd'] as const;
+export const FREE_AI_RELAY_PROVIDERS = ['cloudflare', 'nvidia', 'kilo', 'modelscope', 'amd'] as const;
+
+export function usesFreeAiRelay(provider: CloudProvider, fetcher: typeof fetch): boolean {
+  return typeof window !== 'undefined' && /^https?:$/.test(window.location?.protocol)
+    && FREE_AI_RELAY_PROVIDERS.some((member) => member === provider) && fetcher === fetch;
+}
 
 export function cloudCredential(provider: CloudProvider, keys: ProviderKeys): string {
   return provider === 'kilo' ? '' : keys[provider]?.trim() ?? '';
@@ -44,6 +60,9 @@ interface CatalogRow {
   mayTrainOnYourPrompts?: boolean;
   expiration_date?: string | null;
   autoRouting?: unknown;
+  owned_by?: string;
+  free?: boolean;
+  amdFreeVerified?: boolean;
 }
 
 function catalogUrl(provider: CloudProvider, keys: ProviderKeys): string | undefined {
@@ -58,8 +77,7 @@ export async function readProviderCatalog(provider: CloudProvider, keys: Provide
   const url = catalogUrl(provider, keys);
   const token = cloudCredential(provider, keys);
   if (!url || (provider !== 'kilo' && !token)) return [];
-  const webRelay = typeof window !== 'undefined' && /^https?:$/.test(window.location?.protocol)
-    && ['cloudflare', 'nvidia', 'kilo'].includes(provider) && fetcher === fetch;
+  const webRelay = usesFreeAiRelay(provider, fetcher);
   const response = await fetcher(webRelay ? `/api/free-ai/${provider}/models` : url, {
     headers: {
       ...(token && provider === 'gemini' ? { 'x-goog-api-key': token } : {}),
@@ -72,10 +90,27 @@ export async function readProviderCatalog(provider: CloudProvider, keys: Provide
   const body = await response.json();
   const entries = provider === 'gemini' ? body.models : provider === 'cloudflare' ? body.result : body.data;
   if (!Array.isArray(entries)) throw new Error('Provider returned an invalid catalog.');
-  return entries.flatMap((item) => {
+  const rows: CatalogRow[] = entries.flatMap((item) => {
     const id = provider === 'gemini' ? item?.name?.replace?.(/^models\//, '') : provider === 'cloudflare' ? item?.name : item?.id;
     return typeof id === 'string' ? [{ ...item, id }] : [];
   });
+  if (provider !== 'amd' || webRelay) return rows;
+
+  // AMD's public badge can differ from its pricing record. Require proof from
+  // the exact model detail endpoint as well as membership in the account catalog.
+  return Promise.all(rows.filter((row) => AMD_MODELS.has(row.id)).map(async (row) => {
+    const detailUrl = new URL('https://developer.amd.com.cn/radeon/api/tokenfactory/model');
+    detailUrl.searchParams.set('id', `model_gateway:${row.id}`);
+    const detail = await fetcher(detailUrl, { cache: 'no-store', redirect: 'error', signal });
+    if (!detail.ok) return { ...row, amdFreeVerified: false };
+    const { model } = await detail.json();
+    return {
+      ...row,
+      amdFreeVerified: model?.model === row.id && model.enabled === true && model.status === 'online'
+        && model.free === true && zeroPrice(model.pricing)
+        && (!row.pricing || zeroPrice(row.pricing)),
+    };
+  }));
 }
 
 function zeroPrice(pricing: CatalogRow['pricing']): boolean {
@@ -96,14 +131,18 @@ export function catalogRoute(provider: CloudProvider, row: CatalogRow, now = Dat
   if (provider === 'kilo' && !(row.isFree === true && zeroPrice(row.pricing))) return;
   const nim = provider === 'nvidia' ? NIM_FREE_MODELS.get(row.id) : undefined;
   if (provider === 'nvidia' && (!nim || (row.pricing && !zeroPrice(row.pricing)))) return;
+  const scope = provider === 'modelscope' ? MODELSCOPE_MODELS.get(row.id) : undefined;
+  if (provider === 'modelscope' && (!scope || row.owned_by !== 'system' || (row.pricing && !zeroPrice(row.pricing)))) return;
+  const amd = provider === 'amd' && AMD_MODELS.has(row.id);
+  if (provider === 'amd' && (!amd || row.amdFreeVerified !== true || (row.pricing && !zeroPrice(row.pricing)))) return;
   if (provider === 'gemini' || provider === 'groq' || provider === 'cloudflare') return;
   return {
     provider, modelId: row.id,
-    contextWindow: row.context_length ?? row.context_window ?? (nim ? 1_000_000 : 128_000),
+    contextWindow: row.context_length ?? row.context_window ?? scope?.contextWindow ?? (nim ? 1_000_000 : 128_000),
     maxOutput: row.top_provider?.max_completion_tokens,
-    tools: row.supported_parameters?.includes('tools') ?? nim?.tools ?? false,
-    images: row.architecture?.input_modalities?.includes('image') ?? nim?.images ?? false,
-    reasoning: row.supported_parameters?.some((item) => ['reasoning', 'reasoning_effort', 'include_reasoning'].includes(item)) ?? nim?.reasoning ?? false,
+    tools: row.supported_parameters?.includes('tools') ?? nim?.tools ?? scope?.tools ?? amd,
+    images: row.architecture?.input_modalities?.includes('image') ?? nim?.images ?? scope?.images ?? amd,
+    reasoning: row.supported_parameters?.some((item) => ['reasoning', 'reasoning_effort', 'include_reasoning'].includes(item)) ?? nim?.reasoning ?? scope?.reasoning ?? amd,
     dataTerms: row.mayTrainOnYourPrompts ? 'Prompts may be retained and used for training.' : undefined,
     checkedAt: now, expiresAt: Math.min(expiry, now + CATALOG_TTL),
   };

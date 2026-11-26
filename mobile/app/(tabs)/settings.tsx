@@ -18,6 +18,8 @@ export default function MobileSettingsScreen() {
   const [gemini, setGemini] = useState('');
   const [groq, setGroq] = useState('');
   const [openrouter, setOpenrouter] = useState('');
+  const [modelscope, setModelscope] = useState('');
+  const [amd, setAmd] = useState('');
   const [nvidia, setNvidia] = useState('');
   const [cloudflare, setCloudflare] = useState('');
   const [cloudflareAccountId, setCloudflareAccountId] = useState('');
@@ -33,6 +35,8 @@ export default function MobileSettingsScreen() {
       setGroq(keys.groq ?? '');
       setOpenrouter(keys.openrouter ?? '');
       setNvidia(keys.nvidia ?? '');
+      setModelscope(keys.modelscope ?? '');
+      setAmd(keys.amd ?? '');
       setCloudflare(keys.cloudflare ?? '');
       setCloudflareAccountId(keys.cloudflareAccountId ?? '');
     });
@@ -52,6 +56,8 @@ export default function MobileSettingsScreen() {
       groq: groq.trim() || undefined,
       openrouter: openrouter.trim() || undefined,
       nvidia: nvidia.trim() || undefined,
+      modelscope: modelscope.trim() || undefined,
+      amd: amd.trim() || undefined,
       cloudflare: cloudflare.trim() || undefined,
       cloudflareAccountId: cloudflareAccountId.trim() || undefined,
     });
@@ -184,6 +190,8 @@ export default function MobileSettingsScreen() {
           />
           {([
             ['NVIDIA Build API key', nvidia, setNvidia],
+            ['ModelScope access token', modelscope, setModelscope],
+            ['AMD Token Factory key', amd, setAmd],
             ['Cloudflare Workers AI token', cloudflare, setCloudflare],
             ['Cloudflare account ID', cloudflareAccountId, setCloudflareAccountId],
           ] as const).map(([label, value, onChangeText]) => (

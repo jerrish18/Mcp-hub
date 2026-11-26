@@ -6,6 +6,8 @@ import type { CloudProvider, ProviderKeys } from '../src/types';
 const keys: ProviderKeys = {
   openrouter: process.env.OPENROUTER_API_KEY,
   nvidia: process.env.NVIDIA_API_KEY,
+  modelscope: process.env.MODELSCOPE_API_TOKEN,
+  amd: process.env.AMD_API_KEY,
 };
 
 const tool: LlmToolDefinition = {
@@ -88,7 +90,7 @@ async function verify(provider: CloudProvider, modelId: string) {
         throw new Error('Tool call did not match the fixture.');
       }
       const reply = await run([
-        request, { role: 'assistant', text: proposed.text, toolCalls: [call] },
+        request, { role: 'assistant', text: proposed.text, toolCalls: [call], providerReasoning: { provider, text: proposed.reasoning } },
         { role: 'tool', toolCallId: call.id, toolName: tool.qualifiedName, content: 'mcp-fixture-63' },
       ], [tool]);
       if (reply.text !== 'mcp-fixture-63') throw new Error('Model did not use the tool result.');
@@ -117,8 +119,8 @@ async function verify(provider: CloudProvider, modelId: string) {
 }
 
 const [, , provider, modelId] = process.argv;
-if ((provider !== 'openrouter' && provider !== 'nvidia' && provider !== 'kilo') || !modelId || !/^[\w./:@-]{1,180}$/.test(modelId)) {
-  console.error('Usage: npm run verify:free-route -- <openrouter|nvidia|kilo> <exact-model-id>');
+if ((provider !== 'openrouter' && provider !== 'nvidia' && provider !== 'kilo' && provider !== 'modelscope' && provider !== 'amd') || !modelId || !/^[\w./:@-]{1,180}$/.test(modelId)) {
+  console.error('Usage: npm run verify:free-route -- <openrouter|nvidia|kilo|modelscope|amd> <exact-model-id>');
   process.exitCode = 1;
 } else {
   await verify(provider, modelId);

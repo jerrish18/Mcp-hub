@@ -16,7 +16,7 @@ interface ModelSwitcherSheetProps {
   onOpenSettings?: () => void;
 }
 
-const PROVIDER_ORDER: ProviderId[] = ['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'local', 'demo'];
+const PROVIDER_ORDER: ProviderId[] = ['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'modelscope', 'amd', 'local', 'demo'];
 
 function formatContextWindow(tokens: number): string {
   if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M ctx`;

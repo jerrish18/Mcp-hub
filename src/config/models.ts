@@ -136,6 +136,8 @@ export const PROVIDER_INFO: Record<
   cloudflare: { name: 'Cloudflare Workers AI', signupUrl: 'https://dash.cloudflare.com/', keyHint: 'Workers AI API token', baseUrl: 'https://api.cloudflare.com/client/v4/accounts' },
   nvidia: { name: 'NVIDIA NIM', signupUrl: 'https://build.nvidia.com/', keyHint: 'NVIDIA Build API key', baseUrl: 'https://integrate.api.nvidia.com/v1' },
   kilo: { name: 'Kilo Gateway', signupUrl: 'https://kilo.ai/docs/gateway', keyHint: 'Anonymous free access', baseUrl: 'https://ai-gateway.kilo.ai/api/v1' },
+  modelscope: { name: 'ModelScope', signupUrl: 'https://modelscope.ai/my/myaccesstoken', keyHint: 'ModelScope access token', baseUrl: 'https://api-inference.modelscope.ai/v1' },
+  amd: { name: 'AMD Radeon Cloud', signupUrl: 'https://developer.amd.com.cn/radeon/tokenfactory', keyHint: 'AMD Token Factory key', baseUrl: 'https://developer.amd.com.cn/radeon/api/v1' },
   local: {
     name: 'Local model',
     signupUrl: '',
@@ -164,6 +166,14 @@ export const MODEL_MIGRATION_ALIASES: Record<string, string> = {
   'nvidia/nemotron-3.5-lightning:free': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'nvidia/nemotron-3.5-super-vl:free': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   'openrouter/free': 'cloud-auto',
+  'GLM-5.3-Flash': 'z-ai/glm-5.3-flash',
+  'zai-org/GLM-4.7-Flash': 'z-ai/glm-4.7-flash',
+  'zai-org/GLM-5.2': 'z-ai/glm-5.2',
+  'moonshotai/Kimi-K3.1-Pro': 'moonshotai/kimi-k3.1-pro',
+  'MiniMax/MiniMax-M3': 'minimax/minimax-m3',
+  'minimaxai/minimax-m3.1-flash': 'minimax/minimax-m3.1-flash',
+  'DeepSeek-V4.1-Flash': 'deepseek-ai/deepseek-v4.1-flash-1017',
+  'deepseek-ai/DeepSeek-V4.1-Flash-1017': 'deepseek-ai/deepseek-v4.1-flash-1017',
 };
 
 export function normalizeModelId(modelId: string): string {

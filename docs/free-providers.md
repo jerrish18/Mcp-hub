@@ -13,6 +13,18 @@ MCP Hub lists each verified model once. A canonical model can have multiple rout
 | [Nous Portal](https://portal.nousresearch.com/) | Its free portal models do not establish free API access. API keys draw on pay-as-you-go credits. |
 | [SambaNova](https://cloud.sambanova.ai/plans) | The current free plan requires adding a payment method and purchasing credits before inference. |
 
+## Requested GLM, Kimi, MiniMax, and DeepSeek models
+
+| Provider | Candidates and state |
+| --- | --- |
+| [ModelScope API Inference](https://modelscope.ai/docs/model-service/API-Inference/intro) | The international free API catalog lists `zai-org/GLM-4.7-Flash`, `zai-org/GLM-5.2`, `moonshotai/Kimi-K3.1-Pro`, `MiniMax/MiniMax-M3`, and `deepseek-ai/DeepSeek-V4.1-Flash-1017`. The app uses the first-party endpoint and excludes external or priced rows. A token and authenticated inference tests are required before routes can appear. |
+| [AMD Radeon Cloud](https://developer.amd.com.cn/radeon/tokenfactory) | Token Factory advertises an allowance for `GLM-5.3-Flash` and DeepSeek. AMD's exact GLM detail record returned `free: false` and nonzero prices despite the public Free badge. The app blocks inference unless both the authorized catalog and AMD's price record confirm zero cost. |
+| [NVIDIA Build](https://build.nvidia.com/models) | `moonshotai/kimi-k3.1-pro` and `minimaxai/minimax-m3.1-flash` are additional hosted candidates. |
+| [FreeInference](https://freeinference.org/terms) | The research service may publish de-identified prompts, replies and tool results. Its terms prohibit confidential input. It is unsuitable for ordinary MCP Hub chats with private workspace context. |
+
+For ModelScope testing, add `MODELSCOPE_API_TOKEN` as an environment secret and use the [international access-token page](https://modelscope.ai/my/myaccesstoken). Use that account's own free inference access. Model quotas and availability vary.
+
+
 ## Live verification
 
 | Route | Live result |

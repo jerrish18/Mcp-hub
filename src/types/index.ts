@@ -14,7 +14,7 @@ export type AuthType = z.infer<typeof AuthTypeSchema>;
 export const EffortLevelSchema = z.enum(['low', 'medium', 'high']);
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
-export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'local', 'demo']);
+export const ProviderIdSchema = z.enum(['gemini', 'groq', 'openrouter', 'cloudflare', 'nvidia', 'kilo', 'modelscope', 'amd', 'local', 'demo']);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
 export const ChatModeSchema = z.enum(['general', 'professional', 'study', 'coding']);
@@ -449,6 +449,8 @@ export interface ProviderKeys {
   cloudflare?: string;
   cloudflareAccountId?: string;
   nvidia?: string;
+  modelscope?: string;
+  amd?: string;
 }
 
 export type ApprovalDecision = 'approve' | 'always_allow' | 'deny';

@@ -1,7 +1,7 @@
-import { nvidiaGlmFlashOptions } from './nvidiaOptions';
+import { nvidiaRequestOptions } from './nvidiaOptions';
 import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
-import { providerEndpoint } from './freeRegistry';
+import { providerEndpoint, usesFreeAiRelay } from './freeRegistry';
 import { redactSecrets } from '../../utils/redact';
 import {
   extractReadableApiError,
@@ -40,8 +40,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   const baseUrl = model.provider === 'local' || model.provider === 'demo'
     ? PROVIDER_INFO[model.provider].baseUrl : providerEndpoint(model.provider, req.credentials?.cloudflareAccountId);
   if (!baseUrl) throw new ProviderAuthError('A valid Cloudflare account ID is required.');
-  const webRelay = typeof window !== 'undefined' && /^https?:$/.test(window.location?.protocol)
-    && ['cloudflare', 'nvidia', 'kilo'].includes(model.provider) && fetchFn === fetch;
+  const webRelay = model.provider !== 'local' && model.provider !== 'demo' && usesFreeAiRelay(model.provider, fetchFn);
   const url = webRelay ? `/api/free-ai/${model.provider}/chat/completions` : `${baseUrl}/chat/completions`;
   const formattedMessages: Array<Record<string, unknown>> = [
     { role: 'system', content: systemPrompt },
@@ -84,6 +83,10 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
         content: msg.text || null,
       };
       if (msg.toolCalls && msg.toolCalls.length > 0) {
+        if (model.provider === 'nvidia' && (route?.modelId ?? model.id) === 'moonshotai/kimi-k3.1-pro'
+          && msg.providerReasoning?.provider === model.provider) {
+          entry.reasoning_content = msg.providerReasoning.text;
+        }
         entry.tool_calls = msg.toolCalls.map((tc) => ({
           id: tc.id,
           type: 'function',
@@ -120,7 +123,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   }
 
   const upstreamModelId = model.provider === 'local' ? model.id.replace(/^local:/, '') : route?.modelId ?? model.id;
-  const glmOptions = model.provider === 'nvidia' ? nvidiaGlmFlashOptions(upstreamModelId, effort) : undefined;
+  const nvidiaOptions = model.provider === 'nvidia' ? nvidiaRequestOptions(upstreamModelId, effort) : undefined;
   const body: Record<string, unknown> = {
     model: upstreamModelId,
     messages: formattedMessages,
@@ -131,7 +134,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   if (model.supportsReasoningEffort && model.provider !== 'openrouter') {
     body.reasoning_effort = effort;
   }
-  if (glmOptions) Object.assign(body, glmOptions);
+  if (nvidiaOptions) Object.assign(body, nvidiaOptions);
 
   if (model.provider !== 'local' && tools.length > 0) {
     body.tools = tools.map((t) => ({
@@ -147,7 +150,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(glmOptions ? { Accept: 'text/event-stream' } : {}),
+    ...(nvidiaOptions ? { Accept: 'text/event-stream' } : {}),
     ...(model.provider !== 'local' && model.provider !== 'kilo' ? { Authorization: `Bearer ${apiKey}` } : {}),
     ...(webRelay ? { 'X-MCPHub-UI': '1' } : {}),
   };
@@ -180,7 +183,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       await sleep(650, signal);
       continue;
     }
-    if (res.status === 400 && attempt === 0 && !glmOptions && 'reasoning_effort' in body) {
+    if (res.status === 400 && attempt === 0 && !nvidiaOptions && 'reasoning_effort' in body) {
       const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
       if (errPreview.includes('reasoning')) {
         delete body.reasoning_effort;

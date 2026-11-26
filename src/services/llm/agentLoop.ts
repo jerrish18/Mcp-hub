@@ -736,6 +736,8 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
     stepsExecuted++;
     let stepText = '';
+    let stepReasoning = '';
+    let modelProvider: ModelConfig['provider'] | undefined;
     let proposedCalls: LlmToolCall[] = [];
 
     const modelStepStartedAt = Date.now();
@@ -790,6 +792,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             accumulatedText += ev.delta;
             callbacks.onTextDelta(accumulatedText);
           } else if (ev.type === 'reasoning_delta') {
+            stepReasoning += ev.delta;
             accumulatedReasoning += ev.delta;
             callbacks.onReasoningDelta(accumulatedReasoning);
           } else if (ev.type === 'citations') {
@@ -803,6 +806,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         },
       });
       activeModelId = usedModel.id;
+      modelProvider = usedModel.provider;
       modelStep.modelId = usedModel.id;
       modelStep.provider = usedModel.provider;
       modelStep.durationMs = Math.max(0, Date.now() - modelStepStartedAt);
@@ -831,6 +835,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     workingMessages.push({
       role: 'assistant',
       text: stepText,
+      providerReasoning: modelProvider && stepReasoning ? { provider: modelProvider, text: stepReasoning } : undefined,
       toolCalls: proposedCalls.length > 0 ? proposedCalls : undefined,
     });
 

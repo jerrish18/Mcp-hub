@@ -68,6 +68,8 @@ export function SettingsScreen() {
   const [geminiKey, setGeminiKey] = useState(providerKeys.gemini ?? '');
   const [groqKey, setGroqKey] = useState(providerKeys.groq ?? '');
   const [openrouterKey, setOpenrouterKey] = useState(providerKeys.openrouter ?? '');
+  const [modelscopeToken, setModelscopeToken] = useState(providerKeys.modelscope ?? '');
+  const [amdKey, setAmdKey] = useState(providerKeys.amd ?? '');
   const [nvidiaKey, setNvidiaKey] = useState(providerKeys.nvidia ?? '');
   const [cloudflareToken, setCloudflareToken] = useState(providerKeys.cloudflare ?? '');
   const [cloudflareAccount, setCloudflareAccount] = useState(providerKeys.cloudflareAccountId ?? '');
@@ -99,6 +101,8 @@ export function SettingsScreen() {
     setGroqKey(providerKeys.groq ?? '');
     setOpenrouterKey(providerKeys.openrouter ?? '');
     setNvidiaKey(providerKeys.nvidia ?? '');
+    setModelscopeToken(providerKeys.modelscope ?? '');
+    setAmdKey(providerKeys.amd ?? '');
     setCloudflareToken(providerKeys.cloudflare ?? '');
     setCloudflareAccount(providerKeys.cloudflareAccountId ?? '');
   }, [providerKeys]);
@@ -110,6 +114,8 @@ export function SettingsScreen() {
       groq: groqKey.trim() || undefined,
       openrouter: openrouterKey.trim() || undefined,
       nvidia: nvidiaKey.trim() || undefined,
+      modelscope: modelscopeToken.trim() || undefined,
+      amd: amdKey.trim() || undefined,
       cloudflare: cloudflareToken.trim() || undefined,
       cloudflareAccountId: cloudflareAccount.trim() || undefined,
     };
@@ -566,6 +572,8 @@ export function SettingsScreen() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {([
               ['NVIDIA Build API key', nvidiaKey, setNvidiaKey],
+              ['ModelScope access token', modelscopeToken, setModelscopeToken],
+              ['AMD Token Factory key', amdKey, setAmdKey],
               ['Cloudflare Workers AI token', cloudflareToken, setCloudflareToken],
               ['Cloudflare account ID', cloudflareAccount, setCloudflareAccount],
             ] as const).map(([label, value, update]) => (

@@ -1,17 +1,16 @@
 import { Readable } from 'node:stream';
 import { Router, json } from 'express';
-import { nvidiaGlmFlashOptions } from '../services/llm/nvidiaOptions.ts';
-import { catalogRoute, evidenceFor, providerEndpoint } from '../services/llm/freeRegistry.ts';
+import { nvidiaRequestOptions } from '../services/llm/nvidiaOptions.ts';
+import { catalogRoute, evidenceFor, FREE_AI_RELAY_PROVIDERS, providerEndpoint, readProviderCatalog } from '../services/llm/freeRegistry.ts';
 
-const PROVIDERS = ['cloudflare', 'nvidia', 'kilo'] as const;
-type RelayProvider = typeof PROVIDERS[number];
+type RelayProvider = typeof FREE_AI_RELAY_PROVIDERS[number];
 
 export function createFreeAiRouter() {
   const router = Router();
   router.use(json({ limit: '8mb' }));
 
   router.all('/free-ai/:provider/:resource/:action?', async (req, res) => {
-    const provider = PROVIDERS.find((value) => value === req.params.provider);
+    const provider = FREE_AI_RELAY_PROVIDERS.find((value) => value === req.params.provider);
     const isCatalog = req.method === 'GET' && req.params.resource === 'models' && !req.params.action;
     const isInference = req.method === 'POST' && req.params.resource === 'chat' && req.params.action === 'completions';
     if (!provider || (!isCatalog && !isInference)) {
@@ -37,6 +36,11 @@ export function createFreeAiRouter() {
     const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(isCatalog ? 10_000 : 150_000)]);
     res.set('Cache-Control', 'no-store');
     try {
+      if (isCatalog && provider === 'amd') {
+        const data = await readProviderCatalog(provider, { amd: authorization?.slice(7) }, fetch, signal);
+        res.json({ data });
+        return;
+      }
       if (isCatalog) {
         const upstream = await fetch(catalog, { headers, signal, redirect: 'error' });
         if (!upstream.ok) {
@@ -46,7 +50,7 @@ export function createFreeAiRouter() {
         res.json(await upstream.json());
         return;
       }
-      await relayInference(provider, endpoint, catalog, headers, req.body ?? {}, signal, res);
+      await relayInference(provider, endpoint, headers, req.body ?? {}, signal, res);
     } catch {
       if (res.headersSent) res.end();
       else if (!abort.signal.aborted) res.status(503).json({ error: 'Free provider connection was interrupted.' });
@@ -57,7 +61,7 @@ export function createFreeAiRouter() {
 }
 
 async function relayInference(
-  provider: RelayProvider, endpoint: string, catalog: string, headers: Record<string, string>,
+  provider: RelayProvider, endpoint: string, headers: Record<string, string>,
   body: Record<string, unknown>, signal: AbortSignal, res: import('express').Response,
 ) {
   const modelId = typeof body.model === 'string' ? body.model : '';
@@ -66,9 +70,9 @@ async function relayInference(
     res.status(403).json({ error: 'This provider route has not passed free access verification.' });
     return;
   }
-  const listing = await fetch(catalog, { headers, signal, redirect: 'error' });
-  const rows = listing.ok ? (await listing.json()).data : [];
-  const row = Array.isArray(rows) && rows.find((entry) => entry?.id === modelId);
+  const token = headers.Authorization?.slice(7);
+  const rows = await readProviderCatalog(provider, { [provider]: token }, fetch, signal);
+  const row = rows.find((entry) => entry.id === modelId);
   const route = row && catalogRoute(provider, row);
   if (!route) {
     res.status(403).json({ error: 'The provider no longer lists this model as eligible for free inference.' });
@@ -79,11 +83,14 @@ async function relayInference(
     return;
   }
   const requestedMax = typeof body.max_tokens === 'number' && body.max_tokens > 0 ? Math.floor(body.max_tokens) : 24576;
-  const glmOptions = provider === 'nvidia' ? nvidiaGlmFlashOptions(modelId, body.reasoning_effort) : undefined;
+  const templateOptions = body.chat_template_kwargs;
+  const effort = body.reasoning_effort ?? (templateOptions && typeof templateOptions === 'object'
+    && 'reasoning_effort' in templateOptions ? templateOptions.reasoning_effort : undefined);
+  const nvidiaOptions = provider === 'nvidia' ? nvidiaRequestOptions(modelId, effort) : undefined;
   const upstream = await fetch(`${endpoint}/chat/completions`, {
-    method: 'POST', headers: glmOptions ? { ...headers, Accept: 'text/event-stream' } : headers, signal, redirect: 'error',
+    method: 'POST', headers: nvidiaOptions ? { ...headers, Accept: 'text/event-stream' } : headers, signal, redirect: 'error',
     body: JSON.stringify({ model: modelId, messages: body.messages, stream: true,
-      max_tokens: Math.min(requestedMax, route.maxOutput ?? 24576, 24576), tools: body.tools, tool_choice: body.tool_choice, ...glmOptions }),
+      max_tokens: Math.min(requestedMax, route.maxOutput ?? 24576, 24576), tools: body.tools, tool_choice: body.tool_choice, ...nvidiaOptions }),
   });
   for (const name of ['retry-after', 'x-ratelimit-remaining-requests']) {
     const value = upstream.headers.get(name);
