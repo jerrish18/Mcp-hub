@@ -56,4 +56,10 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: true, tools: true, reasoning: true,
     results: 'Passed streaming, TypeScript, reasoning output, tool round trip and image input on NVIDIA Build.',
   },
+  {
+    provider: 'nvidia', modelId: 'moonshotai/kimi-k3.1-pro', canonicalId: 'moonshotai/kimi-k3.1-pro',
+    testedAt: '2026-11-26T17:05:18.984Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Passed hosted streaming, TypeScript, reasoning output, tool round trip and image input on NVIDIA Build.',
+  },
 ];

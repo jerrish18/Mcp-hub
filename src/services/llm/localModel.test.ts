@@ -74,3 +74,23 @@ test('NVIDIA GLM 5.3 Flash bounds its default reasoning and clears prior thinkin
   await inspect('medium');
   await inspect('high');
 });
+
+test('Kimi keeps reasoning from its own tool call turn in the NVIDIA continuation', async () => {
+  const model = { ...getModelById('moonshotai/kimi-k3.1-pro'), provider: 'nvidia' as const };
+  await streamOpenAiCompatibleCompletion({
+    model, apiKey: 'fixture', effort: 'low', systemPrompt: '', tools: [], onEvent: () => {},
+    messages: [
+      { role: 'assistant', text: '', toolCalls: [{ id: 'native', name: 'read', rawArguments: '{}' }],
+        providerReasoning: { provider: 'nvidia', text: 'native reasoning' } },
+      { role: 'assistant', text: '', toolCalls: [{ id: 'other', name: 'read', rawArguments: '{}' }],
+        providerReasoning: { provider: 'modelscope', text: 'other reasoning' } },
+    ],
+    fetchFn: async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      assert.equal(body.reasoning_effort, 'low');
+      assert.equal(body.messages[1].reasoning_content, 'native reasoning');
+      assert.equal(body.messages[2].reasoning_content, undefined);
+      return new Response('data: [DONE]\n\n');
+    },
+  });
+});

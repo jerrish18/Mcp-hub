@@ -23,9 +23,6 @@ jobs:
       matrix:
         include:
           - provider: nvidia
-            model: moonshotai/kimi-k3.1-pro
-            secret: NVIDIA_API_KEY
-          - provider: nvidia
             model: minimaxai/minimax-m3.1-flash
             secret: NVIDIA_API_KEY
     steps:

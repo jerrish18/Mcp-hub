@@ -1,6 +1,6 @@
 import { catalogRoute, cloudCredential, providerEndpoint, readProviderCatalog } from '../src/services/llm/freeRegistry';
 import { streamOpenAiCompatibleCompletion } from '../src/services/llm/openaiCompatible';
-import type { LlmConversationItem, LlmToolCall, LlmToolDefinition } from '../src/services/llm/types';
+import { RateLimitError, type LlmConversationItem, type LlmToolCall, type LlmToolDefinition } from '../src/services/llm/types';
 import type { CloudProvider, ProviderKeys } from '../src/types';
 
 const keys: ProviderKeys = {
@@ -45,7 +45,7 @@ async function verify(provider: CloudProvider, modelId: string) {
     const entry = entries.find((row) => row.id === modelId);
     const route = entry && catalogRoute(provider, entry);
     if (!route) throw new Error('Route is absent, paid, or lacks a documented no-charge path.');
-    const run = async (messages: LlmConversationItem[], tools: LlmToolDefinition[] = []) => {
+    const attempt = async (messages: LlmConversationItem[], tools: LlmToolDefinition[]) => {
       let text = '';
       let parts = 0;
       let reasoning = '';
@@ -71,6 +71,15 @@ async function verify(provider: CloudProvider, modelId: string) {
       });
       if (!done) throw new Error('Stream did not terminate cleanly.');
       return { text: text.trim(), parts, reasoning, calls };
+    };
+    const run = async (messages: LlmConversationItem[], tools: LlmToolDefinition[] = []) => {
+      try {
+        return await attempt(messages, tools);
+      } catch (error) {
+        if (!(error instanceof RateLimitError) || (error.retryAfterMs ?? 0) > 30_000) throw error;
+        await new Promise((resolve) => setTimeout(resolve, Math.max(error.retryAfterMs ?? 0, 15_000)));
+        return attempt(messages, tools);
+      }
     };
     const prompt = (text: string): LlmConversationItem => ({ role: 'user', text });
     phase = 'coding and streaming';
