@@ -27,6 +27,16 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Verify Kilo to OpenRouter same-model fallback
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::notice::Skipping live fallback because OPENROUTER_API_KEY is missing."
+            exit 0
+          fi
+          node --import tsx scripts/verify-free-failover.ts nvidia/nemotron-3-ultra-550b-a55b
       - name: Verify OpenRouter free routes
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

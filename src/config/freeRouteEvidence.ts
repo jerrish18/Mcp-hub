@@ -26,4 +26,10 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: false, tools: true, reasoning: true,
     results: 'Anonymous live inference, streamed coding, reasoning output and tool round trip passed.',
   },
+  {
+    provider: 'openrouter', modelId: 'nvidia/nemotron-3-ultra-550b-a55b:free', canonicalId: 'nvidia/nemotron-3-ultra-550b-a55b',
+    testedAt: '2026-11-26T16:05:12.545Z', codingScore: 1,
+    images: false, tools: true, reasoning: true,
+    results: 'Zero-price hosted inference, streamed TypeScript, reasoning output and tool round trip passed.',
+  },
 ];
