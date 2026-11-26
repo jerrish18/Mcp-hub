@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
-import { Check, Cpu, KeyRound, Search, Sparkles } from 'lucide-react';
-import { getShortModelName, PROVIDER_INFO } from '../../config/models';
-import { getAvailableModels, getApiKeyForProvider } from '../../services/llm/provider';
+import { useState } from 'react';
+import { Check, Cpu, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { getShortModelName, normalizeModelId, PROVIDER_INFO } from '../../config/models';
+import { getAvailableModels, getUnavailableCatalogModels } from '../../services/llm/provider';
 import type { ModelConfig, ProviderId, ProviderKeys } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { getProviderQuotaStatus } from '../../utils/quotaTracker';
@@ -13,6 +13,7 @@ interface ModelSwitcherSheetProps {
   activeModelId: string;
   providerKeys: ProviderKeys;
   onSelectModel: (modelId: string) => void;
+  onRefresh: () => Promise<{ transient: boolean }>;
   onOpenSettings?: () => void;
 }
 
@@ -25,188 +26,172 @@ function formatContextWindow(tokens: number): string {
 }
 
 export function ModelSwitcherSheet({
-  open,
-  onClose,
-  dynamicModels,
-  activeModelId,
-  providerKeys,
-  onSelectModel,
-  onOpenSettings,
+  open, onClose, dynamicModels, activeModelId, providerKeys, onSelectModel, onRefresh, onOpenSettings,
 }: ModelSwitcherSheetProps) {
   const [query, setQuery] = useState('');
-  const allModels = useMemo(() => getAvailableModels(providerKeys, dynamicModels), [dynamicModels, providerKeys]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState('');
+  const models = getAvailableModels(providerKeys, dynamicModels);
+  const unavailable = getUnavailableCatalogModels(models, dynamicModels);
+  const selectedId = normalizeModelId(activeModelId);
+  const search = query.trim().toLowerCase();
+  const matching = (model: ModelConfig) => [
+    getShortModelName(model), model.label, model.id, PROVIDER_INFO[model.provider].name,
+    ...(model.routes ?? []).map((route) => PROVIDER_INFO[route.provider].name),
+  ].some((value) => value.toLowerCase().includes(search));
+  const visibleModels = models.filter(matching);
+  const visibleUnavailable = unavailable.filter(matching);
+  const hasCloudModels = models.some((model) => model.routes?.length);
 
-  const filteredModels = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return allModels;
-    return allModels.filter(
-      (m) =>
-        m.label.toLowerCase().includes(q) ||
-        getShortModelName(m).toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        PROVIDER_INFO[m.provider].name.toLowerCase().includes(q)
-    );
-  }, [allModels, query]);
-
-  const grouped = useMemo(() => {
-    return PROVIDER_ORDER.map((provider) => ({
-      provider,
-      title: PROVIDER_INFO[provider].name,
-      hasKey: provider === 'demo' || Boolean(getApiKeyForProvider(provider, providerKeys)),
-      items: filteredModels.filter((m) => m.provider === provider),
-    })).filter((g) => g.items.length > 0);
-  }, [filteredModels, providerKeys]);
+  const select = (modelId: string) => {
+    onSelectModel(modelId);
+    onClose();
+  };
+  const refresh = async () => {
+    setRefreshing(true);
+    setRefreshStatus('');
+    try {
+      const result = await onRefresh();
+      setRefreshStatus(result.transient ? 'Some catalogs are temporarily unavailable. Try again shortly.' : 'Model list refreshed.');
+    } catch {
+      setRefreshStatus('Could not refresh the model list. Try again shortly.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   return (
-    <BottomSheet
-      open={open}
-      onClose={onClose}
-      title="Choose AI Model"
-      subtitle="Models are managed independently from your selected agent"
-    >
+    <BottomSheet open={open} onClose={onClose} title="Choose AI Model">
       <div className="space-y-4">
-        <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Filter models (Gemini, GPT-OSS, Qwen, Llama...)"
-            aria-label="Search models"
-            style={{
-              backgroundColor: 'var(--m3-surface-container)',
-              borderColor: 'var(--m3-outline)',
-            }}
-            className="w-full min-h-[42px] pl-10 pr-3.5 rounded-2xl border text-sm text-slate-900 dark:text-white"
-          />
+        <div className="flex gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search aria-hidden="true" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search models"
+              aria-label="Search models"
+              style={{ backgroundColor: 'var(--m3-surface-container)', borderColor: 'var(--m3-outline)' }}
+              className="w-full min-w-0 min-h-[44px] pl-9 pr-2 rounded-2xl border text-sm"
+            />
+          </div>
+          <button
+            type="button"
+            aria-label="Refresh models"
+            title="Refresh models"
+            disabled={refreshing}
+            onClick={() => void refresh()}
+            className="workspace-secondary flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center"
+          >
+            <RefreshCw aria-hidden="true" className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
         </div>
-
-        {allModels.some((item) => item.routes?.length) && (
-          <button type="button" onClick={() => { onSelectModel('cloud-auto'); onClose(); }} className="workspace-secondary">
+        {refreshStatus && <p role="status" className="text-xs text-slate-500 dark:text-slate-400">{refreshStatus}</p>}
+        {hasCloudModels && !search && (
+          <button type="button" onClick={() => select('cloud-auto')} aria-pressed={selectedId === 'cloud-auto'}
+            className="workspace-secondary inline-flex min-h-[44px] items-center gap-2 text-left"
+          >
             Automatic free model
+            {selectedId === 'cloud-auto' && <Check aria-hidden="true" className="h-4 w-4 shrink-0" />}
           </button>
         )}
-        {!allModels.some((item) => item.routes?.length) && <p className="text-sm text-slate-500 dark:text-slate-400">
-          Verified cloud models appear here after their free routes pass verification.
-        </p>}
-        <div className="space-y-5">
-          {grouped.map((group) => {
-            const quota = open ? getProviderQuotaStatus(group.provider) : null;
-            return (
-            <section key={group.provider} className="space-y-2">
-              <div className="flex items-center justify-between gap-2 px-1">
-                <div className="flex items-center gap-2 min-w-0">
-                  <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 truncate">
-                    {group.title}
-                  </h3>
-                  {quota && (quota.rpmUsed > 0 || quota.rpdUsed > 0 || quota.rateLimitedRecently) && (
-                    <span
-                      className={`text-[10px] font-mono tabular-nums ${
-                        quota.rateLimitedRecently
-                          ? 'text-rose-600 dark:text-rose-400 font-semibold'
-                          : quota.nearLimit
-                            ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                            : 'text-slate-400'
-                      }`}
-                    >
-                      {quota.rpmUsed}/{quota.rpmLimit} RPM
-                    </span>
-                  )}
-                </div>
-                {group.hasKey ? (
-                  <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0">
-                    Connected
-                  </span>
-                ) : onOpenSettings ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose();
-                      onOpenSettings();
-                    }}
-                    className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 inline-flex items-center gap-1 hover:underline shrink-0"
-                  >
-                    <KeyRound className="w-3 h-3" />
-                    Add API key
-                  </button>
-                ) : (
-                  <span className="text-[11px] text-slate-400 shrink-0">Key needed</span>
-                )}
-              </div>
+        {!hasCloudModels && !search && (
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            No verified cloud models are currently available.
+            {onOpenSettings && (
+              <> <button type="button" className="font-semibold underline" onClick={() => { onClose(); onOpenSettings(); }}>Open provider settings</button></>
+            )}
+          </p>
+        )}
+        {search && !visibleModels.length && !visibleUnavailable.length && (
+          <p className="text-sm text-slate-500 dark:text-slate-400">No models match your search.</p>
+        )}
+        {PROVIDER_ORDER.map((provider) => {
+          const group = visibleModels.filter((model) => model.provider === provider);
+          if (!group.length) return null;
+          const quota = getProviderQuotaStatus(provider);
+          return (
+            <section key={provider} aria-label={PROVIDER_INFO[provider].name} className="space-y-2">
+              <h3 className="break-words px-1 text-xs font-semibold text-slate-500 dark:text-slate-400">
+                {PROVIDER_INFO[provider].name}
+              </h3>
               {quota?.warningText && (
-                <div className="px-2.5 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-[11px] text-amber-800 dark:text-amber-300">
+                <p className="break-words rounded-xl border border-amber-200 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-900 dark:text-amber-300">
                   {quota.warningText}
-                </div>
+                </p>
               )}
-
-              <div className="space-y-1.5">
-                {group.items.map((model) => {
-                  const selected = model.id === activeModelId;
-                  const shortName = getShortModelName(model);
-                  return (
-                    <button
-                      key={model.id}
-                      type="button"
-                      data-testid={`select-model-${model.id}`}
-                      onClick={() => {
-                        onSelectModel(model.id);
-                        onClose();
-                      }}
-                      style={
-                        selected
-                          ? {
-                              backgroundColor: 'var(--m3-primary-container)',
-                              borderColor: 'var(--m3-primary)',
-                            }
-                          : {
-                              backgroundColor: 'var(--m3-surface-container)',
-                              borderColor: 'var(--m3-outline)',
-                            }
-                      }
-                      className="w-full min-h-[58px] p-3.5 rounded-2xl border text-left flex items-center justify-between gap-3 transition-colors"
+              {group.map((model) => {
+                const selected = model.id === selectedId;
+                const otherProviders = [...new Set((model.routes ?? [])
+                  .filter((route) => route.provider !== provider).map((route) => PROVIDER_INFO[route.provider].name))];
+                return (
+                  <button
+                    key={model.id}
+                    type="button"
+                    data-testid={`select-model-${model.id}`}
+                    aria-pressed={selected}
+                    onClick={() => select(model.id)}
+                    style={{
+                      backgroundColor: selected ? 'var(--m3-primary-container)' : 'var(--m3-surface-container)',
+                      borderColor: selected ? 'var(--m3-primary)' : 'var(--m3-outline)',
+                    }}
+                    className="flex min-h-[58px] w-full min-w-0 items-start gap-3 rounded-2xl border p-3 text-left transition-colors"
+                  >
+                    <span aria-hidden="true"
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-200/70 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <span
-                          style={
-                            selected
-                              ? { backgroundColor: 'var(--m3-primary)', color: 'var(--m3-on-primary)' }
-                              : undefined
-                          }
-                          className="w-9 h-9 rounded-xl bg-slate-200/70 dark:bg-slate-800 flex items-center justify-center shrink-0 text-slate-700 dark:text-slate-200"
-                        >
-                          {model.provider === 'gemini' ? (
-                            <Sparkles className="w-4 h-4" />
-                          ) : (
-                            <Cpu className="w-4 h-4" />
-                          )}
-                        </span>{model.routes?.some((route) => route.dataTerms) && <span className="block text-[11px] text-amber-700 dark:text-amber-300">A free route may retain prompts for training.</span>}
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                            {shortName}
-                          </div>
-                          <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5 tabular-nums">
-                            {formatContextWindow(model.contextWindow)}
-                            {(model.supportsThinkingLevel || model.supportsReasoningEffort) && (
-                              <>
-                                <span aria-hidden="true"> · </span>
-                                <span>Reasoning control</span>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      {selected && (
-                        <Check style={{ color: 'var(--m3-primary)' }} className="w-5 h-5 shrink-0" />
+                      {provider === 'gemini' ? <Sparkles className="h-4 w-4" /> : <Cpu className="h-4 w-4" />}
+                    </span>
+                    <span className="min-w-0 flex-1 space-y-1 [overflow-wrap:anywhere]">
+                      <span className="block text-sm font-semibold text-slate-900 dark:text-white">{getShortModelName(model)}</span>
+                      <span className="block text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                        {formatContextWindow(model.contextWindow)}
+                        {model.routes?.some((route) => route.reasoning) && ' · Reasoning'}
+                      </span>
+                      {!!otherProviders.length && (
+                        <span className="block text-xs text-slate-500 dark:text-slate-400">
+                          Also via {otherProviders.join(', ')}
+                        </span>
                       )}
-                    </button>
-                  );
-                })}
-              </div>
+                      {model.routes?.some((route) => route.dataTerms) && (
+                        <span className="block text-xs leading-relaxed text-amber-800 dark:text-amber-300">
+                          A free route may retain prompts for training.
+                        </span>
+                      )}
+                    </span>
+                    {selected && <Check aria-hidden="true" style={{ color: 'var(--m3-primary)' }} className="mt-0.5 h-5 w-5 shrink-0" />}
+                  </button>
+                );
+              })}
             </section>
-            );
-          })}
-        </div>
+          );
+        })}
+        {!!visibleUnavailable.length && (search ? (
+          <section aria-label="Unavailable models"><UnavailableModels models={visibleUnavailable} /></section>
+        ) : (
+          <details className="rounded-2xl border px-3.5 py-2.5" style={{ borderColor: 'var(--m3-outline)' }}>
+            <summary className="cursor-pointer text-sm font-semibold">Unavailable models ({visibleUnavailable.length})</summary>
+            <UnavailableModels models={visibleUnavailable} />
+          </details>
+        ))}
       </div>
     </BottomSheet>
+  );
+}
+
+function UnavailableModels({ models }: { models: ModelConfig[] }) {
+  return (
+    <div className="space-y-2 pt-2 text-xs text-slate-500 dark:text-slate-400">
+      <p>These models have no verified free route available with your current settings.</p>
+      <ul className="space-y-2">
+        {models.map((model) => (
+          <li key={model.id} className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+            <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{getShortModelName(model)}</span>
+            <span>{PROVIDER_INFO[model.provider].name}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

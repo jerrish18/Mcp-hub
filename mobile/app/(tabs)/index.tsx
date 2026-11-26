@@ -16,7 +16,7 @@ import { ArrowUp, ChevronDown, MessageSquare, Mic, MicOff, Plus, Square } from '
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { fetch as expoFetch } from 'expo/fetch';
-import { getAvailableModels, syncLiveProviderModels } from '@core/services/llm/provider';
+import { getAvailableModels, getUnavailableCatalogModels, preserveCatalogForSameCredentials, retainTransientCatalogRoutes, syncLiveProviderModels } from '@core/services/llm/provider';
 import { CATALOG_TTL } from '@core/services/llm/freeRegistry';
 import { safeErrorMessage } from '@core/utils/redact';
 import { getModelById, PROVIDER_INFO } from '@core/config/models';
@@ -104,6 +104,8 @@ export default function MobileChatScreen() {
   const [chatMode, setChatMode] = useState<ChatMode>('professional');
   const [selectedModelId, setSelectedModelId] = useState<string | undefined>();
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [showUnavailableModels, setShowUnavailableModels] = useState(false);
+  const catalogKeys = useRef<ProviderKeys>({});
   const [cloudModels, setCloudModels] = useState<ModelConfig[]>([]);
   const [showReasoning, setShowReasoning] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -129,16 +131,29 @@ export default function MobileChatScreen() {
 
   useFocusEffect(useCallback(() => {
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = async () => {
-      const keys = await loadProviderKeys();
-      const { models } = await syncLiveProviderModels(keys, expoFetch as unknown as typeof fetch);
-      if (active) setCloudModels(models);
+      let retrySoon = true;
+      try {
+        const keys = await loadProviderKeys();
+        const { models, transientProviders } = await syncLiveProviderModels(keys, expoFetch as unknown as typeof fetch);
+        if (!active) return;
+        const previousKeys = catalogKeys.current;
+        catalogKeys.current = keys;
+        setCloudModels((previous) => retainTransientCatalogRoutes(
+          models, preserveCatalogForSameCredentials(previous, previousKeys, keys), transientProviders, keys,
+        ));
+        retrySoon = transientProviders.length > 0;
+      } catch {
+        retrySoon = true;
+      } finally {
+        if (active) timer = setTimeout(() => void refresh(), retrySoon ? 60_000 : CATALOG_TTL - 60_000);
+      }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), CATALOG_TTL - 60_000);
     return () => {
       active = false;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, []));
 
@@ -490,6 +505,8 @@ export default function MobileChatScreen() {
     }
   };
 
+  const pickerModels = getAvailableModels(catalogKeys.current, cloudModels);
+  const unavailableModels = getUnavailableCatalogModels(pickerModels, cloudModels);
   const theme = useWorkspaceTheme(Boolean(settings.oledDark));
   const isDark = theme.dark;
 
@@ -556,10 +573,26 @@ export default function MobileChatScreen() {
           <FlatList
             contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 20, gap: 8 }}
             data={[
-              ...(cloudModels.length ? [getModelById('cloud-auto')] : []),
-              ...cloudModels.filter((entry) => entry.routes?.some((route) => route.expiresAt > Date.now())),
-              getModelById('demo-sandbox'),
+              ...(pickerModels.some((entry) => entry.routes?.length) ? [getModelById('cloud-auto')] : []),
+              ...pickerModels,
             ]}
+            ListFooterComponent={unavailableModels.length ? (
+              <View style={{ paddingVertical: 12, gap: 6 }}>
+                <Pressable accessibilityRole="button" accessibilityState={{ expanded: showUnavailableModels }}
+                  onPress={() => setShowUnavailableModels((value) => !value)}
+                  style={{ minHeight: 44, justifyContent: 'center' }}>
+                  <Text style={{ color: theme.text, fontWeight: '600' }}>Unavailable models ({unavailableModels.length})</Text>
+                </Pressable>
+                {showUnavailableModels && (
+                  <>
+                    <Text style={{ color: theme.muted }}>These models have no verified free route with your current settings.</Text>
+                    {unavailableModels.map((entry) => (
+                      <Text key={entry.id} style={{ color: theme.muted }}>{entry.label}</Text>
+                    ))}
+                  </>
+                )}
+              </View>
+            ) : null}
             keyExtractor={(entry) => entry.id}
             renderItem={({ item }) => (
               <Pressable accessibilityRole="button" accessibilityState={{ selected: item.id === model.id }}

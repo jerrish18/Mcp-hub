@@ -12,6 +12,8 @@ import {
   getApiKeyForProvider,
   getAvailableModels,
   syncLiveProviderModels,
+  preserveCatalogForSameCredentials,
+  retainTransientCatalogRoutes,
 } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
@@ -360,7 +362,7 @@ export interface HubState {
   updateSettings: (patch: Partial<AppSettings>) => void;
   setProviderKeys: (keys: ProviderKeys) => Promise<void>;
   pendingFreeModels: string[];
-  syncModels: () => Promise<{ count: number; providers: string[] }>;
+  syncModels: () => Promise<{ count: number; providers: string[]; transient: boolean }>;
   addCustomModel: (provider: ProviderId, modelId: string, label?: string) => void;
   revokeAlwaysAllowedTool: (qualifiedKey: string) => void;
   revokeAlwaysAllowedRule: (index: number) => void;
@@ -956,7 +958,7 @@ export const useHubStore = create<HubState>((set, get) => {
       set((state) => ({
         providerKeys: keys,
         pendingFreeModels: [],
-        dynamicModels: state.dynamicModels.filter((model) => !model.routes?.length),
+        dynamicModels: preserveCatalogForSameCredentials(state.dynamicModels, state.providerKeys, keys),
       }));
       void get().syncModels();
     },
@@ -965,14 +967,16 @@ export const useHubStore = create<HubState>((set, get) => {
       const { providerKeys: keys } = get();
       const scope = activeScope();
       if (catalogRefresh && catalogRefresh.keys === keys && catalogRefresh.scope === scope) return catalogRefresh.promise;
-      const promise = syncLiveProviderModels(keys).then(({ models, pending, syncedProviders }) => {
+      const promise = syncLiveProviderModels(keys).then(({ models, pending, syncedProviders, transientProviders }) => {
         if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
-          const custom = get().dynamicModels.filter((model) => model.description === 'Custom user model'
-            && !models.some((fresh) => fresh.id === model.id));
-          set({ dynamicModels: [...models, ...custom], pendingFreeModels: pending });
+          const previous = get().dynamicModels;
+          const verified = retainTransientCatalogRoutes(models, previous, transientProviders, keys);
+          const custom = previous.filter((model) => model.description === 'Custom user model'
+            && !verified.some((fresh) => fresh.id === model.id));
+          set({ dynamicModels: [...verified, ...custom], pendingFreeModels: pending });
           persist();
         }
-        return { count: models.length, providers: syncedProviders };
+        return { count: models.length, providers: syncedProviders, transient: transientProviders.length > 0 };
       }).finally(() => {
         if (catalogRefresh?.promise === promise) catalogRefresh = undefined;
       });

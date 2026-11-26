@@ -110,14 +110,28 @@ export default function App() {
 
   useEffect(() => {
     if (!initialized || isLocked || vaultLocked || (!authUser && !authGuestMode)) return;
-    const refresh = () => {
-      if (document.visibilityState === 'visible') void useHubStore.getState().syncModels();
+    let disposed = false;
+    let refreshing = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState !== 'visible' || refreshing) return;
+      refreshing = true;
+      let retrySoon = true;
+      try {
+        retrySoon = (await useHubStore.getState().syncModels()).transient;
+      } catch {
+        retrySoon = true;
+      } finally {
+        refreshing = false;
+        if (!disposed) timer = window.setTimeout(refresh, retrySoon ? 60_000 : CATALOG_TTL - 60_000);
+      }
     };
-    refresh();
-    const timer = window.setInterval(refresh, CATALOG_TTL - 60_000);
+    void refresh();
     document.addEventListener('visibilitychange', refresh);
     return () => {
-      window.clearInterval(timer);
+      disposed = true;
+      window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [initialized, isLocked, vaultLocked, authUser, authGuestMode]);

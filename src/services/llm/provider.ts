@@ -1,5 +1,6 @@
+import { FREE_ROUTE_EVIDENCE } from '../../config/freeRouteEvidence';
 import { formatReadableModelSlug, FREE_MODELS, getModelById, PROVIDER_INFO, normalizeModelId } from '../../config/models';
-import type { EffortLevel, ModelConfig, ProviderId, ProviderKeys } from '../../types';
+import type { CloudProvider, EffortLevel, ModelConfig, ProviderId, ProviderKeys } from '../../types';
 import { streamDemoCompletion } from './demoProvider';
 import { streamGeminiCompletion } from './gemini';
 import { streamOpenAiCompatibleCompletion } from './openaiCompatible';
@@ -10,7 +11,7 @@ import {
   RateLimitError,
   type StreamCompletionRequest,
 } from './types';
-import { canonicalIdFor, catalogRoute, cloudCredential, CLOUD_PROVIDERS, currentVerifiedRoute, eligibleRoutes, evidenceFor, readProviderCatalog } from './freeRegistry';
+import { canonicalIdFor, catalogRoute, cloudCredential, CLOUD_PROVIDERS, currentVerifiedRoute, eligibleRoutes, evidenceFor, isTransientCatalogError, readProviderCatalog } from './freeRegistry';
 import { recordProvider429, recordProviderRequest } from '../../utils/quotaTracker';
 
 export function buildEffortAugmentedPrompt(basePrompt: string, effort: EffortLevel, model: ModelConfig): string {
@@ -67,8 +68,54 @@ export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfi
 }
 
 export function getAvailableModels(keys: ProviderKeys, dynamicModels: ModelConfig[] = []): ModelConfig[] {
-  return mergeModelCatalog(dynamicModels).filter((model) =>
-    model.provider === 'demo' || model.provider === 'local' || eligibleRoutes(model, keys).length > 0);
+  return mergeModelCatalog(dynamicModels).flatMap((model) => {
+    if (model.provider === 'demo' || model.provider === 'local') return [model];
+    const routes = eligibleRoutes(model, keys);
+    const primary = routes.find((route) => route.provider === model.provider) ?? routes[0];
+    return primary ? [{ ...model, provider: primary.provider, contextWindow: primary.contextWindow, routes }] : [];
+  });
+}
+
+export function getUnavailableCatalogModels(available: ModelConfig[], dynamicModels: ModelConfig[] = []): ModelConfig[] {
+  const availableIds = new Set(available.map((model) => normalizeModelId(model.id)));
+  const known = new Map<string, ModelConfig>();
+  for (const model of FREE_MODELS) {
+    const id = normalizeModelId(model.id);
+    if (model.provider !== 'demo' && id !== 'cloud-auto') known.set(id, model);
+  }
+  for (const evidence of FREE_ROUTE_EVIDENCE) {
+    if (!known.has(evidence.canonicalId)) {
+      const model = getModelById(evidence.canonicalId, dynamicModels);
+      known.set(evidence.canonicalId, { ...model, provider: evidence.provider });
+    }
+  }
+  return [...known].filter(([id]) => !availableIds.has(id)).map(([, model]) => model);
+}
+
+export function preserveCatalogForSameCredentials(
+  models: ModelConfig[], previous: ProviderKeys, current: ProviderKeys,
+): ModelConfig[] {
+  return models.flatMap((model) => {
+    if (!model.routes?.length) return [model];
+    const routes = model.routes.filter((route) =>
+      cloudCredential(route.provider, previous) === cloudCredential(route.provider, current)
+      && (route.provider !== 'cloudflare' || previous.cloudflareAccountId === current.cloudflareAccountId));
+    return routes.length ? [{ ...model, routes }] : [];
+  });
+}
+
+export function retainTransientCatalogRoutes(
+  fresh: ModelConfig[], previous: ModelConfig[], transientProviders: CloudProvider[], keys: ProviderKeys,
+): ModelConfig[] {
+  if (!transientProviders.length) return fresh;
+  const models = new Map(fresh.map((model) => [model.id, model]));
+  for (const old of previous) {
+    const routes = eligibleRoutes(old, keys).filter((route) => transientProviders.includes(route.provider));
+    if (!routes.length) continue;
+    const current = models.get(old.id);
+    models.set(old.id, { ...(current ?? old), routes: [...(current?.routes ?? []), ...routes] });
+  }
+  return [...models.values()];
 }
 
 const routeHealth = new Map<string, { latency?: number; cooldown?: number; remaining?: number }>();
@@ -301,7 +348,7 @@ export async function testModelConnection(params: {
 export async function syncLiveProviderModels(
   keys: ProviderKeys,
   fetchFn: typeof fetch = fetch,
-): Promise<{ models: ModelConfig[]; pending: string[]; syncedProviders: string[] }> {
+): Promise<{ models: ModelConfig[]; pending: string[]; syncedProviders: string[]; transientProviders: CloudProvider[] }> {
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), 10_000);
   const results = await Promise.allSettled(CLOUD_PROVIDERS.map(async (provider) => ({
@@ -311,8 +358,12 @@ export async function syncLiveProviderModels(
   const models = new Map<string, ModelConfig>();
   const pending: string[] = [];
   const syncedProviders: string[] = [];
-  for (const result of results) {
-    if (result.status === 'rejected') continue;
+  const transientProviders: CloudProvider[] = [];
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'rejected') {
+      if (isTransientCatalogError(result.reason)) transientProviders.push(CLOUD_PROVIDERS[index]);
+      continue;
+    }
     const { provider, rows } = result.value;
     if (rows.length) syncedProviders.push(PROVIDER_INFO[provider].name);
     for (const row of rows) {
@@ -334,5 +385,5 @@ export async function syncLiveProviderModels(
       });
     }
   }
-  return { models: [...models.values()], pending, syncedProviders };
+  return { models: [...models.values()], pending, syncedProviders, transientProviders };
 }

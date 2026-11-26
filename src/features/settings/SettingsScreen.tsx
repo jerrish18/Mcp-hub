@@ -130,11 +130,13 @@ export function SettingsScreen() {
     setSyncNotice('');
     try {
       const res = await syncModels();
-      if (res.count > 0) {
+      if (res.transient) {
+        setSyncNotice('Some catalogs are temporarily unavailable. Try refreshing again shortly.');
+      } else if (res.count > 0) {
         setSyncNotice(`Synced ${res.count} live models from ${res.providers.join(', ')}.`);
         triggerHaptic(settings.hapticsEnabled, 'success');
       } else {
-        setSyncNotice('Add an API key above first to sync live models from your account.');
+        setSyncNotice('No verified free cloud models are currently available for your configured providers.');
       }
     } catch (err) {
       setSyncNotice(safeErrorMessage(err));

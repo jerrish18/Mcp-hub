@@ -76,6 +76,22 @@ function catalogUrl(provider: CloudProvider, keys: ProviderKeys): string | undef
     : `${endpoint}/models`;
 }
 
+export class ProviderCatalogError extends Error {
+  readonly status: number;
+
+  constructor(status: number, provider: CloudProvider) {
+    super(`${PROVIDER_INFO[provider].name} model catalog is unavailable (HTTP ${status}).`);
+    this.status = status;
+  }
+}
+
+export function isTransientCatalogError(error: unknown): boolean {
+  if (error instanceof ProviderCatalogError) {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  return error instanceof TypeError || (error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name));
+}
+
 export async function readProviderCatalog(provider: CloudProvider, keys: ProviderKeys, fetcher: typeof fetch, signal?: AbortSignal): Promise<CatalogRow[]> {
   const url = catalogUrl(provider, keys);
   const token = cloudCredential(provider, keys);
@@ -89,7 +105,7 @@ export async function readProviderCatalog(provider: CloudProvider, keys: Provide
     },
     cache: 'no-store', redirect: 'error', signal,
   });
-  if (!response.ok) throw new Error(`${PROVIDER_INFO[provider].name} model catalog is unavailable (HTTP ${response.status}).`);
+  if (!response.ok) throw new ProviderCatalogError(response.status, provider);
   const body = await response.json();
   const entries = provider === 'gemini' ? body.models : provider === 'cloudflare' ? body.result : body.data;
   if (!Array.isArray(entries)) throw new Error('Provider returned an invalid catalog.');
