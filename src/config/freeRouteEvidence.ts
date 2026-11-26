@@ -62,4 +62,10 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: true, tools: true, reasoning: true,
     results: 'Passed hosted streaming, TypeScript, reasoning output, tool round trip and image input on NVIDIA Build.',
   },
+  {
+    provider: 'nvidia', modelId: 'minimaxai/minimax-m3.1-flash', canonicalId: 'minimax/minimax-m3.1-flash',
+    testedAt: '2026-11-26T17:18:59.602Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Passed hosted streaming, TypeScript, reasoning output, tool round trip and image input on NVIDIA Build.',
+  },
 ];
