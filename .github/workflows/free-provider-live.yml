@@ -1,0 +1,65 @@
+name: Free provider live verification
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'jerrish18/Mcp-hub' &&
+      github.event.pull_request.number == 2 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'feat/free-provider-expansion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: free-provider-testing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify OpenRouter free routes
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::notice::OPENROUTER_API_KEY is missing from the free-provider-testing environment."
+            exit 0
+          fi
+          for model in \
+            nvidia/nemotron-3-ultra-550b-a55b:free \
+            nvidia/nemotron-3.5-lightning:free \
+            nvidia/nemotron-3.5-super-vl:free \
+            google/gemma-4-26b-a4b-it:free \
+            google/gemma-4-31b-it:free \
+            recursive/flint-v1.0:free \
+            particle-ai/particle-1:free
+          do
+            npm run --silent verify:free-route -- openrouter "$model" || true
+          done
+      - name: Verify NVIDIA Build free routes
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "::notice::NVIDIA_API_KEY is missing from the free-provider-testing environment."
+            exit 0
+          fi
+          for model in \
+            z-ai/glm-5.3-flash \
+            z-ai/glm-5.3 \
+            nvidia/nemotron-3-ultra-550b-a55b \
+            nvidia/nemotron-3.5-lightning-30b-a3b \
+            nvidia/nemotron-3.5-super-vl-120b-a12b
+          do
+            npm run --silent verify:free-route -- nvidia "$model" || true
+          done
