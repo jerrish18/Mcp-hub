@@ -28,6 +28,7 @@ const tool: LlmToolDefinition = {
 
 async function verify(provider: CloudProvider, modelId: string) {
   let phase = 'catalog';
+  let codingCheck: Record<string, boolean> | undefined;
   try {
     if (provider === 'openrouter') {
       phase = 'free account';
@@ -84,8 +85,12 @@ async function verify(provider: CloudProvider, modelId: string) {
     const prompt = (text: string): LlmConversationItem => ({ role: 'user', text });
     phase = 'coding and streaming';
     const code = await run([prompt('Write a TypeScript function named groupById that takes an array of { id: string } and returns a Map from each id to all records with that id in input order. Use Map<string, ...>. Output only the function.')]);
-    if (code.parts < 2 || !/function\s+groupById/.test(code.text) || !/new Map/.test(code.text)
-      || !/\.id\b/.test(code.text) || !/\.set\(/.test(code.text)) throw new Error('Coding or streaming check failed.');
+    codingCheck = {
+      streamed: code.parts > 1, namedFunction: /function\s+groupById/.test(code.text),
+      constructsMap: /new Map/.test(code.text), readsId: /\.id\b/.test(code.text),
+      writesMap: /\.set\(/.test(code.text),
+    };
+    if (Object.values(codingCheck).includes(false)) throw new Error('Coding or streaming check failed.');
     phase = 'reasoning';
     const logic = await run([prompt('Two printers print two invoices in two minutes. How many minutes do eight identical printers take to print eight invoices? Make the last line exactly ANSWER: followed by the resulting integer.')]);
     const answer = logic.text.split(/\r?\n/).at(-1)?.replace(/[*_`]/g, '').trim() ?? '';
@@ -122,7 +127,7 @@ async function verify(provider: CloudProvider, modelId: string) {
     const status = error && typeof error === 'object' && 'status' in error && typeof error.status === 'number'
       ? error.status : undefined;
     const timeout = error instanceof Error && error.name === 'TimeoutError';
-    console.error(JSON.stringify({ provider, modelId, passed: false, phase, status, timeout: timeout || undefined }));
+    console.error(JSON.stringify({ provider, modelId, passed: false, phase, status, timeout: timeout || undefined, codingCheck: phase === 'coding and streaming' ? codingCheck : undefined }));
     process.exitCode = 1;
   }
 }
