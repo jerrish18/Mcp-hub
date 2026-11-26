@@ -19,7 +19,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { PROVIDER_INFO } from '../../config/models';
-import { mergeModelCatalog, testModelConnection } from '../../services/llm/provider';
+import { getAvailableModels, testModelConnection } from '../../services/llm/provider';
 import { useHubStore } from '../../store/useHubStore';
 import type {
   A2uiMode,
@@ -44,6 +44,7 @@ export function SettingsScreen() {
     syncError,
     providerKeys,
     dynamicModels,
+    pendingFreeModels,
     settings,
     passphraseVaultEnabled,
     setProviderKeys,
@@ -62,15 +63,18 @@ export function SettingsScreen() {
     syncWorkspaceNow,
   } = useHubStore();
 
-  const allModels = mergeModelCatalog(dynamicModels);
+  const allModels = getAvailableModels(providerKeys, dynamicModels);
 
   const [geminiKey, setGeminiKey] = useState(providerKeys.gemini ?? '');
   const [groqKey, setGroqKey] = useState(providerKeys.groq ?? '');
   const [openrouterKey, setOpenrouterKey] = useState(providerKeys.openrouter ?? '');
+  const [nvidiaKey, setNvidiaKey] = useState(providerKeys.nvidia ?? '');
+  const [cloudflareToken, setCloudflareToken] = useState(providerKeys.cloudflare ?? '');
+  const [cloudflareAccount, setCloudflareAccount] = useState(providerKeys.cloudflareAccountId ?? '');
   const [showKeys, setShowKeys] = useState(false);
   const [keysSavedNotice, setKeysSavedNotice] = useState(false);
 
-  const [testModelId, setTestModelId] = useState(allModels[0]?.id ?? 'gemini-4-hydrogen');
+  const [testModelId, setTestModelId] = useState(allModels[0]?.id ?? 'demo-sandbox');
   const [testingModel, setTestingModel] = useState(false);
   const [syncingModels, setSyncingModels] = useState(false);
   const [syncNotice, setSyncNotice] = useState('');
@@ -94,13 +98,10 @@ export function SettingsScreen() {
     setGeminiKey(providerKeys.gemini ?? '');
     setGroqKey(providerKeys.groq ?? '');
     setOpenrouterKey(providerKeys.openrouter ?? '');
+    setNvidiaKey(providerKeys.nvidia ?? '');
+    setCloudflareToken(providerKeys.cloudflare ?? '');
+    setCloudflareAccount(providerKeys.cloudflareAccountId ?? '');
   }, [providerKeys]);
-
-  const currentKeysPayload = (): ProviderKeys => ({
-    gemini: geminiKey.trim() || providerKeys.gemini,
-    groq: groqKey.trim() || providerKeys.groq,
-    openrouter: openrouterKey.trim() || providerKeys.openrouter,
-  });
 
   const handleSaveKeys = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -108,6 +109,9 @@ export function SettingsScreen() {
       gemini: geminiKey.trim() || undefined,
       groq: groqKey.trim() || undefined,
       openrouter: openrouterKey.trim() || undefined,
+      nvidia: nvidiaKey.trim() || undefined,
+      cloudflare: cloudflareToken.trim() || undefined,
+      cloudflareAccountId: cloudflareAccount.trim() || undefined,
     };
     await setProviderKeys(next);
     triggerHaptic(settings.hapticsEnabled, 'success');
@@ -119,7 +123,7 @@ export function SettingsScreen() {
     setSyncingModels(true);
     setSyncNotice('');
     try {
-      const res = await syncModels(currentKeysPayload());
+      const res = await syncModels();
       if (res.count > 0) {
         setSyncNotice(`Synced ${res.count} live models from ${res.providers.join(', ')}.`);
         triggerHaptic(settings.hapticsEnabled, 'success');
@@ -145,7 +149,7 @@ export function SettingsScreen() {
 
   const effectiveTestModelId = allModels.some((m) => m.id === testModelId)
     ? testModelId
-    : (allModels[0]?.id ?? 'gemini-4-hydrogen');
+    : (allModels[0]?.id ?? 'demo-sandbox');
 
   const handleTestModel = async (overrideId?: string) => {
     const targetId = overrideId ?? effectiveTestModelId;
@@ -154,7 +158,7 @@ export function SettingsScreen() {
     try {
       const res = await testModelConnection({
         modelId: targetId,
-        keys: currentKeysPayload(),
+        keys: providerKeys,
         dynamicModels,
       });
       setTestResult({
@@ -163,7 +167,7 @@ export function SettingsScreen() {
       });
       triggerHaptic(settings.hapticsEnabled, 'success');
     } catch (err) {
-      const msg = safeErrorMessage(err, [geminiKey, groqKey, openrouterKey]);
+      const msg = safeErrorMessage(err, Object.values(providerKeys).filter((key): key is string => Boolean(key)));
       const isTransientOrMissing =
         msg.includes('503') || msg.includes('404') || msg.toLowerCase().includes('unavailable');
       setTestResult({
@@ -559,6 +563,29 @@ export function SettingsScreen() {
             </div>
           </div>
 
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {([
+              ['NVIDIA Build API key', nvidiaKey, setNvidiaKey],
+              ['Cloudflare Workers AI token', cloudflareToken, setCloudflareToken],
+              ['Cloudflare account ID', cloudflareAccount, setCloudflareAccount],
+            ] as const).map(([label, value, update]) => (
+              <label key={label} className="min-w-0 space-y-1.5 text-sm font-medium">
+                <span>{label}</span>
+                <input
+                  type={showKeys ? 'text' : 'password'}
+                  value={value}
+                  autoComplete="off"
+                  onChange={(event) => update(event.target.value)}
+                  style={{ backgroundColor: 'var(--m3-surface)', borderColor: 'var(--m3-outline)' }}
+                  className="w-full min-h-[44px] px-3.5 rounded-2xl border text-sm font-mono"
+                />
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Kilo uses anonymous free access. Gemini, Groq, and Cloudflare inference are paused pending a verifiable no-charge account policy.
+          </p>
+
           <div className="flex items-center justify-between gap-3 pt-1">
             <button
               type="submit"
@@ -693,7 +720,7 @@ export function SettingsScreen() {
                   Models & Connectivity
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Auto-fallback triggers on 429, 503 high demand, or 404 deprecated slugs
+                  Verified free routes refresh automatically. Fallback uses another verified route when available.
                 </p>
               </div>
             </div>
@@ -716,6 +743,15 @@ export function SettingsScreen() {
             <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 py-2 text-xs text-slate-700 dark:text-slate-200">
               {syncNotice}
             </div>
+          )}
+
+          {pendingFreeModels.length > 0 && (
+            <details className="rounded-2xl border border-slate-200 p-3 text-xs dark:border-slate-700">
+              <summary>{pendingFreeModels.length} discovered free routes awaiting live verification</summary>
+              <ul className="mt-2 max-h-48 space-y-1 overflow-auto break-all">
+                {pendingFreeModels.map((entry) => <li key={entry}>{entry}</li>)}
+              </ul>
+            </details>
           )}
 
           <div className="flex flex-col sm:flex-row gap-2">
@@ -763,16 +799,6 @@ export function SettingsScreen() {
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     type="button"
-                    onClick={() => {
-                      setTestModelId('gemini-3.1-flash-lite');
-                      void handleTestModel('gemini-3.1-flash-lite');
-                    }}
-                    className="px-3 py-1.5 rounded-full bg-white/80 dark:bg-slate-900 text-slate-900 dark:text-white font-semibold border border-rose-200 dark:border-rose-800"
-                  >
-                    Test Gemini Flash-Lite
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => void handleSyncLiveModels()}
                     className="px-3 py-1.5 rounded-full bg-white/80 dark:bg-slate-900 text-slate-900 dark:text-white font-semibold border border-rose-200 dark:border-rose-800"
                   >
@@ -794,7 +820,7 @@ export function SettingsScreen() {
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              {(['gemini', 'groq', 'openrouter'] as const).map((prov) => {
+              {(['gemini', 'groq', 'openrouter', 'nvidia', 'kilo'] as const).map((prov) => {
                 const status = getProviderQuotaStatus(prov);
                 if (!status) return null;
                 const rpmPct = Math.min(100, Math.round((status.rpmUsed / Math.max(1, status.rpmLimit)) * 100));
@@ -888,6 +914,8 @@ export function SettingsScreen() {
                 <option value="gemini">Gemini</option>
                 <option value="groq">Groq</option>
                 <option value="openrouter">OpenRouter</option>
+                <option value="nvidia">NVIDIA</option>
+                <option value="kilo">Kilo</option>
                 <option value="local">Local (loopback)</option>
               </select>
               <input

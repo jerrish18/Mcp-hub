@@ -5,6 +5,7 @@ import type {
   GroundingCitation,
   KnowledgeSourceMode,
   ModelConfig,
+  ProviderKeys,
   ToolMediaBlock,
 } from '../../types';
 
@@ -54,6 +55,8 @@ export type LlmStreamEvent =
 export interface StreamCompletionRequest {
   model: ModelConfig;
   apiKey: string;
+  credentials?: ProviderKeys;
+  onQuota?: (headers: Headers) => void;
   systemPrompt: string;
   effort: EffortLevel;
   chatMode?: ChatMode;
@@ -69,9 +72,11 @@ export interface StreamCompletionRequest {
 
 export class RateLimitError extends Error {
   status = 429;
-  constructor(message: string) {
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryAfterMs?: number) {
     super(message);
     this.name = 'RateLimitError';
+    this.retryAfterMs = retryAfterMs;
   }
 }
 

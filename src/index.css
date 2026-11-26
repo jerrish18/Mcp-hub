@@ -565,7 +565,9 @@ button.workspace-card:hover {
   .chat-toolbar-top > div:last-child > button { min-width: 36px; min-height: 40px; justify-content: center; }
   .chat-toolbar-modes { flex-wrap: nowrap; gap: 4px; }
   .chat-toolbar-modes [role="tab"] { min-height: 36px; padding-inline: 7px; }
-  .chat-toolbar-actions { flex-wrap: nowrap; gap: 4px; }
+  .chat-toolbar-actions { flex-wrap: nowrap; flex-shrink: 0; gap: 4px; }
+  .chat-toolbar-modes [role="tab"] svg { display: none; }
+  .chat-toolbar-modes [role="tab"] .tab-tool-count { display: none; }
   .chat-toolbar-actions > button { min-width: 39px; min-height: 39px; padding: 0; justify-content: center; border-radius: 9px; }
   .chat-canvas-label { display: none; }
 

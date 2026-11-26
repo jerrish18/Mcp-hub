@@ -14,8 +14,12 @@ import {
 } from 'react-native';
 import { ArrowUp, ChevronDown, MessageSquare, Mic, MicOff, Plus, Square } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
-import { useLocalSearchParams } from 'expo-router';
-import { getModelById } from '@core/config/models';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { fetch as expoFetch } from 'expo/fetch';
+import { getAvailableModels, syncLiveProviderModels } from '@core/services/llm/provider';
+import { CATALOG_TTL } from '@core/services/llm/freeRegistry';
+import { safeErrorMessage } from '@core/utils/redact';
+import { getModelById, PROVIDER_INFO } from '@core/config/models';
 import { runAgentLoop } from '@core/services/llm/agentLoop';
 import type { LlmConversationItem } from '@core/services/llm/types';
 import { connectAndInspectServer } from '@core/services/mcp/client';
@@ -26,9 +30,12 @@ import type {
   AppSettings,
   ApprovalDecision,
   ChatMessage,
+  ChatMode,
   Conversation,
   EffortLevel,
   McpServerConfig,
+  ModelConfig,
+  ProviderKeys,
   PendingApproval,
   ToolCallRecord,
 } from '@core/types';
@@ -94,6 +101,11 @@ export default function MobileChatScreen() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [effort, setEffort] = useState<EffortLevel>('medium');
+  const [chatMode, setChatMode] = useState<ChatMode>('professional');
+  const [selectedModelId, setSelectedModelId] = useState<string | undefined>();
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [cloudModels, setCloudModels] = useState<ModelConfig[]>([]);
+  const [showReasoning, setShowReasoning] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [running, setRunning] = useState(false);
@@ -113,7 +125,22 @@ export default function MobileChatScreen() {
   latestMessagesRef.current = messages;
 
   const agent = agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? BUILT_IN_AGENTS[0];
-  const model = getModelById(agent.defaultModelId);
+  const model = getModelById(selectedModelId ?? agent.defaultModelId, cloudModels);
+
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    const refresh = async () => {
+      const keys = await loadProviderKeys();
+      const { models } = await syncLiveProviderModels(keys, expoFetch as unknown as typeof fetch);
+      if (active) setCloudModels(models);
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), CATALOG_TTL - 60_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []));
 
   useEffect(() => {
     const incoming = typeof params.sharedText === 'string' ? params.sharedText.trim() : '';
@@ -124,7 +151,7 @@ export default function MobileChatScreen() {
   }, [params.sharedText]);
 
   const persistConvSnapshot = useCallback(
-    async (nextMessages: ChatMessage[], titleSeed?: string) => {
+    async (nextMessages: ChatMessage[], titleSeed?: string, mode = chatMode, modelId = model.id) => {
       const now = Date.now();
       const existing = conversations.find((c) => c.id === activeConvId);
       const convId = activeConvId ?? `conv_${now}`;
@@ -135,9 +162,9 @@ export default function MobileChatScreen() {
             ? existing.title
             : (titleSeed?.slice(0, 48) || existing?.title || 'New Chat'),
         agentId: agent.id,
-        modelId: model.id,
+        modelId,
         effort,
-        chatMode: agent.defaultChatMode ?? 'professional',
+        chatMode: mode,
         knowledgeSource: 'auto',
         studyInstructions: agent.studyInstructions ?? '',
         messages: nextMessages,
@@ -151,7 +178,7 @@ export default function MobileChatScreen() {
         await saveMobilePrefs({ activeConversationId: conv.id });
       }
     },
-    [activeConvId, agent, conversations, effort, model.id]
+    [activeConvId, agent, chatMode, conversations, effort, model.id]
   );
 
   useEffect(() => {
@@ -200,6 +227,8 @@ export default function MobileChatScreen() {
         setActiveConvId(chosen.id);
         setMessages(chosen.messages);
         setEffort(chosen.effort);
+        setChatMode(chosen.chatMode ?? 'professional');
+        setSelectedModelId(chosen.modelId);
       } else {
         const now = Date.now();
         const initialConv: Conversation = {
@@ -322,7 +351,7 @@ export default function MobileChatScreen() {
       agentId: agent.id,
       modelId: model.id,
       effort,
-      chatMode: agent.defaultChatMode ?? 'professional',
+      chatMode,
       knowledgeSource: 'auto',
       studyInstructions: agent.studyInstructions ?? '',
       messages: [],
@@ -376,19 +405,25 @@ export default function MobileChatScreen() {
     const historyBeforeSend = [...messages, userMsg];
     const nextMessages = [...historyBeforeSend, assistantMsg];
     setMessages(nextMessages);
-    await persistConvSnapshot(nextMessages, trimmed);
-
     const ctrl = new AbortController();
     setAbortCtrl(ctrl);
     setRunning(true);
 
     let latestMessages = nextMessages;
+    let keys: ProviderKeys = {};
     try {
-      const keys = await loadProviderKeys();
-      const hasKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+      keys = await loadProviderKeys();
+      const available = getAvailableModels(keys, cloudModels);
+      const modelId = selectedModelId === 'cloud-auto' || (chatMode === 'coding' && !selectedModelId)
+        ? 'cloud-auto' : available.some((candidate) => candidate.id === model.id) ? model.id
+          : selectedModelId && chatMode === 'coding' ? selectedModelId
+            : available.some((candidate) => candidate.routes?.length) ? 'cloud-auto' : 'demo-sandbox';
       const res = await runAgentLoop({
         agent,
-        modelId: hasKey ? model.id : 'demo-sandbox',
+        modelId,
+        chatMode,
+        dynamicModels: cloudModels,
+        fetchFn: expoFetch as unknown as typeof fetch,
         effort,
         keys,
         servers: servers.filter((s) => s.enabled),
@@ -405,7 +440,10 @@ export default function MobileChatScreen() {
             );
             setMessages(latestMessages);
           },
-          onReasoningDelta: () => {},
+          onReasoningDelta: (reasoning) => {
+            latestMessages = latestMessages.map((m) => m.id === assistantId ? { ...m, reasoning } : m);
+            setMessages(latestMessages);
+          },
           onToolCallsUpdated: (calls: ToolCallRecord[]) => {
             latestMessages = latestMessages.map((m) =>
               m.id === assistantId ? { ...m, toolCalls: calls } : m
@@ -434,11 +472,18 @@ export default function MobileChatScreen() {
       });
 
       const finalized = latestMessages.map((m) =>
-        m.id === assistantId ? { ...m, content: res.finalText, isStreaming: false } : m
+        m.id === assistantId ? { ...m, content: res.finalText, reasoning: res.finalReasoning, modelId: res.usedModelId, isStreaming: false } : m
       );
       setMessages(finalized);
       await persistConvSnapshot(finalized, trimmed);
       void scheduleRunCompleteNotification(res.finalText);
+    } catch (error) {
+      const message = safeErrorMessage(error, Object.values(keys).filter((key): key is string => Boolean(key)));
+      const finalized = latestMessages.map((m) =>
+        m.id === assistantId ? { ...m, error: message, isStreaming: false } : m
+      );
+      setMessages(finalized);
+      await persistConvSnapshot(finalized, trimmed);
     } finally {
       setRunning(false);
       setAbortCtrl(null);
@@ -468,12 +513,74 @@ export default function MobileChatScreen() {
           backgroundColor: theme.mutedPanel }}>
           <Text style={{ color: theme.text, fontWeight: '600', textTransform: 'capitalize' }}>{effort}</Text>
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Coding mode"
+          accessibilityState={{ selected: chatMode === 'coding', disabled: running }}
+          disabled={running}
+          onPress={() => {
+            const next = chatMode === 'coding' ? (agent.defaultChatMode === 'coding' ? 'professional' : agent.defaultChatMode ?? 'professional') : 'coding';
+            const nextModelId = next === 'coding' ? 'cloud-auto' : agent.defaultModelId;
+            setChatMode(next);
+            setSelectedModelId(nextModelId);
+            void persistConvSnapshot(messages, undefined, next, nextModelId);
+          }}
+          style={{ minHeight: 46, justifyContent: 'center', paddingHorizontal: 10, borderRadius: 10,
+            backgroundColor: chatMode === 'coding' ? theme.accentSurface : theme.mutedPanel }}>
+          <Text style={{ color: chatMode === 'coding' ? theme.onAccentSurface : theme.text, fontWeight: '600' }}>Code</Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="New chat" onPress={() => void handleNewChat()}
           style={{ minHeight: 46, minWidth: 46, alignItems: 'center', justifyContent: 'center',
             borderRadius: 10, backgroundColor: theme.accentSurface }}>
           <Plus color={theme.onAccentSurface} size={20} />
         </Pressable>
       </View>
+
+      <Pressable accessibilityRole="button" accessibilityLabel="Choose model" disabled={running}
+        onPress={() => setModelPickerOpen(true)}
+        style={{ minHeight: 40, paddingHorizontal: 14, backgroundColor: theme.panel, borderBottomWidth: 1,
+          borderBottomColor: theme.border, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <Text numberOfLines={1} style={{ color: theme.muted, flex: 1 }}>
+          {model.routes?.length || model.provider === 'demo' || model.provider === 'local' ? model.label : 'Automatic free model'}
+        </Text>
+        <ChevronDown color={theme.muted} size={16} />
+      </Pressable>
+      <Modal visible={modelPickerOpen} animationType="slide" onRequestClose={() => setModelPickerOpen(false)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.background }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16 }}>
+            <Text style={{ color: theme.text, fontSize: 18, fontWeight: '700' }}>Choose model</Text>
+            <Pressable accessibilityRole="button" onPress={() => setModelPickerOpen(false)} style={{ padding: 12 }}>
+              <Text style={{ color: theme.text }}>Close</Text>
+            </Pressable>
+          </View>
+          <FlatList
+            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 20, gap: 8 }}
+            data={[
+              ...(cloudModels.length ? [getModelById('cloud-auto')] : []),
+              ...cloudModels.filter((entry) => entry.routes?.some((route) => route.expiresAt > Date.now())),
+              getModelById('demo-sandbox'),
+            ]}
+            keyExtractor={(entry) => entry.id}
+            renderItem={({ item }) => (
+              <Pressable accessibilityRole="button" accessibilityState={{ selected: item.id === model.id }}
+                onPress={() => {
+                  setSelectedModelId(item.id);
+                  setModelPickerOpen(false);
+                  void persistConvSnapshot(messages, undefined, chatMode, item.id);
+                }}
+                style={{ padding: 12, borderRadius: 12, backgroundColor: theme.panel }}>
+                <Text style={{ color: theme.text, fontWeight: '600' }}>{item.label}</Text>
+                {item.routes?.length ? (
+                  <Text style={{ color: theme.muted }}>{item.routes.map((route) => PROVIDER_INFO[route.provider].name).join(' · ')}</Text>
+                ) : null}
+                {item.routes?.some((route) => route.dataTerms) ? (
+                  <Text style={{ color: theme.muted }}>A free route may retain prompts for training.</Text>
+                ) : null}
+              </Pressable>
+            )}
+          />
+        </SafeAreaView>
+      </Modal>
 
       <FlatList
         ref={threadRef}
@@ -512,6 +619,15 @@ export default function MobileChatScreen() {
                 <Text style={{ fontSize: 12, lineHeight: 17, color: theme.muted }}>
                   {item.toolCalls.map((tool) => `${tool.toolName} (${tool.status})`).join(' · ')}
                 </Text>
+              )}
+              {!!item.reasoning && (
+                <View>
+                  <Pressable accessibilityRole="button" accessibilityState={{ expanded: showReasoning === item.id }}
+                    onPress={() => setShowReasoning(showReasoning === item.id ? null : item.id)}>
+                    <Text style={{ color: theme.muted, paddingVertical: 8 }}>Reasoning details</Text>
+                  </Pressable>
+                  {showReasoning === item.id && <ChatReply content={item.reasoning} theme={theme} />}
+                </View>
               )}
               {item.content && <ChatReply content={item.content} theme={theme} />}
               {item.error && <Text style={{ color: isDark ? '#fca5a5' : '#991b1b', lineHeight: 20 }}>{item.error}</Text>}

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getFallbackModelCandidates, dispatchStreamCompletion, getApiKeyForProvider } from './provider';
+import { streamOpenAiCompatibleCompletion } from './openaiCompatible';
 import { getModelById } from '../../config/models';
 
 test('local model never falls back to a cloud model even if its configuration is missing', () => {
@@ -40,10 +41,10 @@ test('stream retains the last text frame and reports an explicit generation limi
 });
 
 test('distinguishes OpenRouter stream interruption from an explicit completion', async () => {
-  const model = getModelById('openrouter/free');
+  const model = { ...getModelById('cloud-auto'), id: 'example/fixture:free' };
   const delta = 'data: {"choices":[{"delta":{"content":"partial project"}}]}\n\n';
   const text: string[] = [];
-  const run = (payload: string) => dispatchStreamCompletion({
+  const run = (payload: string) => streamOpenAiCompatibleCompletion({
     model, apiKey: 'fixture', effort: 'low', systemPrompt: '',
     messages: [{ role: 'user', text: 'Build a website' }], tools: [],
     fetchFn: async () => new Response(payload),

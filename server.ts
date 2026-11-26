@@ -6,6 +6,7 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { createAuthService } from './src/server/authRouter.ts';
+import { createFreeAiRouter } from './src/server/freeAiRouter.ts';
 import { handleCanvasPreviewRequest } from './src/server/canvasPreview.ts';
 import { CANVAS_PREVIEW_PATH } from './src/utils/canvasPreview.ts';
 import { createControlRouter } from './src/server/controlRouter.ts';
@@ -119,6 +120,7 @@ async function startServer() {
       });
     });
   }
+  app.use('/api', createFreeAiRouter());
   app.use('/api', studyImagesRouter);
   app.use('/api', controlRouter);
 

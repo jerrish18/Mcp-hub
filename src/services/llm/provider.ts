@@ -6,9 +6,11 @@ import { streamOpenAiCompatibleCompletion } from './openaiCompatible';
 import {
   type LlmStreamEvent,
   ModelUnavailableError,
+  ProviderAuthError,
   RateLimitError,
   type StreamCompletionRequest,
 } from './types';
+import { canonicalIdFor, catalogRoute, cloudCredential, CLOUD_PROVIDERS, currentVerifiedRoute, eligibleRoutes, evidenceFor, readProviderCatalog } from './freeRegistry';
 import { recordProvider429, recordProviderRequest } from '../../utils/quotaTracker';
 
 export function buildEffortAugmentedPrompt(basePrompt: string, effort: EffortLevel, model: ModelConfig): string {
@@ -30,18 +32,10 @@ export function buildEffortAugmentedPrompt(basePrompt: string, effort: EffortLev
 }
 
 export function getApiKeyForProvider(provider: ProviderId, keys: ProviderKeys): string {
-  switch (provider) {
-    case 'gemini':
-      return keys.gemini?.trim() ?? '';
-    case 'groq':
-      return keys.groq?.trim() ?? '';
-    case 'openrouter':
-      return keys.openrouter?.trim() ?? '';
-    case 'local':
-      return 'local-model-no-api-key';
-    case 'demo':
-      return 'demo';
-  }
+  if (provider === 'local') return 'local-model-no-api-key';
+  if (provider === 'demo') return 'demo';
+  if (provider === 'kilo') return 'anonymous';
+  return cloudCredential(provider, keys);
 }
 
 export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfig[] {
@@ -57,7 +51,7 @@ export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfi
       byId.set(dm.id, {
         ...dm,
         label: curated.label,
-        description: curated.description,
+        description: dm.routes?.length ? dm.description : curated.description,
         supportsThinkingLevel: curated.supportsThinkingLevel ?? dm.supportsThinkingLevel,
         supportsReasoningEffort: curated.supportsReasoningEffort ?? dm.supportsReasoningEffort,
       });
@@ -73,29 +67,74 @@ export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfi
 }
 
 export function getAvailableModels(keys: ProviderKeys, dynamicModels: ModelConfig[] = []): ModelConfig[] {
-  return mergeModelCatalog(dynamicModels).filter(
-    (m) => m.provider === 'demo' || Boolean(getApiKeyForProvider(m.provider, keys))
-  );
+  return mergeModelCatalog(dynamicModels).filter((model) =>
+    model.provider === 'demo' || model.provider === 'local' || eligibleRoutes(model, keys).length > 0);
 }
+
+const routeHealth = new Map<string, { latency?: number; cooldown?: number; remaining?: number }>();
+const routeKey = (provider: string, modelId: string) => `${provider}/${modelId}`;
 
 export function getFallbackModelCandidates(
   primaryModelId: string,
   keys: ProviderKeys,
-  dynamicModels: ModelConfig[] = []
+  dynamicModels: ModelConfig[] = [],
+  needs: { tools?: boolean; images?: boolean; autoFallback?: boolean } = {},
 ): ModelConfig[] {
+  const normalized = normalizeModelId(primaryModelId);
   const catalog = mergeModelCatalog(dynamicModels);
-  const primary = getModelById(primaryModelId, dynamicModels);
-  if (primary.provider === 'local') return [primary];
-  const configured = catalog.filter(
-    (m) => m.provider !== 'local' && m.id !== primary.id && m.provider !== 'demo' && Boolean(getApiKeyForProvider(m.provider, keys))
-  );
-  // Prioritize models from same provider with lower latency, then other configured providers
-  const sameProvider = configured.filter((m) => m.provider === primary.provider);
-  const differentProvider = configured.filter((m) => m.provider !== primary.provider);
-  return [primary, ...differentProvider, ...sameProvider];
+  const picked = catalog.find((item) => item.id === normalized) ?? getModelById(normalized, dynamicModels);
+  if (picked.provider === 'local' || picked.provider === 'demo') return [picked];
+
+  const rank = (model: ModelConfig) => Math.max(0, ...(model.routes ?? []).map((route) => evidenceFor(route)?.codingScore ?? 0));
+  const models = normalized === 'cloud-auto'
+    ? catalog.filter((model) => model.routes?.length).sort((a, b) => rank(b) - rank(a) || a.id.localeCompare(b.id))
+    : [picked];
+  const candidates = models.flatMap((model) => eligibleRoutes(model, keys)
+    .filter((route) => (!needs.tools || route.tools) && (!needs.images || route.images)
+      && (routeHealth.get(routeKey(route.provider, route.modelId))?.cooldown ?? 0) <= Date.now())
+    .sort((a, b) => {
+      const first = routeHealth.get(routeKey(a.provider, a.modelId));
+      const second = routeHealth.get(routeKey(b.provider, b.modelId));
+      const quotaOrder = Number(first?.remaining === 0) - Number(second?.remaining === 0);
+      return quotaOrder || (first?.latency ?? Infinity) - (second?.latency ?? Infinity) || a.provider.localeCompare(b.provider);
+    })
+    .map((route) => ({ ...model, routes: [route], provider: route.provider, contextWindow: route.contextWindow,
+      supportsThinkingLevel: route.provider === 'gemini' && route.reasoning,
+      supportsReasoningEffort: route.provider === 'openrouter' && route.reasoning })));
+  return normalized === 'cloud-auto' && !needs.autoFallback
+    ? candidates.filter((model) => model.id === candidates[0]?.id)
+    : candidates;
 }
 
 export async function dispatchStreamCompletion(req: StreamCompletionRequest): Promise<void> {
+  if (req.model.provider === 'local' || req.model.provider === 'demo') return runTransport(req);
+  const route = req.model.routes?.find((item) => item.provider === req.model.provider);
+  const keys = req.credentials ?? { [req.model.provider]: req.apiKey };
+  const current = route && evidenceFor(route)?.canonicalId === req.model.id
+    ? await currentVerifiedRoute(route, keys, req.fetchFn ?? fetch, req.signal).catch(() => undefined)
+    : undefined;
+  if (!current) throw new ModelUnavailableError('This model has no currently verified free route.', 503);
+  const images = req.messages.some((message) => message.role === 'user'
+    ? message.attachments?.some((attachment) => attachment.kind === 'image' && attachment.dataBase64)
+    : message.role === 'tool' && message.mediaBlocks?.some((block) => block.type === 'image'));
+  if (images && !current.images) throw new ModelUnavailableError('This free route does not support image input.', 503);
+  await runTransport({
+    ...req,
+    model: { ...req.model, routes: [current],
+      supportsThinkingLevel: current.provider === 'gemini' && current.reasoning,
+      supportsReasoningEffort: current.provider === 'openrouter' && current.reasoning },
+    tools: current.tools ? req.tools : [],
+    onQuota: (headers) => {
+      const value = headers.get('x-ratelimit-remaining-requests');
+      if (value !== null && /^\d+$/.test(value)) {
+        const key = routeKey(current.provider, current.modelId);
+        routeHealth.set(key, { ...routeHealth.get(key), remaining: Number(value) });
+      }
+    },
+  });
+}
+
+async function runTransport(req: StreamCompletionRequest): Promise<void> {
   const { model } = req;
   recordProviderRequest(model.provider);
   if (model.provider === 'demo') return streamDemoCompletion(req);
@@ -129,6 +168,7 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
     return await streamOpenAiCompatibleCompletion(request);
   } catch (err) {
     if (req.signal?.aborted) throw err;
+    if (timedOut && !outputStarted) throw new ModelUnavailableError('The provider stopped responding.', 503, { cause: err });
     if (timedOut) throw new Error(outputStarted && req.websiteBuild
       ? 'The model stopped sending website source. Any received files are kept. Try again or request a smaller first version.'
       : 'The model stopped responding. Try again or choose a different model.', { cause: err });
@@ -152,6 +192,7 @@ export async function streamWithRateLimitFallback(params: {
   a2uiEnabled?: boolean;
   websiteBuild?: boolean;
   messages: StreamCompletionRequest['messages'];
+  prepareMessages?: (model: ModelConfig) => StreamCompletionRequest['messages'];
   tools: StreamCompletionRequest['tools'];
   signal?: AbortSignal;
   onEvent: (event: LlmStreamEvent) => void;
@@ -159,11 +200,17 @@ export async function streamWithRateLimitFallback(params: {
   onModelAttemptEnd?: (status: 'success' | 'error' | 'cancelled', error?: unknown) => void;
   onModelFallback?: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
   fetchFn?: typeof fetch;
+  routeFixture?: typeof getFallbackModelCandidates;
 }): Promise<{ usedModel: ModelConfig }> {
-  const candidates = getFallbackModelCandidates(
-    params.primaryModelId,
-    params.keys,
-    params.dynamicModels
+  const chooseRoutes = (params.fetchFn && params.routeFixture) || getFallbackModelCandidates;
+  const candidates = chooseRoutes(
+    params.primaryModelId, params.keys, params.dynamicModels, {
+      tools: params.tools.length > 0,
+      autoFallback: params.chatMode === 'coding',
+      images: params.messages.some((message) => message.role === 'user'
+        ? message.attachments?.some((attachment) => attachment.kind === 'image' && attachment.dataBase64)
+        : message.role === 'tool' && message.mediaBlocks?.some((block) => block.type === 'image')),
+    }
   ).filter((model, index) => index === 0 || normalizeModelId(model.id) !== normalizeModelId(params.excludeFallbackModelId ?? ''));
   let lastError: unknown;
 
@@ -174,21 +221,28 @@ export async function streamWithRateLimitFallback(params: {
 
     params.onModelAttemptStart?.(model, i, augmentedPrompt);
     let startedResponse = false;
+    const routeId = routeKey(model.provider, model.routes?.[0]?.modelId ?? model.id);
+    const started = Date.now();
+    const dispatch = params.routeFixture && params.fetchFn ? runTransport : dispatchStreamCompletion;
     try {
-      await dispatchStreamCompletion({
+      await dispatch({
         model,
         apiKey,
+        credentials: params.keys,
         systemPrompt: augmentedPrompt,
         effort: params.effort,
         chatMode: params.chatMode,
         knowledgeSource: params.knowledgeSource,
         a2uiEnabled: params.a2uiEnabled,
         websiteBuild: params.websiteBuild,
-        messages: params.messages,
+        messages: params.prepareMessages?.(model) ?? params.messages,
         tools: params.tools,
         signal: params.signal,
         onEvent: (event) => {
-          if (event.type !== 'done') startedResponse = true;
+          if (!startedResponse && (event.type === 'text_delta' || event.type === 'tool_calls' || event.type === 'reasoning_delta')) {
+            startedResponse = true;
+            routeHealth.set(routeId, { ...routeHealth.get(routeId), latency: Date.now() - started });
+          }
           params.onEvent(event);
         },
         fetchFn: params.fetchFn,
@@ -197,8 +251,11 @@ export async function streamWithRateLimitFallback(params: {
       return { usedModel: model };
     } catch (err) {
       params.onModelAttemptEnd?.(params.signal?.aborted ? 'cancelled' : 'error', err);
-      const recoverable = err instanceof RateLimitError || err instanceof ModelUnavailableError;
-      if (!startedResponse && recoverable && i + 1 < candidates.length) {
+      const recoverable = err instanceof RateLimitError || err instanceof ModelUnavailableError || err instanceof ProviderAuthError;
+      if (err instanceof RateLimitError) routeHealth.set(routeId, {
+        ...routeHealth.get(routeId), cooldown: Date.now() + (err.retryAfterMs ?? 60_000),
+      });
+      if (!params.signal?.aborted && !startedResponse && recoverable && i + 1 < candidates.length) {
         const nextModel = candidates[i + 1];
         params.onModelFallback?.(model, nextModel, err.message);
         lastError = err;
@@ -208,7 +265,7 @@ export async function streamWithRateLimitFallback(params: {
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('All configured models are unavailable.');
+  throw lastError instanceof Error ? lastError : new Error('No verified free model can handle this request. Check provider availability in Settings.');
 }
 
 export async function testModelConnection(params: {
@@ -217,14 +274,13 @@ export async function testModelConnection(params: {
   dynamicModels?: ModelConfig[];
   fetchFn?: typeof fetch;
 }): Promise<{ ok: boolean; latencyMs: number; preview: string }> {
-  const model = getModelById(params.modelId, params.dynamicModels);
-  const apiKey = getApiKeyForProvider(model.provider, params.keys);
   const started = Date.now();
   let preview = '';
 
-  await dispatchStreamCompletion({
-    model,
-    apiKey,
+  await streamWithRateLimitFallback({
+    primaryModelId: params.modelId,
+    keys: params.keys,
+    dynamicModels: params.dynamicModels,
     systemPrompt: 'Respond with exactly "OK" and nothing else.',
     effort: 'low',
     messages: [{ role: 'user', text: 'Ping' }],
@@ -242,144 +298,41 @@ export async function testModelConnection(params: {
   };
 }
 
-/**
- * Queries live free/active models directly from configured provider APIs
- * so deprecated slugs never strand the user.
- */
 export async function syncLiveProviderModels(
   keys: ProviderKeys,
-  fetchFn: typeof fetch = fetch
-): Promise<{ models: ModelConfig[]; syncedProviders: string[] }> {
-  const discovered: ModelConfig[] = [];
+  fetchFn: typeof fetch = fetch,
+): Promise<{ models: ModelConfig[]; pending: string[]; syncedProviders: string[] }> {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), 10_000);
+  const results = await Promise.allSettled(CLOUD_PROVIDERS.map(async (provider) => ({
+    provider,
+    rows: await readProviderCatalog(provider, keys, fetchFn, abort.signal),
+  }))).finally(() => clearTimeout(timeout));
+  const models = new Map<string, ModelConfig>();
+  const pending: string[] = [];
   const syncedProviders: string[] = [];
-
-  if (keys.gemini?.trim()) {
-    try {
-      const res = await fetchFn(
-        `${PROVIDER_INFO.gemini.baseUrl}/models?key=${encodeURIComponent(keys.gemini.trim())}`
-      );
-      if (res.ok) {
-        const json = (await res.json()) as {
-          models?: Array<{
-            name: string;
-            displayName?: string;
-            description?: string;
-            inputTokenLimit?: number;
-            supportedGenerationMethods?: string[];
-          }>;
-        };
-        const geminiModels = (json.models ?? [])
-          .filter(
-            (m) =>
-              m.supportedGenerationMethods?.includes('generateContent') &&
-              !m.name.includes('embedding') &&
-              !m.name.includes('tts') &&
-              !m.name.includes('image')
-          )
-          .slice(0, 8)
-          .map((m): ModelConfig => {
-            const id = m.name.replace(/^models\//, '');
-            return {
-              id,
-              provider: 'gemini',
-              label: `${m.displayName || id} (Synced)`,
-              description: m.description || 'Live synced Gemini model',
-              contextWindow: m.inputTokenLimit ?? 1_000_000,
-              supportsThinkingLevel: id.includes('gemini-3') || id.includes('gemini-4'),
-              isFreeTier: true,
-            };
-          });
-        if (geminiModels.length > 0) {
-          discovered.push(...geminiModels);
-          syncedProviders.push('Gemini');
-        }
+  for (const result of results) {
+    if (result.status === 'rejected') continue;
+    const { provider, rows } = result.value;
+    if (rows.length) syncedProviders.push(PROVIDER_INFO[provider].name);
+    for (const row of rows) {
+      const route = catalogRoute(provider, row);
+      if (!route) continue;
+      const evidence = evidenceFor(route);
+      const canonical = canonicalIdFor(provider, route.modelId);
+      if (!evidence || !canonical) {
+        pending.push(`${PROVIDER_INFO[provider].name} · ${route.modelId}`);
+        continue;
       }
-    } catch {
-      // keep fallback registry
-    }
-  }
-
-  if (keys.groq?.trim()) {
-    try {
-      const res = await fetchFn(`${PROVIDER_INFO.groq.baseUrl}/models`, {
-        headers: { Authorization: `Bearer ${keys.groq.trim()}` },
+      const checked = { ...route, tools: route.tools && evidence.tools, images: route.images && evidence.images,
+        reasoning: route.reasoning && evidence.reasoning };
+      const model = models.get(canonical);
+      if (model) model.routes?.push(checked);
+      else models.set(canonical, {
+        id: canonical, provider, label: row.name?.replace(/\s*\(free\)$/i, '') || formatReadableModelSlug(canonical),
+        description: 'Verified free cloud model', isFreeTier: true, contextWindow: checked.contextWindow, routes: [checked],
       });
-      if (res.ok) {
-        const json = (await res.json()) as {
-          data?: Array<{ id: string; active?: boolean; context_window?: number }>;
-        };
-        const groqModels = (json.data ?? [])
-          .filter(
-            (m) =>
-              m.active !== false &&
-              !m.id.includes('whisper') &&
-              !m.id.includes('guard') &&
-              !m.id.includes('tts')
-          )
-          .slice(0, 8)
-          .map((m): ModelConfig => {
-            const curated = FREE_MODELS.find((f) => f.id === m.id);
-            return {
-              id: m.id,
-              provider: 'groq',
-              label: curated?.label ?? `${formatReadableModelSlug(m.id)} (Groq)`,
-              description: curated?.description ?? 'Active model synced from your Groq account',
-              contextWindow: m.context_window ?? curated?.contextWindow ?? 128_000,
-              supportsReasoningEffort:
-                curated?.supportsReasoningEffort ?? (m.id.includes('qwen') || m.id.includes('gpt-oss')),
-              isFreeTier: true,
-            };
-          });
-        if (groqModels.length > 0) {
-          discovered.push(...groqModels);
-          syncedProviders.push('Groq');
-        }
-      }
-    } catch {
-      // keep fallback registry
     }
   }
-
-  if (keys.openrouter?.trim()) {
-    try {
-      const res = await fetchFn(`${PROVIDER_INFO.openrouter.baseUrl}/models`, {
-        headers: { Authorization: `Bearer ${keys.openrouter.trim()}` },
-      });
-      if (res.ok) {
-        const json = (await res.json()) as {
-          data?: Array<{
-            id: string;
-            name?: string;
-            context_length?: number;
-            pricing?: { prompt?: string; completion?: string };
-            supported_parameters?: string[];
-          }>;
-        };
-        const freeToolModels = (json.data ?? [])
-          .filter(
-            (m) =>
-              (m.id.endsWith(':free') || m.id === 'openrouter/free' || m.pricing?.prompt === '0') &&
-              (!m.supported_parameters || m.supported_parameters.includes('tools'))
-          )
-          .slice(0, 8)
-          .map((m): ModelConfig => ({
-            id: m.id,
-            provider: 'openrouter',
-            label: `${m.name || m.id} (Free)`,
-            description: 'Live free-tier OpenRouter model with tool calling',
-            contextWindow: m.context_length ?? 128_000,
-            supportsReasoningEffort: m.supported_parameters?.includes('reasoning') ?? false,
-            isFreeTier: true,
-          }));
-        if (freeToolModels.length > 0) {
-          discovered.push(...freeToolModels);
-          syncedProviders.push('OpenRouter');
-        }
-      }
-    } catch {
-      // keep fallback registry
-    }
-  }
-
-  return { models: discovered, syncedProviders };
+  return { models: [...models.values()], pending, syncedProviders };
 }

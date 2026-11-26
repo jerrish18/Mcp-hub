@@ -5,7 +5,7 @@ export interface ProviderQuotaLimit {
   rpdLimit: number;
 }
 
-export const FREE_TIER_QUOTA_LIMITS: Record<Exclude<ProviderId, 'demo' | 'local'>, ProviderQuotaLimit> = {
+export const FREE_TIER_QUOTA_LIMITS: Partial<Record<Exclude<ProviderId, 'demo' | 'local'>, ProviderQuotaLimit>> = {
   gemini: { rpmLimit: 15, rpdLimit: 1500 },
   groq: { rpmLimit: 30, rpdLimit: 1000 },
   openrouter: { rpmLimit: 20, rpdLimit: 200 },
@@ -106,6 +106,7 @@ export function getProviderQuotaStatus(
 ): ProviderQuotaStatus | null {
   if (provider === 'demo' || provider === 'local') return null;
   const limits = FREE_TIER_QUOTA_LIMITS[provider];
+  if (!limits) return null;
   const state = loadState(provider, now);
   const rpmUsed = state.timestamps.filter((t) => now - t < 60_000).length;
   const rpdUsed = state.dailyCounts[provider] ?? 0;

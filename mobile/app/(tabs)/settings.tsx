@@ -9,6 +9,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { fetch as expoFetch } from 'expo/fetch';
 import { syncLiveProviderModels } from '@core/services/llm/provider';
 import { loadProviderKeys, saveProviderKeys } from '@core/services/storage/secureStorage';
 import { loadMobilePrefs, saveMobilePrefs } from '../../services/storage/mobilePrefs';
@@ -17,6 +18,9 @@ export default function MobileSettingsScreen() {
   const [gemini, setGemini] = useState('');
   const [groq, setGroq] = useState('');
   const [openrouter, setOpenrouter] = useState('');
+  const [nvidia, setNvidia] = useState('');
+  const [cloudflare, setCloudflare] = useState('');
+  const [cloudflareAccountId, setCloudflareAccountId] = useState('');
   const [oledBlack, setOledBlack] = useState(false);
   const [biometricLockEnabled, setBiometricLockEnabled] = useState(false);
   const [confirmBeforeWrite, setConfirmBeforeWrite] = useState(true);
@@ -28,6 +32,9 @@ export default function MobileSettingsScreen() {
       setGemini(keys.gemini ?? '');
       setGroq(keys.groq ?? '');
       setOpenrouter(keys.openrouter ?? '');
+      setNvidia(keys.nvidia ?? '');
+      setCloudflare(keys.cloudflare ?? '');
+      setCloudflareAccountId(keys.cloudflareAccountId ?? '');
     });
     void loadMobilePrefs().then((prefs) => {
       setOledBlack(Boolean(prefs.settings.oledDark));
@@ -44,22 +51,17 @@ export default function MobileSettingsScreen() {
       gemini: gemini.trim() || undefined,
       groq: groq.trim() || undefined,
       openrouter: openrouter.trim() || undefined,
+      nvidia: nvidia.trim() || undefined,
+      cloudflare: cloudflare.trim() || undefined,
+      cloudflareAccountId: cloudflareAccountId.trim() || undefined,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
 
   const handleSync = async () => {
-    const res = await syncLiveProviderModels({
-      gemini: gemini.trim() || undefined,
-      groq: groq.trim() || undefined,
-      openrouter: openrouter.trim() || undefined,
-    });
-    setSyncNotice(
-      res.models.length > 0
-        ? `Synced ${res.models.length} live models from ${res.syncedProviders.join(', ')}`
-        : 'Add an API key above first to sync live models.'
-    );
+    const res = await syncLiveProviderModels(await loadProviderKeys(), expoFetch as unknown as typeof fetch);
+    setSyncNotice(`${res.models.length} verified models available. ${res.pending.length} free routes awaiting live verification.`);
   };
 
   const toggleSetting = async (
@@ -180,6 +182,20 @@ export default function MobileSettingsScreen() {
               borderColor: theme.border,
             }}
           />
+          {([
+            ['NVIDIA Build API key', nvidia, setNvidia],
+            ['Cloudflare Workers AI token', cloudflare, setCloudflare],
+            ['Cloudflare account ID', cloudflareAccountId, setCloudflareAccountId],
+          ] as const).map(([label, value, onChangeText]) => (
+            <TextInput key={label} value={value} onChangeText={onChangeText} secureTextEntry
+              autoCapitalize="none" placeholder={label} accessibilityLabel={label}
+              placeholderTextColor={theme.muted}
+              style={{ minHeight: 44, paddingHorizontal: 12, borderRadius: 12, backgroundColor: theme.panel,
+                color: theme.text, borderWidth: 1, borderColor: theme.border }} />
+          ))}
+          <Text style={{ fontSize: 12, color: theme.muted }}>
+            Kilo uses anonymous free access. Gemini, Groq, and Cloudflare need a verifiable no-charge account policy.
+          </Text>
           <Pressable
             onPress={() => void handleSave()}
             style={{ minHeight: 46, justifyContent: 'center', backgroundColor: workspaceBlue, borderRadius: 12, alignItems: 'center' }}

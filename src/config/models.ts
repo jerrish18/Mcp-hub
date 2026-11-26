@@ -133,6 +133,9 @@ export const PROVIDER_INFO: Record<
     keyHint: 'sk-or-v1-...',
     baseUrl: 'https://openrouter.ai/api/v1',
   },
+  cloudflare: { name: 'Cloudflare Workers AI', signupUrl: 'https://dash.cloudflare.com/', keyHint: 'Workers AI API token', baseUrl: 'https://api.cloudflare.com/client/v4/accounts' },
+  nvidia: { name: 'NVIDIA NIM', signupUrl: 'https://build.nvidia.com/', keyHint: 'NVIDIA Build API key', baseUrl: 'https://integrate.api.nvidia.com/v1' },
+  kilo: { name: 'Kilo Gateway', signupUrl: 'https://kilo.ai/docs/gateway', keyHint: 'Anonymous free access', baseUrl: 'https://ai-gateway.kilo.ai/api/v1' },
   local: {
     name: 'Local model',
     signupUrl: '',
@@ -150,12 +153,17 @@ export const PROVIDER_INFO: Record<
 export const DEFAULT_MODEL_ID = 'gemini-4-hydrogen';
 
 export const MODEL_MIGRATION_ALIASES: Record<string, string> = {
-  'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
-  'qwen/qwen3-235b-a22b:free': 'qwen/qwen3.7-plus:free',
+  'openai/gpt-oss-120b:free': 'openai/gpt-oss-120b',
+  '@cf/openai/gpt-oss-120b': 'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b:free': 'openai/gpt-oss-20b',
+  '@cf/openai/gpt-oss-20b': 'openai/gpt-oss-20b',
+  '@cf/qwen/qwen3.8-27b': 'qwen/qwen3.8-27b',
+  '@cf/meta/llama-3.1-8b-instruct': 'llama-3.1-8b-instant',
+  'openrouter/free': 'cloud-auto',
 };
 
 export function normalizeModelId(modelId: string): string {
-  return MODEL_MIGRATION_ALIASES[modelId] ?? modelId;
+  return Object.hasOwn(MODEL_MIGRATION_ALIASES, modelId) ? MODEL_MIGRATION_ALIASES[modelId] : modelId;
 }
 
 export function formatReadableModelSlug(modelId: string): string {
@@ -184,6 +192,10 @@ export function getShortModelName(model: Pick<ModelConfig, 'id' | 'label'>): str
 
 export function getModelById(modelId: string, dynamicModels: ModelConfig[] = []): ModelConfig {
   const normalized = normalizeModelId(modelId);
+  if (normalized === 'cloud-auto') return {
+    id: normalized, provider: 'openrouter', label: 'Automatic free model', description: 'Select a verified free model for this request.',
+    contextWindow: 32_000, isFreeTier: true,
+  };
   if (normalized.startsWith('local:')) {
     return dynamicModels.find(model => model.id === normalized && model.provider === 'local') ?? {
       id: normalized, provider: 'local', label: normalized.slice(6), description: 'Local model', contextWindow: 8192, isFreeTier: true,
@@ -192,6 +204,6 @@ export function getModelById(modelId: string, dynamicModels: ModelConfig[] = [])
   return (
     dynamicModels.find((m) => m.id === normalized) ??
     FREE_MODELS.find((m) => m.id === normalized) ??
-    FREE_MODELS[0]
+    { id: normalized, provider: 'openrouter', label: formatReadableModelSlug(normalized), description: 'Cloud model awaiting verification', contextWindow: 128_000, isFreeTier: false }
   );
 }

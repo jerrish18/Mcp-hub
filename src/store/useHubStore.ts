@@ -359,7 +359,8 @@ export interface HubState {
   // Settings & Keys & Models
   updateSettings: (patch: Partial<AppSettings>) => void;
   setProviderKeys: (keys: ProviderKeys) => Promise<void>;
-  syncModels: (keysOverride?: ProviderKeys) => Promise<{ count: number; providers: string[] }>;
+  pendingFreeModels: string[];
+  syncModels: () => Promise<{ count: number; providers: string[] }>;
   addCustomModel: (provider: ProviderId, modelId: string, label?: string) => void;
   revokeAlwaysAllowedTool: (qualifiedKey: string) => void;
   revokeAlwaysAllowedRule: (index: number) => void;
@@ -440,6 +441,7 @@ const initialMeta = readPersistedMeta('guest');
 export const useHubStore = create<HubState>((set, get) => {
   let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let activeSyncRun = 0;
+  let catalogRefresh: { keys: ProviderKeys; scope: string; promise: ReturnType<HubState['syncModels']> } | undefined;
   let listChangedSubscribed = false;
   let visibilitySyncBound = false;
 
@@ -565,7 +567,7 @@ export const useHubStore = create<HubState>((set, get) => {
         const keys = get().providerKeys;
         const defaultAgent = merged.agents[0] ?? BUILT_IN_AGENTS[0];
         const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
-        const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+        const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
         mergedConvs = [createNewConversation(defaultAgent, firstModel)];
       }
 
@@ -641,7 +643,7 @@ export const useHubStore = create<HubState>((set, get) => {
         const keys = get().providerKeys;
         const defaultAgent = get().agents[0] ?? BUILT_IN_AGENTS[0];
         const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
-        const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+        const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
         const fresh = createNewConversation(defaultAgent, firstModel);
         await historyDb.saveConversation(fresh, scope);
         set({ conversations: [fresh], activeConversationId: fresh.id });
@@ -668,7 +670,7 @@ export const useHubStore = create<HubState>((set, get) => {
       const keys = get().providerKeys;
       const defaultAgent = guestMeta.agents[0] ?? BUILT_IN_AGENTS[0];
       const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
-      const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+      const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
       const fresh = createNewConversation(defaultAgent, firstModel);
       guestConvs = [fresh];
       await historyDb.saveConversation(fresh, 'guest');
@@ -706,6 +708,7 @@ export const useHubStore = create<HubState>((set, get) => {
     agents: initialMeta.agents,
     settings: initialMeta.settings,
     providerKeys: {},
+    pendingFreeModels: [],
     dynamicModels: initialMeta.dynamicModels,
     dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
     savedPrompts: initialMeta.savedPrompts ?? DEFAULT_SAVED_PROMPTS,
@@ -810,7 +813,7 @@ export const useHubStore = create<HubState>((set, get) => {
       if (!activeConvId) {
         const defaultAgent = state.agents[0] ?? BUILT_IN_AGENTS[0];
         const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
-        const firstModel = hasAnyRealKey ? defaultAgent.defaultModelId : 'demo-sandbox';
+        const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
         const fresh = createNewConversation(defaultAgent, firstModel);
         nextConvs = [fresh];
         activeConvId = fresh.id;
@@ -950,20 +953,31 @@ export const useHubStore = create<HubState>((set, get) => {
 
     setProviderKeys: async (keys) => {
       await saveProviderKeys(keys);
-      set({ providerKeys: keys });
+      set((state) => ({
+        providerKeys: keys,
+        pendingFreeModels: [],
+        dynamicModels: state.dynamicModels.filter((model) => !model.routes?.length),
+      }));
+      void get().syncModels();
     },
 
-    syncModels: async (keysOverride) => {
-      const keys = keysOverride ?? get().providerKeys;
-      const { models, syncedProviders } = await syncLiveProviderModels(keys);
-      if (models.length > 0) {
-        const existingCustom = get().dynamicModels.filter(
-          (m) => !models.some((fresh) => fresh.id === m.id) && m.description === 'Custom user model'
-        );
-        set({ dynamicModels: [...models, ...existingCustom] });
-        persist();
-      }
-      return { count: models.length, providers: syncedProviders };
+    syncModels: () => {
+      const { providerKeys: keys } = get();
+      const scope = activeScope();
+      if (catalogRefresh && catalogRefresh.keys === keys && catalogRefresh.scope === scope) return catalogRefresh.promise;
+      const promise = syncLiveProviderModels(keys).then(({ models, pending, syncedProviders }) => {
+        if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
+          const custom = get().dynamicModels.filter((model) => model.description === 'Custom user model'
+            && !models.some((fresh) => fresh.id === model.id));
+          set({ dynamicModels: [...models, ...custom], pendingFreeModels: pending });
+          persist();
+        }
+        return { count: models.length, providers: syncedProviders };
+      }).finally(() => {
+        if (catalogRefresh?.promise === promise) catalogRefresh = undefined;
+      });
+      catalogRefresh = { keys, scope, promise };
+      return promise;
     },
 
     addCustomModel: (provider, modelId, label) => {
@@ -978,10 +992,12 @@ export const useHubStore = create<HubState>((set, get) => {
         contextWindow: 128_000,
         supportsThinkingLevel: provider === 'gemini',
         supportsReasoningEffort: provider !== 'gemini' && provider !== 'local',
-        isFreeTier: true,
+        isFreeTier: provider === 'local',
       };
       set((s) => ({
-        dynamicModels: [custom, ...s.dynamicModels.filter((m) => m.id !== trimmed)],
+        dynamicModels: s.dynamicModels.some((m) => m.id === trimmed && m.routes?.length)
+          ? s.dynamicModels
+          : [custom, ...s.dynamicModels.filter((m) => m.id !== trimmed)],
       }));
       persist();
     },
@@ -1269,7 +1285,10 @@ export const useHubStore = create<HubState>((set, get) => {
       const hasAnyRealKey = Boolean(
         state.providerKeys.gemini || state.providerKeys.groq || state.providerKeys.openrouter
       );
-      const chosenModel = modelId ?? (hasAnyRealKey ? agent.defaultModelId : 'demo-sandbox');
+      const available = getAvailableModels(state.providerKeys, state.dynamicModels);
+      const preferred = available.find((model) => model.id === normalizeModelId(agent.defaultModelId));
+      const chosenModel = modelId ?? (agent.defaultChatMode === 'coding' ? 'cloud-auto'
+        : preferred?.id ?? (hasAnyRealKey || available.some((model) => model.routes?.length) ? 'cloud-auto' : 'demo-sandbox'));
       const conv = createNewConversation(agent, chosenModel);
       set((s) => ({
         conversations: [conv, ...s.conversations],
@@ -1336,6 +1355,7 @@ export const useHubStore = create<HubState>((set, get) => {
             ...c,
             agentId: agent.id,
             chatMode: agent.defaultChatMode ?? c.chatMode,
+            modelId: agent.defaultChatMode === 'coding' && c.chatMode !== 'coding' ? 'cloud-auto' : c.modelId,
             studyInstructions: agent.studyInstructions?.trim()
               ? agent.studyInstructions
               : c.studyInstructions,
@@ -1391,7 +1411,11 @@ export const useHubStore = create<HubState>((set, get) => {
       set((s) => ({
         conversations: s.conversations.map((c) => {
           if (c.id !== convId) return c;
-          updated = { ...c, chatMode, updatedAt: Date.now() };
+          updated = {
+            ...c, chatMode,
+            modelId: chatMode === 'coding' && c.chatMode !== 'coding' ? 'cloud-auto' : c.modelId,
+            updatedAt: Date.now(),
+          };
           return updated;
         }),
       }));
@@ -1732,6 +1756,7 @@ export const useHubStore = create<HubState>((set, get) => {
         await dispatchStreamCompletion({
           model: chosenModel,
           apiKey,
+          credentials: state.providerKeys,
           systemPrompt:
             'You are an independent technical reviewer verifying another assistant response. Respond ONLY with:\nLine 1: one word VERIFIED, CAUTION, or ISSUES\nLines 2-4: concise bullet points checking factual accuracy, code/tool safety, and completeness (<= 90 words total).',
           effort: 'low',
@@ -1908,8 +1933,6 @@ export const useHubStore = create<HubState>((set, get) => {
         const results = await Promise.all(
           uniqueIds.map(async (targetModelId): Promise<CompareResultItem> => {
             const started = Date.now();
-            const targetModel = getModelById(targetModelId, state.dynamicModels);
-            const apiKey = getApiKeyForProvider(targetModel.provider, state.providerKeys);
             const item: CompareResultItem = {
               modelId: targetModelId,
               status: 'running',
@@ -1920,16 +1943,6 @@ export const useHubStore = create<HubState>((set, get) => {
             };
             options?.onModelUpdate?.(targetModelId, { ...item });
 
-            if (targetModel.provider !== 'demo' && !apiKey) {
-              const missing: CompareResultItem = {
-                ...item,
-                status: 'error',
-                durationMs: Date.now() - started,
-                error: `Missing API key for ${targetModel.label}. Add your key in Settings or pick Demo Sandbox.`,
-              };
-              options?.onModelUpdate?.(targetModelId, missing);
-              return missing;
-            }
 
             try {
               const activeProject = conv?.projectId
@@ -2093,8 +2106,6 @@ export const useHubStore = create<HubState>((set, get) => {
       if (!conv) return;
 
       const agent = state.agents.find((a) => a.id === conv!.agentId) ?? state.agents[0];
-      const model = getModelById(conv.modelId, state.dynamicModels);
-      const apiKey = getApiKeyForProvider(model.provider, state.providerKeys);
       const chatMode = conv.chatMode ?? 'professional';
       const knowledgeSource = conv.knowledgeSource ?? 'auto';
       const studyInstructions = conv.studyInstructions ?? '';
@@ -2147,25 +2158,6 @@ export const useHubStore = create<HubState>((set, get) => {
         }));
         return latest;
       };
-
-      if (model.provider !== 'demo' && !apiKey) {
-        const errorAssistant: ChatMessage = {
-          ...assistantMsg,
-          isStreaming: false,
-          error: `Missing API key for ${model.label}. Add your free API key in Settings or switch to Local Sandbox Simulator.`,
-        };
-        const saved = patchConv((c) => ({
-          ...c,
-          title: derivedTitle,
-          updatedAt: Date.now(),
-          messages: [...c.messages, userMsg, errorAssistant],
-        }));
-        if (saved) {
-          void historyDb.saveConversation(saved, scope);
-          scheduleRemoteSync();
-        }
-        return;
-      }
 
       const abortController = new AbortController();
       set({ isRunning: true, abortController });
@@ -2306,13 +2298,13 @@ export const useHubStore = create<HubState>((set, get) => {
               flushPendingDeltas();
               const shortReason = reason.includes('503')
                 ? 'high demand (503)'
-                : reason.includes('404')
-                  ? 'unavailable (404)'
-                  : 'rate limit (429)';
+                : reason.includes('429')
+                  ? 'a rate limit (429)'
+                  : 'a provider error';
               const noticeMsg: ChatMessage = {
                 id: `msg_notice_${Date.now()}`,
                 role: 'system_notice',
-                content: `${fromModel.label} hit ${shortReason}. Automatically switched to ${toModel.label}.`,
+                content: `${fromModel.label} via ${fromModel.provider} hit ${shortReason}. Switched to ${toModel.label} via ${toModel.provider}.`,
                 createdAt: Date.now(),
               };
               patchConv((c) => {
@@ -2320,7 +2312,7 @@ export const useHubStore = create<HubState>((set, get) => {
                 const copy = [...c.messages];
                 if (idx >= 0) copy.splice(idx, 0, noticeMsg);
                 else copy.push(noticeMsg);
-                return { ...c, modelId: toModel.id, messages: copy };
+                return { ...c, messages: copy };
               });
             },
             requestApproval: (approval) => {
@@ -2368,7 +2360,6 @@ export const useHubStore = create<HubState>((set, get) => {
 
         const finalConv = patchConv((c) => ({
           ...c,
-          modelId: result.usedModelId,
           updatedAt: Date.now(),
           messages: c.messages.map((m) =>
             m.id === assistantMsgId
@@ -2393,7 +2384,7 @@ export const useHubStore = create<HubState>((set, get) => {
       } catch (err) {
         flushPendingDeltas();
         const keys = get().providerKeys;
-        const msg = safeErrorMessage(err, [keys.gemini ?? '', keys.groq ?? '', keys.openrouter ?? '']);
+        const msg = safeErrorMessage(err, Object.values(keys).filter((key): key is string => Boolean(key)));
         const finalConv = patchConv((c) => ({
           ...c,
           updatedAt: Date.now(),

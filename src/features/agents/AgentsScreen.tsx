@@ -19,7 +19,7 @@ import {
   Upload,
   Wrench,
 } from 'lucide-react';
-import { mergeModelCatalog } from '../../services/llm/provider';
+import { getAvailableModels } from '../../services/llm/provider';
 import { STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
 import { useHubStore } from '../../store/useHubStore';
 import {
@@ -42,6 +42,7 @@ const AGENT_ICONS: Record<string, typeof Bot> = {
 };
 
 const MODE_LABELS: Record<ChatMode, { label: string; Icon: typeof Briefcase }> = {
+  coding: { label: 'Coding', Icon: Briefcase },
   general: { label: 'General', Icon: MessageCircle },
   professional: { label: 'MCP Pro', Icon: Briefcase },
   study: { label: 'Study', Icon: BookOpen },
@@ -63,7 +64,8 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
     startNewConversation,
   } = useHubStore();
 
-  const allModels = mergeModelCatalog(dynamicModels);
+  const providerKeys = useHubStore((state) => state.providerKeys);
+  const allModels = getAvailableModels(providerKeys, dynamicModels);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [modeFilter, setModeFilter] = useState<'all' | ChatMode>('all');
@@ -562,7 +564,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
               Default Chat Mode
             </span>
             <div className="grid grid-cols-3 gap-1.5 p-1 rounded-full bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
-              {(['general', 'professional', 'study'] as ChatMode[]).map((m) => {
+              {(['general', 'professional', 'study', 'coding'] as ChatMode[]).map((m) => {
                 const active = defaultChatMode === m;
                 return (
                   <button
@@ -581,7 +583,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
                       active ? 'shadow-xs' : 'text-slate-600 dark:text-slate-400'
                     }`}
                   >
-                    {m === 'professional' ? 'Professional (MCP)' : m === 'study' ? 'Study Session' : 'General'}
+                    {m === 'professional' ? 'Professional (MCP)' : m === 'study' ? 'Study Session' : m === 'coding' ? 'Coding' : 'General'}
                   </button>
                 );
               })}
