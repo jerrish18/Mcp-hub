@@ -1,5 +1,6 @@
 import { catalogRoute, providerEndpoint, readProviderCatalog } from '../src/services/llm/freeRegistry';
 import { streamSseData } from '../src/services/llm/sse';
+import { redactSecrets } from '../src/utils/redact';
 
 const modelscope = process.env.MODELSCOPE_API_TOKEN?.trim();
 if (!modelscope) throw new Error('ModelScope token is missing.');
@@ -48,7 +49,13 @@ for (const model of modelIds) {
     if (!response.ok) {
       const errorText = await response.text();
       const issue = issues.find(([, pattern]) => pattern.test(errorText))?.[0];
-      console.log(JSON.stringify({ model, status, issue, isJson }));
+      const envelope = isJson ? JSON.parse(errorText) : undefined;
+      const error = envelope?.error ?? envelope;
+      const message = typeof error === 'string' ? error : (error?.message ?? error?.Message ?? error?.msg ?? error?.detail);
+      const detail = typeof message === 'string' ? redactSecrets(message, [
+        modelscope, encodeURIComponent(modelscope), Buffer.from(modelscope).toString('base64'),
+      ]).replace(/https?:\/\/\S+|[\w.%-]+@[\w.-]+|\b[A-Za-z0-9_-]{26,}\b/g, '[REDACTED]').slice(0, 180) : undefined;
+      console.log(JSON.stringify({ model, status, issue, detail, isJson }));
       continue;
     }
     if (response.body) {
