@@ -159,6 +159,10 @@ export const MODEL_MIGRATION_ALIASES: Record<string, string> = {
   '@cf/openai/gpt-oss-20b': 'openai/gpt-oss-20b',
   '@cf/qwen/qwen3.8-27b': 'qwen/qwen3.8-27b',
   '@cf/meta/llama-3.1-8b-instruct': 'llama-3.1-8b-instant',
+  'reflection/beam-free': 'reflection/beam',
+  'nvidia/nemotron-3-ultra-550b-a55b:free': 'nvidia/nemotron-3-ultra-550b-a55b',
+  'nvidia/nemotron-3.5-lightning:free': 'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nvidia/nemotron-3.5-super-vl:free': 'nvidia/nemotron-3.5-super-vl-120b-a12b',
   'openrouter/free': 'cloud-auto',
 };
 

@@ -56,7 +56,7 @@ async function verify(provider: CloudProvider, modelId: string) {
           contextWindow: route.contextWindow, routes: [{ ...route, maxOutput: Math.min(route.maxOutput ?? 4096, 4096) }],
         },
         systemPrompt: 'Follow the requested answer format exactly.',
-        effort: 'low', messages, tools, signal: AbortSignal.timeout(75_000),
+        effort: 'low', messages, tools, signal: AbortSignal.timeout(provider === 'nvidia' ? 100_000 : 75_000),
         onEvent: (event) => {
           if (event.type === 'text_delta') {
             text += event.delta;

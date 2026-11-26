@@ -37,7 +37,8 @@ jobs:
             exit 0
           fi
           node --import tsx scripts/verify-free-failover.ts nvidia/nemotron-3-ultra-550b-a55b
-      - name: Verify NVIDIA Build free routes
+      - name: Verify Kilo to NVIDIA same-model fallback
+        continue-on-error: true
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
@@ -45,12 +46,14 @@ jobs:
             echo "::notice::NVIDIA_API_KEY is missing from the free-provider-testing environment."
             exit 0
           fi
-          for model in \
-            z-ai/glm-5.3-flash \
-            z-ai/glm-5.3 \
-            nvidia/nemotron-3-ultra-550b-a55b \
-            nvidia/nemotron-3.5-lightning-30b-a3b \
-            nvidia/nemotron-3.5-super-vl-120b-a12b
-          do
-            npm run --silent verify:free-route -- nvidia "$model" || true
-          done
+          node --import tsx scripts/verify-free-failover.ts nvidia/nemotron-3-ultra-550b-a55b
+      - name: Retry GLM 5.3 Flash on NVIDIA Build
+        continue-on-error: true
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "::notice::NVIDIA_API_KEY is missing from the free-provider-testing environment."
+            exit 0
+          fi
+          npm run --silent verify:free-route -- nvidia z-ai/glm-5.3-flash

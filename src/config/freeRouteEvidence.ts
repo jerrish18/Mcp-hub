@@ -44,4 +44,16 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: true, tools: true, reasoning: true,
     results: 'Free-tier account, streamed TypeScript, reasoning output, tool round trip and image input passed.',
   },
+  {
+    provider: 'nvidia', modelId: 'nvidia/nemotron-3-ultra-550b-a55b', canonicalId: 'nvidia/nemotron-3-ultra-550b-a55b',
+    testedAt: '2026-11-26T16:16:43.740Z', codingScore: 1,
+    images: false, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output and tool round trip on the hosted NVIDIA Build endpoint.',
+  },
+  {
+    provider: 'nvidia', modelId: 'nvidia/nemotron-3.5-super-vl-120b-a12b', canonicalId: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+    testedAt: '2026-11-26T16:17:02.067Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output, tool round trip and image input on NVIDIA Build.',
+  },
 ];
