@@ -1,0 +1,55 @@
+name: Model picker free route verification
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+permissions:
+  contents: read
+jobs:
+  live:
+    if: >-
+      github.repository == 'jerrish18/Mcp-hub' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'fix/model-picker-catalog'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: free-provider-testing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: modelscope
+            model: Qwen-Ambassador/Qwen3.7-Plus
+            secret: MODELSCOPE_API_TOKEN
+          - provider: modelscope
+            model: Qwen/Qwen3.8-27B
+            secret: MODELSCOPE_API_TOKEN
+          - provider: modelscope
+            model: Qwen/Qwen3.5-35B-A3B
+            secret: MODELSCOPE_API_TOKEN
+          - provider: openrouter
+            model: google/gemma-4-31b-it:free
+            secret: OPENROUTER_API_KEY
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify free route
+        env:
+          PROVIDER: ${{ matrix.provider }}
+          MODEL: ${{ matrix.model }}
+          TEST_KEY: ${{ secrets[matrix.secret] }}
+          TOKEN_NAME: ${{ matrix.secret }}
+        run: |
+          if [ -z "$TEST_KEY" ]; then
+            echo "::notice::Live test skipped because the environment secret is missing."
+            exit 0
+          fi
+          export "$TOKEN_NAME=$TEST_KEY"
+          unset TEST_KEY
+          npm run --silent verify:free-route -- "$PROVIDER" "$MODEL"

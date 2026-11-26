@@ -16,6 +16,9 @@ const NIM_FREE_MODELS = new Map([
 
 // Only ModelScope-hosted routes from its own free inference API are eligible.
 const MODELSCOPE_MODELS = new Map([
+  ['Qwen-Ambassador/Qwen3.7-Plus', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
+  ['Qwen/Qwen3.8-27B', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
+  ['Qwen/Qwen3.5-35B-A3B', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
   ['zai-org/GLM-4.7-Flash', { images: false, tools: true, reasoning: true, contextWindow: 200_000 }],
   ['zai-org/GLM-5.2', { images: false, tools: true, reasoning: true, contextWindow: 200_000 }],
   ['moonshotai/Kimi-K3.1-Pro', { images: true, tools: true, reasoning: true, contextWindow: 262_144 }],
