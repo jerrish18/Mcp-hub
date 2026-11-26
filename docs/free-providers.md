@@ -21,7 +21,7 @@ MCP Hub lists each verified model once. A canonical model can have multiple rout
 | Kilo `nvidia/nemotron-3-ultra-550b-a55b:free` | Passed anonymous streaming, TypeScript, reasoning, and a tool call with a follow-up result. |
 | Kilo `recursive/flint-v1.0:free` and `particle-ai/particle-1:free` | Streamed TypeScript, then failed the reasoning check. They remain disabled. |
 | NVIDIA `nvidia/nemotron-3-ultra-550b-a55b` and `nvidia/nemotron-3.5-super-vl-120b-a12b` | Passed live streaming, TypeScript, reasoning, and a tool round trip. Super VL also passed the image check. |
-| NVIDIA `z-ai/glm-5.3-flash`, `z-ai/glm-5.3`, and `nvidia/nemotron-3.5-lightning-30b-a3b` | The Flash route timed out, the full GLM was absent from the account catalog, and the Lightning route did not pass its coding and streaming check. |
+| NVIDIA `z-ai/glm-5.3-flash`, `z-ai/glm-5.3`, and `nvidia/nemotron-3.5-lightning-30b-a3b` | The Flash route timed out on both attempts, the full GLM was absent from the account catalog, and the Lightning route did not pass its coding and streaming check. |
 | OpenRouter `nvidia/nemotron-3-ultra-550b-a55b:free` | Passed authenticated zero-price streaming, TypeScript, reasoning, and a tool round trip in the initial run. The retry confirmed free-tier account status and passed live fallback from Kilo under a simulated HTTP 429. Its repeated coding exercise did not pass. It shares the Nemotron 3 Ultra selector entry with Kilo. |
 | OpenRouter `nvidia/nemotron-3.5-lightning:free` and `nvidia/nemotron-3.5-super-vl:free` | Passed free-tier account verification, streaming, TypeScript, reasoning, and a tool round trip. Super VL also passed the image check. |
 | OpenRouter `google/gemma-4-26b-a4b-it:free`, `google/gemma-4-31b-it:free`, and `particle-ai/particle-1:free` | Retry encountered HTTP 429. The routes remain disabled. |
@@ -37,7 +37,7 @@ npm run verify:free-route -- openrouter vendor/model:free
 
 The command checks the live catalog before posting a request. For OpenRouter it also checks that the test credential reports free-tier access. It reports the phase and pass status without printing credentials, prompts, or provider errors. It checks incremental output, a small TypeScript exercise, a reasoning task, and advertised tool and image support. A reviewer records results and confirms the canonical model identity in `src/config/freeRouteEvidence.ts` before a route becomes selectable.
 
-To verify cross-provider fallback, use a canonical model with at least two verified routes. The script simulates a rate limit on the initial route and requires a live stream from a different provider. This passed from Kilo to OpenRouter for Nemotron 3 Ultra.
+To verify cross-provider fallback, use a canonical model with at least two verified routes. The script simulates a rate limit on the initial route and requires a live stream from a different provider. This passed from Kilo to both OpenRouter and NVIDIA Build for Nemotron 3 Ultra.
 
 ```sh
 node --import tsx scripts/verify-free-failover.ts nvidia/nemotron-3-ultra-550b-a55b
