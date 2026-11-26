@@ -38,6 +38,7 @@ jobs:
           node --import tsx --input-type=module <<'EOF_RELAY'
           import assert from 'node:assert/strict';
           import { once } from 'node:events';
+          import { setTimeout as delay } from 'node:timers/promises';
           import express from 'express';
           import { createFreeAiRouter } from './src/server/freeAiRouter.ts';
           import { streamSseData } from './src/services/llm/sse.ts';
@@ -60,10 +61,25 @@ jobs:
             assert.equal(blocked.status, 403);
             await blocked.body?.cancel();
             console.log(JSON.stringify({ unverifiedRouteBlocked: true }));
+            let failures = 0;
             for (const model of ['zai-org/GLM-4.7-Flash', 'zai-org/GLM-5.2', 'deepseek-ai/DeepSeek-V4.1-Flash-1017']) {
               assert.ok(ids.includes(model));
-              const response = await chat(model);
-              assert.equal(response.status, 200, model);
+              let response = await chat(model);
+              if (response.status === 429) {
+                const retry = response.headers.get('retry-after') ?? '';
+                const seconds = /^\d+$/.test(retry) ? Number(retry) : undefined;
+                if (seconds !== undefined && seconds <= 30) {
+                  await response.body?.cancel();
+                  await delay(Math.max(seconds, 1) * 1000);
+                  response = await chat(model);
+                }
+              }
+              if (response.status !== 200) {
+                console.log(JSON.stringify({ model, streamedThroughRelay: false, status: response.status }));
+                await response.body?.cancel();
+                failures++;
+                continue;
+              }
               assert.match(response.headers.get('content-type'), /text\/event-stream/);
               let received = false;
               let complete = false;
@@ -72,9 +88,11 @@ jobs:
                 if (choice?.delta?.content?.trim()) received = true;
                 if (choice?.finish_reason === 'stop') complete = true;
               }
-              assert.ok(received && complete, model);
-              console.log(JSON.stringify({ model, streamedThroughRelay: true }));
+              const passed = received && complete;
+              if (!passed) failures++;
+              console.log(JSON.stringify({ model, streamedThroughRelay: passed }));
             }
+            if (failures) process.exitCode = 1;
           } finally {
             server.close();
           }
