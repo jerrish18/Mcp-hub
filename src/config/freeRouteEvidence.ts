@@ -68,4 +68,22 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: true, tools: true, reasoning: true,
     results: 'Passed hosted streaming, TypeScript, reasoning output, tool round trip and image input on NVIDIA Build.',
   },
+  {
+    provider: 'modelscope', modelId: 'zai-org/GLM-4.7-Flash', canonicalId: 'z-ai/glm-4.7-flash',
+    testedAt: '2026-11-26T17:45:34.984Z', codingScore: 1,
+    images: false, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output, and a tool round trip on ModelScope direct free inference.',
+  },
+  {
+    provider: 'modelscope', modelId: 'zai-org/GLM-5.2', canonicalId: 'z-ai/glm-5.2',
+    testedAt: '2026-11-26T17:45:54.685Z', codingScore: 1,
+    images: false, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output, and a tool round trip on ModelScope direct free inference.',
+  },
+  {
+    provider: 'modelscope', modelId: 'deepseek-ai/DeepSeek-V4.1-Flash-1017', canonicalId: 'deepseek-ai/deepseek-v4.1-flash-1017',
+    testedAt: '2026-11-26T17:46:08.255Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output, and a tool round trip plus image input on ModelScope direct free inference.',
+  },
 ];
