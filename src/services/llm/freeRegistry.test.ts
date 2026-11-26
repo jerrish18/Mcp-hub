@@ -54,24 +54,35 @@ test('a route that became paid makes no inference request even if saved discover
   assert.deepEqual(methods, ['GET']);
 });
 
-test('fallback tries another provider for the same canonical identity before output', async () => {
-  const model: ModelConfig = { id: 'canonical/model', label: 'Canonical', description: '', provider: 'kilo',
-    contextWindow: 128_000, isFreeTier: true };
+test('two live-verified providers list one canonical model and fall back before output', async () => {
+  const modelId = 'nvidia/nemotron-3-ultra-550b-a55b';
+  const keys = { openrouter: 'fixture' };
+  const row = { ...beam, id: `${modelId}:free` };
   const transitions: string[] = [];
+  const fetchFn: typeof fetch = async (url, init) => {
+    if (!init?.method || init.method === 'GET') return Response.json({ data: [row] });
+    if (String(url).includes('kilo.ai')) return new Response('', { status: 429, headers: { 'Retry-After': '1' } });
+    const body = JSON.parse(String(init.body ?? '{}'));
+    assert.equal(body.model, row.id);
+    assert.equal(body.provider.max_price.prompt, 0);
+    assert.equal(body.provider.max_price.completion, 0);
+    return new Response(stream);
+  };
+  const { models } = await syncLiveProviderModels(keys, fetchFn);
+  const options = getAvailableModels(keys, models).filter((model) => model.routes?.length);
+  assert.deepEqual(options.map((model) => model.id), [modelId]);
+  assert.deepEqual(options[0].routes?.map((route) => route.provider).sort(), ['kilo', 'openrouter']);
   const result = await streamWithRateLimitFallback({
-    primaryModelId: model.id, keys: { openrouter: 'fixture' }, systemPrompt: '', effort: 'low', messages: [], tools: [],
-    routeFixture: () => [model, { ...model, provider: 'openrouter' }],
-    fetchFn: async (url, init) => {
-      if (String(url).includes('kilo.ai')) return new Response('', { status: 429, headers: { 'Retry-After': '1' } });
-      const body = JSON.parse(String(init?.body ?? '{}'));
-      assert.equal(body.provider.max_price.prompt, 0);
-      assert.equal(body.provider.max_price.completion, 0);
-      return new Response(stream);
-    },
+    primaryModelId: modelId, keys, dynamicModels: models, systemPrompt: '', effort: 'low', messages: [], tools: [],
+    fetchFn,
     onEvent: () => {},
-    onModelFallback: (from, to) => transitions.push(`${from.provider} → ${to.provider}`),
+    onModelFallback: (from, to) => {
+      assert.equal(from.id, modelId);
+      assert.equal(to.id, modelId);
+      transitions.push(`${from.provider} → ${to.provider}`);
+    },
   });
-  assert.equal(result.usedModel.id, model.id);
+  assert.equal(result.usedModel.id, modelId);
   assert.equal(result.usedModel.provider, 'openrouter');
   assert.deepEqual(transitions, ['kilo → openrouter']);
 });

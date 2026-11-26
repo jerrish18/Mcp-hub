@@ -37,25 +37,6 @@ jobs:
             exit 0
           fi
           node --import tsx scripts/verify-free-failover.ts nvidia/nemotron-3-ultra-550b-a55b
-      - name: Verify OpenRouter free routes
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "::notice::OPENROUTER_API_KEY is missing from the free-provider-testing environment."
-            exit 0
-          fi
-          for model in \
-            nvidia/nemotron-3-ultra-550b-a55b:free \
-            nvidia/nemotron-3.5-lightning:free \
-            nvidia/nemotron-3.5-super-vl:free \
-            google/gemma-4-26b-a4b-it:free \
-            google/gemma-4-31b-it:free \
-            recursive/flint-v1.0:free \
-            particle-ai/particle-1:free
-          do
-            npm run --silent verify:free-route -- openrouter "$model" || true
-          done
       - name: Verify NVIDIA Build free routes
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}

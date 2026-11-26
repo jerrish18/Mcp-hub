@@ -32,4 +32,16 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: false, tools: true, reasoning: true,
     results: 'Zero-price hosted inference, streamed TypeScript, reasoning output and tool round trip passed.',
   },
+  {
+    provider: 'openrouter', modelId: 'nvidia/nemotron-3.5-lightning:free', canonicalId: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+    testedAt: '2026-11-26T16:08:57.140Z', codingScore: 1,
+    images: false, tools: true, reasoning: true,
+    results: 'Free-tier account, streamed TypeScript, reasoning output and tool round trip passed.',
+  },
+  {
+    provider: 'openrouter', modelId: 'nvidia/nemotron-3.5-super-vl:free', canonicalId: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+    testedAt: '2026-11-26T16:09:14.641Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Free-tier account, streamed TypeScript, reasoning output, tool round trip and image input passed.',
+  },
 ];
