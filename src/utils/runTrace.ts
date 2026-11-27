@@ -25,6 +25,39 @@ export function redactAndPreview(
   return `${redacted.slice(0, Math.max(20, maxLen - 1))}…`;
 }
 
+export function redactRunTrace(trace: RunTrace, knownSecrets: string[] = []): RunTrace {
+  const redactOpt = (v?: string) => (typeof v === 'string' ? redactSecrets(v, knownSecrets) : v);
+  return {
+    ...trace,
+    error: redactOpt(trace.error),
+    fallbacks: (trace.fallbacks ?? []).map((fb) => ({
+      ...fb,
+      reason: redactSecrets(fb.reason, knownSecrets),
+    })),
+    steps: trace.steps?.map((step) => {
+      if (step.kind === 'model_call') {
+        return { ...step, error: redactOpt(step.error) };
+      }
+      if (step.kind === 'tool_call') {
+        return {
+          ...step,
+          argsPreview: redactOpt(step.argsPreview),
+          fullArgsJson: redactOpt(step.fullArgsJson),
+          resultPreview: redactOpt(step.resultPreview),
+          error: redactOpt(step.error),
+        };
+      }
+      if (step.kind === 'approval_wait') {
+        return { ...step, reason: redactOpt(step.reason) };
+      }
+      if (step.kind === 'fallback') {
+        return { ...step, reason: redactSecrets(step.reason, knownSecrets) };
+      }
+      return { ...step };
+    }),
+  };
+}
+
 export function normalizeTraceSteps(trace: RunTrace): RunTraceStep[] {
   if (trace.steps && trace.steps.length > 0) {
     return trace.steps;
@@ -188,22 +221,27 @@ export function filterTraceSteps(steps: RunTraceStep[], filter: TraceStepFilter)
   }
 }
 
-export function formatTraceAsMarkdown(trace: RunTrace, title = 'Execution Run Trace'): string {
-  const steps = normalizeTraceSteps(trace);
+export function formatTraceAsMarkdown(
+  trace: RunTrace,
+  title = 'Execution Run Trace',
+  knownSecrets: string[] = []
+): string {
+  const safeTrace = redactRunTrace(trace, knownSecrets);
+  const steps = normalizeTraceSteps(safeTrace);
   const lines: string[] = [
     `## ${title}`,
-    `- **Duration:** ${formatDurationCompact(trace.durationMs)}`,
-    `- **Model:** ${trace.primaryModelId !== trace.usedModelId ? `${trace.primaryModelId} → ${trace.usedModelId}` : trace.usedModelId}`,
-    `- **Steps Executed:** ${trace.stepsExecuted}`,
-    `- **Est. Prompt Tokens:** ${trace.estimatedPromptTokens.toLocaleString()}`,
-    `- **Local RAG:** ${trace.ragUsed ? `${trace.ragChunksCount ?? 0} chunks` : 'Direct'}`,
+    `- **Duration:** ${formatDurationCompact(safeTrace.durationMs)}`,
+    `- **Model:** ${safeTrace.primaryModelId !== safeTrace.usedModelId ? `${safeTrace.primaryModelId} → ${safeTrace.usedModelId}` : safeTrace.usedModelId}`,
+    `- **Steps Executed:** ${safeTrace.stepsExecuted}`,
+    `- **Est. Prompt Tokens:** ${safeTrace.estimatedPromptTokens.toLocaleString()}`,
+    `- **Local RAG:** ${safeTrace.ragUsed ? `${safeTrace.ragChunksCount ?? 0} chunks` : 'Direct'}`,
   ];
 
-  if (trace.stoppedByUser) {
+  if (safeTrace.stoppedByUser) {
     lines.push('- **Status:** Stopped early by user');
   }
-  if (trace.error) {
-    lines.push(`- **Error:** ${redactSecrets(trace.error)}`);
+  if (safeTrace.error) {
+    lines.push(`- **Error:** ${redactSecrets(safeTrace.error, knownSecrets)}`);
   }
 
   lines.push('', '### Timeline Steps');
@@ -211,14 +249,14 @@ export function formatTraceAsMarkdown(trace: RunTrace, title = 'Execution Run Tr
     lines.push('_No recorded timeline steps._');
   } else {
     for (const s of steps) {
-      const offsetMs = Math.max(0, s.startedAt - trace.startedAt);
+      const offsetMs = Math.max(0, s.startedAt - safeTrace.startedAt);
       const offsetStr = `+${formatDurationCompact(offsetMs)}`;
       const durStr = formatDurationCompact(s.durationMs);
       if (s.kind === 'model_call') {
         lines.push(`- \`${offsetStr}\` **Model** (\`${s.modelId}\`) — ${s.status} (${durStr})`);
       } else if (s.kind === 'tool_call') {
         lines.push(
-          `- \`${offsetStr}\` **Tool** \`${s.serverName}/${s.toolName}\` — ${s.status} (${durStr})${s.argsPreview ? `\n  - Args: \`${redactSecrets(s.argsPreview)}\`` : ''}${s.error ? `\n  - Error: ${redactSecrets(s.error)}` : ''}`
+          `- \`${offsetStr}\` **Tool** \`${s.serverName}/${s.toolName}\` — ${s.status} (${durStr})${s.argsPreview ? `\n  - Args: \`${redactSecrets(s.argsPreview, knownSecrets)}\`` : ''}${s.error ? `\n  - Error: ${redactSecrets(s.error, knownSecrets)}` : ''}`
         );
       } else if (s.kind === 'approval_wait') {
         lines.push(
@@ -230,7 +268,7 @@ export function formatTraceAsMarkdown(trace: RunTrace, title = 'Execution Run Tr
         );
       } else if (s.kind === 'fallback') {
         lines.push(
-          `- \`${offsetStr}\` **Fallback** \`${s.from}\` → \`${s.to}\` (${redactSecrets(s.reason)})`
+          `- \`${offsetStr}\` **Fallback** \`${s.from}\` → \`${s.to}\` (${redactSecrets(s.reason, knownSecrets)})`
         );
       } else if (s.kind === 'injection_warning') {
         lines.push(

@@ -16,10 +16,19 @@ import { ArrowUp, ChevronDown, MessageSquare, Mic, MicOff, Plus, Square } from '
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { fetch as expoFetch } from 'expo/fetch';
-import { getAvailableModels, getUnavailableCatalogModels, preserveCatalogForSameCredentials, retainTransientCatalogRoutes, syncLiveProviderModels } from '@core/services/llm/provider';
+import {
+  classifyProviderFailure,
+  getAvailableModels,
+  getUnavailableCatalogModelsWithDetails,
+  isModelManuallyOverridden,
+  preserveCatalogForSameCredentials,
+  retainTransientCatalogRoutes,
+  syncLiveProviderModels,
+  validateAllConfiguredProviderKeys,
+} from '@core/services/llm/provider';
 import { CATALOG_TTL } from '@core/services/llm/freeRegistry';
 import { safeErrorMessage } from '@core/utils/redact';
-import { getModelById, PROVIDER_INFO } from '@core/config/models';
+import { getModelById, normalizeModelId, PROVIDER_INFO } from '@core/config/models';
 import { runAgentLoop } from '@core/services/llm/agentLoop';
 import type { LlmConversationItem } from '@core/services/llm/types';
 import { connectAndInspectServer } from '@core/services/mcp/client';
@@ -31,11 +40,14 @@ import type {
   ApprovalDecision,
   ChatMessage,
   ChatMode,
+  CloudProvider,
   Conversation,
   EffortLevel,
   McpServerConfig,
   ModelConfig,
   ProviderKeys,
+  ProviderKeyStatus,
+  ProviderValidationResult,
   PendingApproval,
   ToolCallRecord,
 } from '@core/types';
@@ -107,6 +119,8 @@ export default function MobileChatScreen() {
   const [showUnavailableModels, setShowUnavailableModels] = useState(false);
   const catalogKeys = useRef<ProviderKeys>({});
   const [cloudModels, setCloudModels] = useState<ModelConfig[]>([]);
+  const [providerValidation, setProviderValidation] = useState<Partial<Record<CloudProvider, ProviderValidationResult>>>({});
+  const [modelFailures, setModelFailures] = useState<Record<string, { status: ProviderKeyStatus; badge: string; detail: string }>>({});
   const [showReasoning, setShowReasoning] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -136,13 +150,25 @@ export default function MobileChatScreen() {
       let retrySoon = true;
       try {
         const keys = await loadProviderKeys();
-        const { models, transientProviders } = await syncLiveProviderModels(keys, expoFetch as unknown as typeof fetch);
+        const [{ models, transientProviders }, { validation, discoveredModels }] = await Promise.all([
+          syncLiveProviderModels(keys, expoFetch as unknown as typeof fetch),
+          validateAllConfiguredProviderKeys(keys, expoFetch as unknown as typeof fetch),
+        ]);
         if (!active) return;
         const previousKeys = catalogKeys.current;
         catalogKeys.current = keys;
-        setCloudModels((previous) => retainTransientCatalogRoutes(
-          models, preserveCatalogForSameCredentials(previous, previousKeys, keys), transientProviders, keys,
-        ));
+        setProviderValidation(validation);
+        setCloudModels((previous) => {
+          const retained = retainTransientCatalogRoutes(
+            models,
+            preserveCatalogForSameCredentials(previous, previousKeys, keys),
+            transientProviders,
+            keys
+          );
+          const existingIds = new Set(retained.map((m) => normalizeModelId(m.id)));
+          const extra = discoveredModels.filter((m) => !existingIds.has(normalizeModelId(m.id)));
+          return extra.length ? [...retained, ...extra] : retained;
+        });
         retrySoon = transientProviders.length > 0;
       } catch {
         retrySoon = true;
@@ -426,18 +452,23 @@ export default function MobileChatScreen() {
 
     let latestMessages = nextMessages;
     let keys: ProviderKeys = {};
+    let chosenModelId = model.id;
     try {
       keys = await loadProviderKeys();
-      const available = getAvailableModels(keys, cloudModels);
+      const manualOverrides = settings.manualModelOverrides ?? [];
+      const available = getAvailableModels(keys, cloudModels, manualOverrides);
       const modelId = selectedModelId === 'cloud-auto' || (chatMode === 'coding' && !selectedModelId)
         ? 'cloud-auto' : available.some((candidate) => candidate.id === model.id) ? model.id
           : selectedModelId && chatMode === 'coding' ? selectedModelId
             : available.some((candidate) => candidate.routes?.length) ? 'cloud-auto' : 'demo-sandbox';
+      chosenModelId = modelId;
       const res = await runAgentLoop({
         agent,
         modelId,
         chatMode,
         dynamicModels: cloudModels,
+        manualModelOverrides: manualOverrides,
+        allowLocalTools: Boolean(settings.localModelToolsEnabled),
         fetchFn: expoFetch as unknown as typeof fetch,
         effort,
         keys,
@@ -493,6 +524,15 @@ export default function MobileChatScreen() {
       await persistConvSnapshot(finalized, trimmed);
       void scheduleRunCompleteNotification(res.finalText);
     } catch (error) {
+      const classified = classifyProviderFailure(error);
+      setModelFailures((prev) => ({
+        ...prev,
+        [normalizeModelId(chosenModelId)]: {
+          status: classified.status,
+          badge: classified.badge,
+          detail: classified.detail,
+        },
+      }));
       const message = safeErrorMessage(error, Object.values(keys).filter((key): key is string => Boolean(key)));
       const finalized = latestMessages.map((m) =>
         m.id === assistantId ? { ...m, error: message, isStreaming: false } : m
@@ -505,8 +545,32 @@ export default function MobileChatScreen() {
     }
   };
 
-  const pickerModels = getAvailableModels(catalogKeys.current, cloudModels);
-  const unavailableModels = getUnavailableCatalogModels(pickerModels, cloudModels);
+  const toggleMobileManualOverride = (targetModelId: string) => {
+    const normalized = normalizeModelId(targetModelId);
+    const current = settings.manualModelOverrides ?? [];
+    const exists = current.some((id) => id === targetModelId || normalizeModelId(id) === normalized);
+    const nextOverrides = exists
+      ? current.filter((id) => id !== targetModelId && normalizeModelId(id) !== normalized)
+      : [...current, normalized];
+    const nextSettings: AppSettings = { ...settings, manualModelOverrides: nextOverrides };
+    setSettings(nextSettings);
+    setModelFailures((prev) => {
+      const copy = { ...prev };
+      delete copy[targetModelId];
+      delete copy[normalized];
+      return copy;
+    });
+    void saveMobilePrefs({ settings: nextSettings });
+  };
+
+  const pickerModels = getAvailableModels(catalogKeys.current, cloudModels, settings.manualModelOverrides ?? []);
+  const unavailableModels = getUnavailableCatalogModelsWithDetails(
+    pickerModels,
+    catalogKeys.current,
+    cloudModels,
+    providerValidation,
+    modelFailures
+  );
   const theme = useWorkspaceTheme(Boolean(settings.oledDark));
   const isDark = theme.dark;
 
@@ -577,40 +641,91 @@ export default function MobileChatScreen() {
               ...pickerModels,
             ]}
             ListFooterComponent={unavailableModels.length ? (
-              <View style={{ paddingVertical: 12, gap: 6 }}>
+              <View style={{ paddingVertical: 12, gap: 8 }}>
                 <Pressable accessibilityRole="button" accessibilityState={{ expanded: showUnavailableModels }}
                   onPress={() => setShowUnavailableModels((value) => !value)}
                   style={{ minHeight: 44, justifyContent: 'center' }}>
-                  <Text style={{ color: theme.text, fontWeight: '600' }}>Unavailable models ({unavailableModels.length})</Text>
+                  <Text style={{ color: theme.text, fontWeight: '600' }}>Unavailable / Unverified models ({unavailableModels.length})</Text>
                 </Pressable>
                 {showUnavailableModels && (
-                  <>
-                    <Text style={{ color: theme.muted }}>These models have no verified free route with your current settings.</Text>
+                  <View style={{ gap: 8 }}>
+                    <Text style={{ color: theme.muted }}>Models with valid API keys can be enabled manually below.</Text>
                     {unavailableModels.map((entry) => (
-                      <Text key={entry.id} style={{ color: theme.muted }}>{entry.label}</Text>
+                      <View
+                        key={entry.model.id}
+                        style={{
+                          padding: 12,
+                          borderRadius: 12,
+                          backgroundColor: theme.panel,
+                          borderWidth: 1,
+                          borderColor: theme.border,
+                          gap: 6,
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                          <Text style={{ color: theme.text, fontWeight: '600', flex: 1 }}>{entry.model.label}</Text>
+                          <Text style={{ color: entry.status === 'invalid_key' ? '#EF4444' : '#F59E0B', fontSize: 11, fontWeight: '700' }}>
+                            {entry.badge}
+                          </Text>
+                        </View>
+                        <Text style={{ color: theme.muted, fontSize: 12 }}>{entry.detail}</Text>
+                        {entry.canOverride && (
+                          <Pressable
+                            accessibilityRole="button"
+                            onPress={() => toggleMobileManualOverride(entry.model.id)}
+                            style={{
+                              minHeight: 44,
+                              paddingHorizontal: 12,
+                              borderRadius: 10,
+                              backgroundColor: theme.accentSurface,
+                              justifyContent: 'center',
+                              alignItems: 'center',
+                              alignSelf: 'flex-start',
+                            }}
+                          >
+                            <Text style={{ color: theme.onAccentSurface, fontWeight: '600', fontSize: 12 }}>Enable Model</Text>
+                          </Pressable>
+                        )}
+                      </View>
                     ))}
-                  </>
+                  </View>
                 )}
               </View>
             ) : null}
             keyExtractor={(entry) => entry.id}
-            renderItem={({ item }) => (
-              <Pressable accessibilityRole="button" accessibilityState={{ selected: item.id === model.id }}
-                onPress={() => {
-                  setSelectedModelId(item.id);
-                  setModelPickerOpen(false);
-                  void persistConvSnapshot(messages, undefined, chatMode, item.id);
-                }}
-                style={{ padding: 12, borderRadius: 12, backgroundColor: theme.panel }}>
-                <Text style={{ color: theme.text, fontWeight: '600' }}>{item.label}</Text>
-                {item.routes?.length ? (
-                  <Text style={{ color: theme.muted }}>{item.routes.map((route) => PROVIDER_INFO[route.provider].name).join(' · ')}</Text>
-                ) : null}
-                {item.routes?.some((route) => route.dataTerms) ? (
-                  <Text style={{ color: theme.muted }}>A free route may retain prompts for training.</Text>
-                ) : null}
-              </Pressable>
-            )}
+            renderItem={({ item }) => {
+              const overridden = isModelManuallyOverridden(item.id, settings.manualModelOverrides);
+              return (
+                <View style={{ padding: 12, borderRadius: 12, backgroundColor: theme.panel, gap: 6 }}>
+                  <Pressable accessibilityRole="button" accessibilityState={{ selected: item.id === model.id }}
+                    onPress={() => {
+                      setSelectedModelId(item.id);
+                      setModelPickerOpen(false);
+                      void persistConvSnapshot(messages, undefined, chatMode, item.id);
+                    }}
+                    style={{ minHeight: 44, justifyContent: 'center' }}>
+                    <Text style={{ color: theme.text, fontWeight: '600' }}>
+                      {item.label}{overridden ? ' (Manual Override)' : ''}
+                    </Text>
+                    {item.routes?.length ? (
+                      <Text style={{ color: theme.muted }}>{item.routes.map((route) => PROVIDER_INFO[route.provider].name).join(' · ')}</Text>
+                    ) : null}
+                    {item.routes?.some((route) => route.dataTerms) ? (
+                      <Text style={{ color: theme.muted }}>A free route may retain prompts for training.</Text>
+                    ) : null}
+                  </Pressable>
+                  {overridden && (
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => toggleMobileManualOverride(item.id)}
+                      style={{ minHeight: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
+                    >
+                      <Text style={{ color: theme.muted, fontSize: 12, fontWeight: '600' }}>Disable manual override</Text>
+                    </Pressable>
+                  )}
+                </View>
+              );
+            }}
           />
         </SafeAreaView>
       </Modal>

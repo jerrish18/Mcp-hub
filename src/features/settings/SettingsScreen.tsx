@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import {
+  AlertTriangle,
   CheckCircle2,
   Eye,
   EyeOff,
@@ -18,14 +19,21 @@ import {
   UserCheck,
   Zap,
 } from 'lucide-react';
-import { PROVIDER_INFO } from '../../config/models';
-import { getAvailableModels, testModelConnection } from '../../services/llm/provider';
+import { getShortModelName, PROVIDER_INFO } from '../../config/models';
+import {
+  getAvailableModels,
+  getUnavailableCatalogModelsWithDetails,
+  isModelManuallyOverridden,
+  testModelConnection,
+} from '../../services/llm/provider';
 import { useHubStore } from '../../store/useHubStore';
 import type {
   A2uiMode,
+  CloudProvider,
   PixelAccentTheme,
   ProviderId,
   ProviderKeys,
+  ProviderKeyStatus,
   ToolPermissionPolicy,
 } from '../../types';
 import { M3Switch } from '../../ui/M3Switch';
@@ -37,17 +45,36 @@ import { getProviderQuotaStatus } from '../../utils/quotaTracker';
 import { PIXEL_PALETTES } from '../../utils/theme';
 import { AppApiKeySection } from './AppApiKeySection';
 
+function providerBadgeClasses(status?: ProviderKeyStatus | 'unverified_route'): string {
+  if (status === 'valid') {
+    return 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-200 dark:border-emerald-800';
+  }
+  if (status === 'invalid_key' || status === 'rate_limited') {
+    return 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/60 dark:text-rose-200 dark:border-rose-800';
+  }
+  if (status === 'unsupported_param' || status === 'cors_blocked' || status === 'paid_route' || status === 'network_error') {
+    return 'bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/60 dark:text-amber-200 dark:border-amber-800';
+  }
+  return 'bg-slate-200/80 text-slate-700 border-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700';
+}
+
 export function SettingsScreen() {
   const {
     authUser,
     syncStatus,
     syncError,
     providerKeys,
+    providerValidation,
+    validatingKeys,
+    modelFailures,
     dynamicModels,
     pendingFreeModels,
     settings,
     passphraseVaultEnabled,
     setProviderKeys,
+    validateProviderKeysNow,
+    toggleManualModelOverride,
+    recordModelFailure,
     syncModels,
     addCustomModel,
     updateSettings,
@@ -63,7 +90,17 @@ export function SettingsScreen() {
     syncWorkspaceNow,
   } = useHubStore();
 
-  const allModels = getAvailableModels(providerKeys, dynamicModels);
+  const manualOverrides = settings.manualModelOverrides ?? [];
+  const allModels = getAvailableModels(providerKeys, dynamicModels, manualOverrides);
+  const unavailableEntries = getUnavailableCatalogModelsWithDetails(
+    allModels,
+    providerKeys,
+    dynamicModels,
+    providerValidation,
+    modelFailures
+  );
+  const isHttpsPage =
+    typeof window !== 'undefined' && window.location?.protocol === 'https:';
 
   const [geminiKey, setGeminiKey] = useState(providerKeys.gemini ?? '');
   const [groqKey, setGroqKey] = useState(providerKeys.groq ?? '');
@@ -129,14 +166,14 @@ export function SettingsScreen() {
     setSyncingModels(true);
     setSyncNotice('');
     try {
-      const res = await syncModels();
+      const [, res] = await Promise.all([validateProviderKeysNow(), syncModels()]);
       if (res.transient) {
-        setSyncNotice('Some catalogs are temporarily unavailable. Try refreshing again shortly.');
+        setSyncNotice('Some catalogs are temporarily unavailable. Keys were verified where reachable; try refreshing again shortly.');
       } else if (res.count > 0) {
-        setSyncNotice(`Synced ${res.count} live models from ${res.providers.join(', ')}.`);
+        setSyncNotice(`Synced ${res.count} live models from ${res.providers.join(', ')} and verified provider keys.`);
         triggerHaptic(settings.hapticsEnabled, 'success');
       } else {
-        setSyncNotice('No verified free cloud models are currently available for your configured providers.');
+        setSyncNotice('Keys verified. No zero-cost route matched automatically; use Manual Override below to enable models for valid keys.');
       }
     } catch (err) {
       setSyncNotice(safeErrorMessage(err));
@@ -168,6 +205,8 @@ export function SettingsScreen() {
         modelId: targetId,
         keys: providerKeys,
         dynamicModels,
+        manualModelOverrides: manualOverrides,
+        allowLocalTools: Boolean(settings.localModelToolsEnabled),
       });
       setTestResult({
         ok: true,
@@ -175,6 +214,7 @@ export function SettingsScreen() {
       });
       triggerHaptic(settings.hapticsEnabled, 'success');
     } catch (err) {
+      recordModelFailure(targetId, err);
       const msg = safeErrorMessage(err, Object.values(providerKeys).filter((key): key is string => Boolean(key)));
       const isTransientOrMissing =
         msg.includes('503') || msg.includes('404') || msg.toLowerCase().includes('unavailable');
@@ -187,6 +227,20 @@ export function SettingsScreen() {
     } finally {
       setTestingModel(false);
     }
+  };
+
+  const renderProviderStatusBadge = (provider: CloudProvider) => {
+    const statusObj = providerValidation[provider];
+    if (!statusObj || statusObj.status === 'unconfigured') return null;
+    return (
+      <span
+        data-testid={`provider-status-${provider}`}
+        title={statusObj.detail}
+        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${providerBadgeClasses(statusObj.status)}`}
+      >
+        {statusObj.badge}
+      </span>
+    );
   };
 
   return (
@@ -484,10 +538,13 @@ export function SettingsScreen() {
 
           <div className="space-y-3">
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor="key-gemini" className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                  Google Gemini API Key
-                </label>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label htmlFor="key-gemini" className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Google Gemini API Key
+                  </label>
+                  {renderProviderStatusBadge('gemini')}
+                </div>
                 <a
                   href={PROVIDER_INFO.gemini.signupUrl}
                   target="_blank"
@@ -513,10 +570,13 @@ export function SettingsScreen() {
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor="key-groq" className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                  Groq API Key
-                </label>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label htmlFor="key-groq" className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Groq API Key
+                  </label>
+                  {renderProviderStatusBadge('groq')}
+                </div>
                 <a
                   href={PROVIDER_INFO.groq.signupUrl}
                   target="_blank"
@@ -542,10 +602,13 @@ export function SettingsScreen() {
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label htmlFor="key-openrouter" className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                  OpenRouter API Key
-                </label>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label htmlFor="key-openrouter" className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    OpenRouter API Key
+                  </label>
+                  {renderProviderStatusBadge('openrouter')}
+                </div>
                 <a
                   href={PROVIDER_INFO.openrouter.signupUrl}
                   target="_blank"
@@ -573,14 +636,17 @@ export function SettingsScreen() {
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {([
-              ['NVIDIA Build API key', nvidiaKey, setNvidiaKey],
-              ['ModelScope access token', modelscopeToken, setModelscopeToken],
-              ['AMD Token Factory key', amdKey, setAmdKey],
-              ['Cloudflare Workers AI token', cloudflareToken, setCloudflareToken],
-              ['Cloudflare account ID', cloudflareAccount, setCloudflareAccount],
-            ] as const).map(([label, value, update]) => (
+              ['NVIDIA Build API key', nvidiaKey, setNvidiaKey, 'nvidia'],
+              ['ModelScope access token', modelscopeToken, setModelscopeToken, 'modelscope'],
+              ['AMD Token Factory key', amdKey, setAmdKey, 'amd'],
+              ['Cloudflare Workers AI token', cloudflareToken, setCloudflareToken, 'cloudflare'],
+              ['Cloudflare account ID', cloudflareAccount, setCloudflareAccount, null],
+            ] as const).map(([label, value, update, providerId]) => (
               <label key={label} className="min-w-0 space-y-1.5 text-sm font-medium">
-                <span>{label}</span>
+                <span className="flex items-center gap-1.5 flex-wrap">
+                  <span>{label}</span>
+                  {providerId ? renderProviderStatusBadge(providerId) : null}
+                </span>
                 <input
                   type={showKeys ? 'text' : 'password'}
                   value={value}
@@ -593,20 +659,36 @@ export function SettingsScreen() {
             ))}
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Kilo uses anonymous free access. Gemini, Groq, and Cloudflare inference are paused pending a verifiable no-charge account policy.
+            Saving keys validates each provider directly via its /models endpoint. Models outside verified zero-cost routes can still be enabled individually via Manual Override in Models &amp; Connectivity or the Model Switcher.
           </p>
 
-          <div className="flex items-center justify-between gap-3 pt-1">
-            <button
-              type="submit"
-              style={{
-                backgroundColor: 'var(--m3-primary)',
-                color: 'var(--m3-on-primary)',
-              }}
-              className="min-h-[44px] px-5 rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
-            >
-              Save Encrypted Keys
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="submit"
+                style={{
+                  backgroundColor: 'var(--m3-primary)',
+                  color: 'var(--m3-on-primary)',
+                }}
+                className="min-h-[44px] px-5 rounded-full text-sm font-semibold transition-opacity hover:opacity-90"
+              >
+                Save Encrypted Keys
+              </button>
+              <button
+                type="button"
+                data-testid="verify-provider-keys-btn"
+                disabled={validatingKeys}
+                onClick={() => void handleSyncLiveModels()}
+                style={{
+                  backgroundColor: 'var(--m3-surface-container-high)',
+                  borderColor: 'var(--m3-outline)',
+                }}
+                className="min-h-[44px] px-4 rounded-full border text-sm font-semibold text-slate-900 dark:text-white inline-flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${validatingKeys ? 'animate-spin' : ''}`} />
+                <span>{validatingKeys ? 'Verifying...' : 'Verify Keys'}</span>
+              </button>
+            </div>
             {keysSavedNotice && (
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-400">
                 <CheckCircle2 className="w-4 h-4" />
@@ -904,7 +986,128 @@ export function SettingsScreen() {
             </div>
           </div>
 
-          <p className="text-xs text-slate-500 dark:text-slate-400">For a local model, select Local and enter an installed model name. Connects directly to the device's OpenAI-compatible server on 127.0.0.1:11434. No key, remote fallback or MCP tools. The server must permit this app's origin.</p>
+          <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800 space-y-3">
+            {isHttpsPage && (
+              <div
+                data-testid="local-https-mixed-content-warning"
+                className="rounded-2xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3.5 py-2.5 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2"
+              >
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                <span>
+                  This app is loaded over <strong>HTTPS</strong>. Browser mixed-content policies block direct requests to plain HTTP loopback (<code className="font-mono">http://127.0.0.1:11434/v1</code>) in most browsers; open MCP Hub on <code className="font-mono">http://localhost</code> or expose Ollama behind HTTPS/Tailscale if local requests fail.
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-4 min-h-[44px]">
+              <div>
+                <div className="text-sm font-medium text-slate-900 dark:text-white">
+                  Enable MCP tools for local models
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  Off by default. Enable to forward connected MCP tool definitions to your local endpoint at 127.0.0.1:11434/v1 (write approvals remain enforced).
+                </div>
+              </div>
+              <M3Switch
+                checked={Boolean(settings.localModelToolsEnabled)}
+                ariaLabel="Enable MCP tools for local models"
+                onChange={() =>
+                  updateSettings({ localModelToolsEnabled: !settings.localModelToolsEnabled })
+                }
+              />
+            </div>
+
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              For a local model, select Local and enter an installed model name. Connects to <code className="font-mono">http://127.0.0.1:11434/v1</code> with no key or remote fallback. The local server must permit this app&apos;s origin.
+            </p>
+          </div>
+
+          {/* Model Status & Manual Overrides */}
+          {(manualOverrides.length > 0 || unavailableEntries.length > 0) && (
+            <details
+              data-testid="settings-model-catalog-status"
+              className="pt-2 border-t border-slate-200/60 dark:border-slate-800 text-xs"
+            >
+              <summary className="cursor-pointer font-semibold text-slate-800 dark:text-slate-200 py-1">
+                Model Catalog Status &amp; Manual Overrides ({manualOverrides.length} active, {unavailableEntries.length} needing attention)
+              </summary>
+              <div className="mt-2.5 space-y-2.5">
+                {manualOverrides.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+                      Manually Enabled Models
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {manualOverrides.map((overrideId) => (
+                        <button
+                          key={overrideId}
+                          type="button"
+                          onClick={() => toggleManualModelOverride(overrideId)}
+                          className="min-h-[38px] px-3 rounded-full border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-xs font-medium text-amber-900 dark:text-amber-200 inline-flex items-center gap-1.5"
+                        >
+                          <span className="font-mono">{overrideId}</span>
+                          <span className="underline">Disable</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {unavailableEntries.length > 0 && (
+                  <ul className="space-y-2 max-h-72 overflow-auto pr-1">
+                    {unavailableEntries.map((entry) => (
+                      <li
+                        key={entry.model.id}
+                        style={{
+                          backgroundColor: 'var(--m3-surface)',
+                          borderColor: 'var(--m3-outline)',
+                        }}
+                        className="rounded-2xl border p-2.5 flex items-start justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-semibold text-slate-900 dark:text-white [overflow-wrap:anywhere]">
+                              {getShortModelName(entry.model)}
+                            </span>
+                            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                              {PROVIDER_INFO[entry.model.provider].name}
+                            </span>
+                            <span
+                              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${providerBadgeClasses(entry.status)}`}
+                            >
+                              {entry.badge}
+                            </span>
+                            {isModelManuallyOverridden(entry.model.id, manualOverrides) && (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900 dark:bg-amber-950/70 dark:text-amber-200">
+                                Overridden
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-600 dark:text-slate-400 [overflow-wrap:anywhere]">
+                            {entry.detail}
+                          </p>
+                        </div>
+                        {entry.canOverride && (
+                          <button
+                            type="button"
+                            onClick={() => toggleManualModelOverride(entry.model.id)}
+                            style={{
+                              backgroundColor: 'var(--m3-primary-container)',
+                              color: 'var(--m3-on-primary-container)',
+                            }}
+                            className="min-h-[40px] px-3 rounded-xl text-xs font-semibold shrink-0"
+                          >
+                            {isModelManuallyOverridden(entry.model.id, manualOverrides) ? 'Disable' : 'Enable'}
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </details>
+          )}
+
           {/* Add Custom Model Slug */}
           <form onSubmit={handleAddCustomModel} className="pt-2 border-t border-slate-200/60 dark:border-slate-800 space-y-2">
             <div className="text-xs font-medium text-slate-600 dark:text-slate-400">

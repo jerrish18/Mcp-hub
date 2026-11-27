@@ -150,7 +150,7 @@ export function buildSanitizedMirrorState(): BridgeWorkspaceMirror {
       hapticsEnabled: s.settings.hapticsEnabled,
       biometricLockEnabled: s.settings.biometricLockEnabled,
     },
-    modelsCount: getAvailableModels(s.providerKeys, s.dynamicModels).length,
+    modelsCount: getAvailableModels(s.providerKeys, s.dynamicModels, s.settings.manualModelOverrides ?? []).length,
     updatedAt: Date.now(),
   };
 }
@@ -457,7 +457,7 @@ export async function executeStoreControlAction(
     }
 
     case 'list_models':
-      return { models: getAvailableModels(store.providerKeys, store.dynamicModels) };
+      return { models: getAvailableModels(store.providerKeys, store.dynamicModels, store.settings.manualModelOverrides ?? []) };
 
     case 'update_app_settings': {
       const patch: Record<string, unknown> = {};

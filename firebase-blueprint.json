@@ -186,7 +186,7 @@
         },
         "chatMode": {
           "type": "string",
-          "enum": ["general", "professional", "study"],
+          "enum": ["general", "professional", "study", "coding"],
           "description": "Active chat mode"
         },
         "knowledgeSource": {

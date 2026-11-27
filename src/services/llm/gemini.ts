@@ -189,23 +189,25 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     }
   }
 
-  const thinkingLevel = model.supportsThinkingLevel
-    ? mapEffortToGeminiThinkingLevel(effort, model.id)
-    : undefined;
+  const isProbe = Boolean(req.isProbe);
+  const thinkingLevel =
+    !isProbe && model.supportsThinkingLevel
+      ? mapEffortToGeminiThinkingLevel(effort, model.id)
+      : undefined;
+
+  const generationConfig: Record<string, unknown> = thinkingLevel
+    ? {
+        thinkingConfig: {
+          thinkingLevel,
+          ...(thinkingLevel !== 'MINIMAL' ? { includeThoughts: true } : {}),
+        },
+      }
+    : {};
 
   const body: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: systemPrompt }] },
     contents,
-    generationConfig: {
-      ...(thinkingLevel
-        ? {
-            thinkingConfig: {
-              thinkingLevel,
-              ...(thinkingLevel !== 'MINIMAL' ? { includeThoughts: true } : {}),
-            },
-          }
-        : {}),
-    },
+    generationConfig,
   };
 
   const geminiTools: Array<Record<string, unknown>> = [];
@@ -228,22 +230,44 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     }
   }
 
-  const endpoint = `${PROVIDER_INFO.gemini.baseUrl}/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse`;
+  let endpoint = `${PROVIDER_INFO.gemini.baseUrl}/models/${encodeURIComponent(model.id)}:streamGenerateContent?alt=sse`;
+  let usingProxy = false;
+  const isBrowser = typeof window !== 'undefined' && /^https?:$/.test(window.location?.protocol) && fetchFn === fetch;
 
   let res: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    res = await fetchFn(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
+    try {
+      res = await fetchFn(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+          ...(usingProxy ? { 'X-MCPHub-UI': '1' } : {}),
+          ...(usingProxy && req.manualOverride ? { 'X-MCPHub-Manual-Override': '1' } : {}),
+        },
+        body: JSON.stringify(
+          usingProxy ? { model: model.id, payload: body } : body
+        ),
+        signal,
+      });
+    } catch (err) {
+      if (!usingProxy && isBrowser && err instanceof TypeError && !signal?.aborted) {
+        usingProxy = true;
+        endpoint = '/api/free-ai/gemini/chat/completions';
+        continue;
+      }
+      throw err;
+    }
     if (res.status === 503 && attempt === 0) {
       await sleep(650, signal);
       continue;
+    }
+    if (res.status === 400 && attempt === 0 && 'thinkingConfig' in generationConfig) {
+      const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
+      if (errPreview.includes('thinking') || errPreview.includes('unknown')) {
+        delete generationConfig.thinkingConfig;
+        continue;
+      }
     }
     break;
   }
@@ -259,6 +283,13 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   if (res.status === 401 || res.status === 403) {
     const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`Gemini auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
+  }
+  if (res.status === 400) {
+    const errText = extractReadableApiError(await res.text());
+    if (errText.toLowerCase().includes('api key not valid') || errText.toLowerCase().includes('api_key_invalid')) {
+      throw new ProviderAuthError(`Gemini auth failed (400): ${redactSecrets(errText, [apiKey])}`, 401);
+    }
+    throw new ModelUnavailableError(`Gemini rejected request parameter (400): ${redactSecrets(errText, [apiKey])}`, 400);
   }
   if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
     const errText = extractReadableApiError(await res.text());

@@ -8,12 +8,15 @@ import {
   runAgentLoop,
 } from '../services/llm/agentLoop';
 import {
+  classifyProviderFailure,
   dispatchStreamCompletion,
   getApiKeyForProvider,
   getAvailableModels,
+  isModelManuallyOverridden,
   syncLiveProviderModels,
   preserveCatalogForSameCredentials,
   retainTransientCatalogRoutes,
+  validateAllConfiguredProviderKeys,
 } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
@@ -60,6 +63,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   ChatMode,
+  CloudProvider,
   Conversation,
   EffortLevel,
   GroundingCitation,
@@ -71,6 +75,8 @@ import type {
   ProjectProfile,
   ProviderId,
   ProviderKeys,
+  ProviderKeyStatus,
+  ProviderValidationResult,
   RunTrace,
   SavedPrompt,
   ServerSecretPayload,
@@ -361,7 +367,13 @@ export interface HubState {
   // Settings & Keys & Models
   updateSettings: (patch: Partial<AppSettings>) => void;
   setProviderKeys: (keys: ProviderKeys) => Promise<void>;
+  providerValidation: Partial<Record<CloudProvider, ProviderValidationResult>>;
+  validatingKeys: boolean;
+  modelFailures: Record<string, { status: ProviderKeyStatus; badge: string; detail: string }>;
   pendingFreeModels: string[];
+  validateProviderKeysNow: () => Promise<Partial<Record<CloudProvider, ProviderValidationResult>>>;
+  toggleManualModelOverride: (modelId: string) => void;
+  recordModelFailure: (modelId: string, err: unknown) => void;
   syncModels: () => Promise<{ count: number; providers: string[]; transient: boolean }>;
   addCustomModel: (provider: ProviderId, modelId: string, label?: string) => void;
   revokeAlwaysAllowedTool: (qualifiedKey: string) => void;
@@ -710,6 +722,9 @@ export const useHubStore = create<HubState>((set, get) => {
     agents: initialMeta.agents,
     settings: initialMeta.settings,
     providerKeys: {},
+    providerValidation: {},
+    validatingKeys: false,
+    modelFailures: {},
     pendingFreeModels: [],
     dynamicModels: initialMeta.dynamicModels,
     dismissedDefaultServerIds: initialMeta.dismissedDefaultServerIds,
@@ -822,10 +837,11 @@ export const useHubStore = create<HubState>((set, get) => {
         await historyDb.saveConversation(fresh, scope);
       }
 
+      const vaultLocked = isPassphraseVaultEnabled() && !isVaultUnlocked();
       set({
         initialized: true,
         passphraseVaultEnabled: isPassphraseVaultEnabled(),
-        vaultLocked: isPassphraseVaultEnabled() && !isVaultUnlocked(),
+        vaultLocked,
         providerKeys: keys,
         conversations: nextConvs,
         activeConversationId: activeConvId,
@@ -834,6 +850,9 @@ export const useHubStore = create<HubState>((set, get) => {
         authGuestMode: autostartSkipOnboarding ? true : state.authGuestMode,
       });
       persist();
+      if (!vaultLocked) {
+        void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+      }
 
       if (!visibilitySyncBound && typeof window !== 'undefined') {
         visibilitySyncBound = true;
@@ -916,6 +935,7 @@ export const useHubStore = create<HubState>((set, get) => {
         passphraseVaultEnabled: isPassphraseVaultEnabled(),
         providerKeys: keys,
       });
+      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
       return true;
     },
     enableVaultPassphrase: async (passphrase) => {
@@ -924,6 +944,7 @@ export const useHubStore = create<HubState>((set, get) => {
         passphraseVaultEnabled: true,
         vaultLocked: false,
       });
+      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
     },
     disableVaultPassphrase: async () => {
       await disablePassphraseVault();
@@ -931,12 +952,15 @@ export const useHubStore = create<HubState>((set, get) => {
         passphraseVaultEnabled: false,
         vaultLocked: false,
       });
+      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
     },
     lockVaultSession: () => {
       lockVault();
       set({
         vaultLocked: isPassphraseVaultEnabled() && !isVaultUnlocked(),
         providerKeys: {},
+        providerValidation: {},
+        modelFailures: {},
       });
     },
 
@@ -958,22 +982,92 @@ export const useHubStore = create<HubState>((set, get) => {
       set((state) => ({
         providerKeys: keys,
         pendingFreeModels: [],
+        modelFailures: {},
         dynamicModels: preserveCatalogForSameCredentials(state.dynamicModels, state.providerKeys, keys),
       }));
-      void get().syncModels();
+      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+    },
+
+    validateProviderKeysNow: async () => {
+      const state = get();
+      if (state.vaultLocked) return {};
+      const keys = state.providerKeys;
+      const scope = activeScope();
+      set({ validatingKeys: true });
+      try {
+        const { validation, discoveredModels } = await validateAllConfiguredProviderKeys(keys);
+        if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
+          set((s) => {
+            const existingIds = new Set(s.dynamicModels.map((m) => normalizeModelId(m.id)));
+            const freshDiscovered = discoveredModels.filter(
+              (m) => !existingIds.has(normalizeModelId(m.id))
+            );
+            return {
+              providerValidation: validation,
+              dynamicModels: freshDiscovered.length
+                ? [...s.dynamicModels, ...freshDiscovered]
+                : s.dynamicModels,
+            };
+          });
+          persist();
+        }
+        return validation;
+      } finally {
+        set({ validatingKeys: false });
+      }
+    },
+
+    toggleManualModelOverride: (modelId) => {
+      const normalized = normalizeModelId(modelId);
+      set((s) => {
+        const current = s.settings.manualModelOverrides ?? [];
+        const exists = current.some((id) => id === modelId || normalizeModelId(id) === normalized);
+        const next = exists
+          ? current.filter((id) => id !== modelId && normalizeModelId(id) !== normalized)
+          : [...current, normalized];
+        const nextFailures = { ...s.modelFailures };
+        delete nextFailures[modelId];
+        delete nextFailures[normalized];
+        return {
+          settings: { ...s.settings, manualModelOverrides: next },
+          modelFailures: nextFailures,
+        };
+      });
+      persist();
+    },
+
+    recordModelFailure: (modelId, err) => {
+      const classified = classifyProviderFailure(err);
+      const normalized = normalizeModelId(modelId);
+      set((s) => ({
+        modelFailures: {
+          ...s.modelFailures,
+          [normalized]: {
+            status: classified.status,
+            badge: classified.badge,
+            detail: classified.detail,
+          },
+        },
+      }));
     },
 
     syncModels: () => {
-      const { providerKeys: keys } = get();
+      const { providerKeys: keys, vaultLocked } = get();
+      if (vaultLocked) {
+        return Promise.resolve({ count: 0, providers: [], transient: false });
+      }
       const scope = activeScope();
       if (catalogRefresh && catalogRefresh.keys === keys && catalogRefresh.scope === scope) return catalogRefresh.promise;
       const promise = syncLiveProviderModels(keys).then(({ models, pending, syncedProviders, transientProviders }) => {
         if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
           const previous = get().dynamicModels;
           const verified = retainTransientCatalogRoutes(models, previous, transientProviders, keys);
-          const custom = previous.filter((model) => model.description === 'Custom user model'
-            && !verified.some((fresh) => fresh.id === model.id));
-          set({ dynamicModels: [...verified, ...custom], pendingFreeModels: pending });
+          const preservedUnrouted = previous.filter(
+            (model) =>
+              (model.description === 'Custom user model' || !model.routes?.length) &&
+              !verified.some((fresh) => fresh.id === model.id)
+          );
+          set({ dynamicModels: [...verified, ...preservedUnrouted], pendingFreeModels: pending });
           persist();
         }
         return { count: models.length, providers: syncedProviders, transient: transientProviders.length > 0 };
@@ -1289,7 +1383,11 @@ export const useHubStore = create<HubState>((set, get) => {
       const hasAnyRealKey = Boolean(
         state.providerKeys.gemini || state.providerKeys.groq || state.providerKeys.openrouter
       );
-      const available = getAvailableModels(state.providerKeys, state.dynamicModels);
+      const available = getAvailableModels(
+        state.providerKeys,
+        state.dynamicModels,
+        state.settings.manualModelOverrides ?? []
+      );
       const preferred = available.find((model) => model.id === normalizeModelId(agent.defaultModelId));
       const chosenModel = modelId ?? (agent.defaultChatMode === 'coding' ? 'cloud-auto'
         : preferred?.id ?? (hasAnyRealKey || available.some((model) => model.routes?.length) ? 'cloud-auto' : 'demo-sandbox'));
@@ -1747,7 +1845,11 @@ export const useHubStore = create<HubState>((set, get) => {
       }
 
       const answerModel = getModelById(targetMsg.modelId || conv.modelId, state.dynamicModels);
-      const available = getAvailableModels(state.providerKeys, state.dynamicModels).filter(model => answerModel.provider === 'local' ? model.provider === 'local' : model.provider !== 'local');
+      const available = getAvailableModels(
+        state.providerKeys,
+        state.dynamicModels,
+        state.settings.manualModelOverrides ?? []
+      ).filter(model => answerModel.provider === 'local' ? model.provider === 'local' : model.provider !== 'local');
       const chosenModel =
         (verifierModelId && available.find((m) => m.id === verifierModelId)) ||
         available.find((m) => m.id !== targetMsg.modelId && m.provider !== 'demo') ||
@@ -1761,6 +1863,8 @@ export const useHubStore = create<HubState>((set, get) => {
           model: chosenModel,
           apiKey,
           credentials: state.providerKeys,
+          manualOverride: isModelManuallyOverridden(chosenModel.id, state.settings.manualModelOverrides ?? []),
+          allowLocalTools: Boolean(state.settings.localModelToolsEnabled),
           systemPrompt:
             'You are an independent technical reviewer verifying another assistant response. Respond ONLY with:\nLine 1: one word VERIFIED, CAUTION, or ISSUES\nLines 2-4: concise bullet points checking factual accuracy, code/tool safety, and completeness (<= 90 words total).',
           effort: 'low',
@@ -1964,6 +2068,8 @@ export const useHubStore = create<HubState>((set, get) => {
                 project: activeProject,
                 keys: state.providerKeys,
                 dynamicModels: state.dynamicModels,
+                manualModelOverrides: state.settings.manualModelOverrides ?? [],
+                allowLocalTools: Boolean(state.settings.localModelToolsEnabled),
                 servers: state.servers,
                 history,
                 maxSteps: state.settings.maxAgentSteps,
@@ -2257,6 +2363,8 @@ export const useHubStore = create<HubState>((set, get) => {
           project: activeProject,
           keys: get().providerKeys,
           dynamicModels: get().dynamicModels,
+          manualModelOverrides: get().settings.manualModelOverrides ?? [],
+          allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
           servers: get().servers,
           history: llmHistory,
           maxSteps: get().settings.maxAgentSteps,
@@ -2387,6 +2495,7 @@ export const useHubStore = create<HubState>((set, get) => {
         }
       } catch (err) {
         flushPendingDeltas();
+        get().recordModelFailure(conv.modelId, err);
         const keys = get().providerKeys;
         const msg = safeErrorMessage(err, Object.values(keys).filter((key): key is string => Boolean(key)));
         const finalConv = patchConv((c) => ({

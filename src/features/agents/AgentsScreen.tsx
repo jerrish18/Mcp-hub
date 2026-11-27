@@ -65,7 +65,7 @@ export function AgentsScreen({ onOpenChat }: AgentsScreenProps) {
   } = useHubStore();
 
   const providerKeys = useHubStore((state) => state.providerKeys);
-  const allModels = getAvailableModels(providerKeys, dynamicModels);
+  const allModels = getAvailableModels(providerKeys, dynamicModels, settings.manualModelOverrides ?? []);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [modeFilter, setModeFilter] = useState<'all' | ChatMode>('all');

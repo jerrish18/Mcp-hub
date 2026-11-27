@@ -478,6 +478,27 @@ export interface PendingApproval {
 
 export type PixelAccentTheme = 'pixel_blue' | 'sage' | 'clay' | 'lavender' | 'monochrome';
 
+export type ProviderKeyStatus =
+  | 'unconfigured'
+  | 'valid'
+  | 'invalid_key'
+  | 'unsupported_param'
+  | 'rate_limited'
+  | 'cors_blocked'
+  | 'paid_route'
+  | 'network_error';
+
+export interface ProviderValidationResult {
+  provider: CloudProvider;
+  status: ProviderKeyStatus;
+  httpStatus?: number;
+  badge: string;
+  detail: string;
+  checkedAt: number;
+  modelsFound: number;
+  viaProxy?: boolean;
+}
+
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   accentTheme: PixelAccentTheme;
@@ -494,4 +515,6 @@ export interface AppSettings {
   biometricLockEnabled: boolean;
   hapticsEnabled: boolean;
   onboardingCompleted: boolean;
+  localModelToolsEnabled?: boolean;
+  manualModelOverrides?: string[];
 }

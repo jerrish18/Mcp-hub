@@ -10,8 +10,10 @@ import {
   View,
 } from 'react-native';
 import { fetch as expoFetch } from 'expo/fetch';
-import { syncLiveProviderModels } from '@core/services/llm/provider';
+import { PROVIDER_INFO } from '@core/config/models';
+import { syncLiveProviderModels, validateAllConfiguredProviderKeys } from '@core/services/llm/provider';
 import { loadProviderKeys, saveProviderKeys } from '@core/services/storage/secureStorage';
+import type { CloudProvider, ProviderKeys, ProviderValidationResult } from '@core/types';
 import { loadMobilePrefs, saveMobilePrefs } from '../../services/storage/mobilePrefs';
 
 export default function MobileSettingsScreen() {
@@ -26,6 +28,8 @@ export default function MobileSettingsScreen() {
   const [oledBlack, setOledBlack] = useState(false);
   const [biometricLockEnabled, setBiometricLockEnabled] = useState(false);
   const [confirmBeforeWrite, setConfirmBeforeWrite] = useState(true);
+  const [localModelToolsEnabled, setLocalModelToolsEnabled] = useState(false);
+  const [providerValidation, setProviderValidation] = useState<Partial<Record<CloudProvider, ProviderValidationResult>>>({});
   const [saved, setSaved] = useState(false);
   const [syncNotice, setSyncNotice] = useState('');
 
@@ -39,49 +43,71 @@ export default function MobileSettingsScreen() {
       setAmd(keys.amd ?? '');
       setCloudflare(keys.cloudflare ?? '');
       setCloudflareAccountId(keys.cloudflareAccountId ?? '');
+      void validateAllConfiguredProviderKeys(keys, expoFetch as unknown as typeof fetch)
+        .then(({ validation }) => setProviderValidation(validation))
+        .catch(() => {});
     });
     void loadMobilePrefs().then((prefs) => {
       setOledBlack(Boolean(prefs.settings.oledDark));
       setBiometricLockEnabled(Boolean(prefs.settings.biometricLockEnabled));
       setConfirmBeforeWrite(Boolean(prefs.settings.confirmBeforeWrite));
+      setLocalModelToolsEnabled(Boolean(prefs.settings.localModelToolsEnabled));
     });
   }, []);
 
   const theme = useWorkspaceTheme(oledBlack);
   const isDark = theme.dark;
 
+  const currentKeysFromInputs = (): ProviderKeys => ({
+    gemini: gemini.trim() || undefined,
+    groq: groq.trim() || undefined,
+    openrouter: openrouter.trim() || undefined,
+    nvidia: nvidia.trim() || undefined,
+    modelscope: modelscope.trim() || undefined,
+    amd: amd.trim() || undefined,
+    cloudflare: cloudflare.trim() || undefined,
+    cloudflareAccountId: cloudflareAccountId.trim() || undefined,
+  });
+
   const handleSave = async () => {
-    await saveProviderKeys({
-      gemini: gemini.trim() || undefined,
-      groq: groq.trim() || undefined,
-      openrouter: openrouter.trim() || undefined,
-      nvidia: nvidia.trim() || undefined,
-      modelscope: modelscope.trim() || undefined,
-      amd: amd.trim() || undefined,
-      cloudflare: cloudflare.trim() || undefined,
-      cloudflareAccountId: cloudflareAccountId.trim() || undefined,
-    });
+    const nextKeys = currentKeysFromInputs();
+    await saveProviderKeys(nextKeys);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+    const { validation } = await validateAllConfiguredProviderKeys(
+      nextKeys,
+      expoFetch as unknown as typeof fetch
+    );
+    setProviderValidation(validation);
   };
 
   const handleSync = async () => {
-    const res = await syncLiveProviderModels(await loadProviderKeys(), expoFetch as unknown as typeof fetch);
+    const keys = await loadProviderKeys();
+    const [res, keyRes] = await Promise.all([
+      syncLiveProviderModels(keys, expoFetch as unknown as typeof fetch),
+      validateAllConfiguredProviderKeys(keys, expoFetch as unknown as typeof fetch),
+    ]);
+    setProviderValidation(keyRes.validation);
     setSyncNotice(`${res.models.length} verified models available. ${res.pending.length} free routes awaiting live verification.`);
   };
 
   const toggleSetting = async (
-    key: 'oledDark' | 'biometricLockEnabled' | 'confirmBeforeWrite',
+    key: 'oledDark' | 'biometricLockEnabled' | 'confirmBeforeWrite' | 'localModelToolsEnabled',
     next: boolean
   ) => {
     if (key === 'oledDark') setOledBlack(next);
     if (key === 'biometricLockEnabled') setBiometricLockEnabled(next);
     if (key === 'confirmBeforeWrite') setConfirmBeforeWrite(next);
+    if (key === 'localModelToolsEnabled') setLocalModelToolsEnabled(next);
     const current = await loadMobilePrefs();
     await saveMobilePrefs({
       settings: { ...current.settings, [key]: next },
     });
   };
+
+  const configuredStatuses = (['gemini', 'groq', 'openrouter', 'nvidia', 'modelscope', 'amd', 'cloudflare'] as CloudProvider[])
+    .map((p) => providerValidation[p])
+    .filter((v): v is ProviderValidationResult => Boolean(v && v.status !== 'unconfigured'));
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={{ flex: 1, backgroundColor: theme.background }}>
@@ -129,6 +155,20 @@ export default function MobileSettingsScreen() {
             <Switch
               value={confirmBeforeWrite}
               onValueChange={(v) => void toggleSetting('confirmBeforeWrite', v)}
+            />
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 14, fontWeight: '500', color: theme.text }}>
+                Enable MCP tools for local models
+              </Text>
+              <Text style={{ fontSize: 12, color: theme.muted }}>
+                Allow local models on 127.0.0.1:11434 to invoke enabled MCP tools
+              </Text>
+            </View>
+            <Switch
+              value={localModelToolsEnabled}
+              onValueChange={(v) => void toggleSetting('localModelToolsEnabled', v)}
             />
           </View>
         </WorkspaceCard>
@@ -201,15 +241,30 @@ export default function MobileSettingsScreen() {
               style={{ minHeight: 44, paddingHorizontal: 12, borderRadius: 12, backgroundColor: theme.panel,
                 color: theme.text, borderWidth: 1, borderColor: theme.border }} />
           ))}
+          {configuredStatuses.length > 0 && (
+            <View style={{ gap: 4 }}>
+              {configuredStatuses.map((status) => (
+                <Text
+                  key={status.provider}
+                  style={{
+                    fontSize: 12,
+                    color: status.status === 'valid' ? '#10B981' : status.status === 'invalid_key' ? '#EF4444' : '#F59E0B',
+                  }}
+                >
+                  {PROVIDER_INFO[status.provider].name}: {status.badge}
+                </Text>
+              ))}
+            </View>
+          )}
           <Text style={{ fontSize: 12, color: theme.muted }}>
-            Kilo uses anonymous free access. Gemini, Groq, and Cloudflare need a verifiable no-charge account policy.
+            Saving keys checks each provider directly via /models. Non-free or blocked routes can still be enabled individually in the chat Model Picker.
           </Text>
           <Pressable
             onPress={() => void handleSave()}
             style={{ minHeight: 46, justifyContent: 'center', backgroundColor: workspaceBlue, borderRadius: 12, alignItems: 'center' }}
           >
             <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>
-              {saved ? 'Saved to Keychain / Keystore' : 'Save Encrypted Keys'}
+              {saved ? 'Saved to Keychain / Keystore' : 'Save & Verify Encrypted Keys'}
             </Text>
           </Pressable>
           <Pressable
@@ -225,7 +280,7 @@ export default function MobileSettingsScreen() {
             }}
           >
             <Text style={{ color: isDark ? '#E2E8F0' : '#0F172A', fontWeight: '600' }}>
-              Sync Live Free Models
+              Sync &amp; Verify Models
             </Text>
           </Pressable>
           {syncNotice ? (
@@ -236,3 +291,4 @@ export default function MobileSettingsScreen() {
     </SafeAreaView>
   );
 }
+

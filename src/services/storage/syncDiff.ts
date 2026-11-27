@@ -70,6 +70,16 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
 
   const resolvedA2uiMode = resolveA2uiMode(settings);
 
+  const manualModelOverrides = Array.isArray(settings.manualModelOverrides)
+    ? Array.from(
+        new Set(
+          settings.manualModelOverrides
+            .filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
+            .map((id) => id.trim().slice(0, 160))
+        )
+      ).slice(0, 100)
+    : [];
+
   return {
     theme: settings.theme,
     accentTheme: settings.accentTheme,
@@ -88,6 +98,8 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
     biometricLockEnabled: Boolean(settings.biometricLockEnabled),
     hapticsEnabled: Boolean(settings.hapticsEnabled),
     onboardingCompleted: Boolean(settings.onboardingCompleted),
+    localModelToolsEnabled: Boolean(settings.localModelToolsEnabled),
+    manualModelOverrides,
   };
 }
 

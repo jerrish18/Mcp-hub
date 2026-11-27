@@ -27,7 +27,7 @@ import type {
 import { shouldOfferA2ui } from '../../utils/a2ui';
 import { applyLocalRagToMessages } from '../../utils/localRag';
 import { safeErrorMessage } from '../../utils/redact';
-import { redactAndPreview } from '../../utils/runTrace';
+import { redactAndPreview, redactRunTrace } from '../../utils/runTrace';
 import {
   detectStudyVisualQuery,
   fetchStudyWebImages,
@@ -490,6 +490,8 @@ export interface RunAgentLoopParams {
   project?: ProjectProfile | null;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
+  manualModelOverrides?: string[];
+  allowLocalTools?: boolean;
   servers: McpServerConfig[];
   history: LlmConversationItem[];
   maxSteps: number;
@@ -528,6 +530,8 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     project = null,
     keys,
     dynamicModels,
+    manualModelOverrides = [],
+    allowLocalTools = false,
     servers,
     maxSteps,
     confirmBeforeWrite,
@@ -561,7 +565,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   const localModel = getModelById(modelId, dynamicModels).provider === 'local';
   const buildingWebsite = /\b(?:build|create|generate|implement|design|rebuild|make)\b[\s\S]{0,120}\b(?:website|web app|html|dashboard|landing page)\b/i.test(lastUserText);
   const explicitlySavingNote = /\b(?:save|create|store)\b[\s\S]{0,40}\bnotes?\b/i.test(lastUserText);
-  const tools = !localModel && (chatMode === 'professional' || chatMode === 'coding')
+  const tools = (!localModel || allowLocalTools) && (chatMode === 'professional' || chatMode === 'coding')
     ? built.tools.filter((tool) => !buildingWebsite || explicitlySavingNote || tool.originalName !== 'workspace_create_note')
     : [];
   const exposedTools = new Set(tools.map((tool) => tool.qualifiedName));
@@ -685,29 +689,32 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
 
   const buildTrace = (stoppedByUser: boolean, isLive = false): RunTrace => {
     const finishedAt = Date.now();
-    return {
-      startedAt: runStartedAt,
-      finishedAt,
-      durationMs: Math.max(0, finishedAt - runStartedAt),
-      primaryModelId: modelId,
-      usedModelId: activeModelId,
-      fallbacks: [...fallbacks],
-      toolCalls: allToolRecords.map((tc) => ({
-        id: tc.id,
-        toolName: tc.toolName,
-        serverName: tc.serverName,
-        status: tc.status,
-        durationMs: tc.durationMs ?? 0,
-        ...(tc.truncated ? { truncated: true } : {}),
-      })),
-      steps: traceSteps.map((s) => ({ ...s })),
-      ...(isLive ? { isLive: true } : {}),
-      estimatedPromptTokens: initialPromptTokens,
-      stepsExecuted,
-      ragUsed: ragProcessed.usedRag || undefined,
-      ragChunksCount: ragProcessed.usedRag ? ragProcessed.retrievedCount : undefined,
-      stoppedByUser,
-    };
+    return redactRunTrace(
+      {
+        startedAt: runStartedAt,
+        finishedAt,
+        durationMs: Math.max(0, finishedAt - runStartedAt),
+        primaryModelId: modelId,
+        usedModelId: activeModelId,
+        fallbacks: [...fallbacks],
+        toolCalls: allToolRecords.map((tc) => ({
+          id: tc.id,
+          toolName: tc.toolName,
+          serverName: tc.serverName,
+          status: tc.status,
+          durationMs: tc.durationMs ?? 0,
+          ...(tc.truncated ? { truncated: true } : {}),
+        })),
+        steps: traceSteps.map((s) => ({ ...s })),
+        ...(isLive ? { isLive: true } : {}),
+        estimatedPromptTokens: initialPromptTokens,
+        stepsExecuted,
+        ragUsed: ragProcessed.usedRag || undefined,
+        ragChunksCount: ragProcessed.usedRag ? ragProcessed.retrievedCount : undefined,
+        stoppedByUser,
+      },
+      knownSecrets
+    );
   };
 
   const emitLiveTrace = () => {
@@ -758,6 +765,8 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         primaryModelId: activeModelId,
         keys,
         dynamicModels,
+        manualModelOverrides,
+        allowLocalTools,
         systemPrompt: effectiveSystemPrompt,
         effort,
         chatMode,

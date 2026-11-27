@@ -8,6 +8,8 @@ import {
   computeDirtySyncPlan,
   computeStateSignature,
   computeStudyNoteSignature,
+  sanitizeConversationForSync,
+  sanitizeSettingsForSync,
   type RemoteSyncBaseline,
 } from './syncDiff';
 
@@ -83,4 +85,20 @@ test('chunkArray respects Firestore <= 500 writeBatch limit', () => {
   assert.equal(chunks[0].length, 450);
   assert.equal(chunks[1].length, 450);
   assert.equal(chunks[2].length, 50);
+});
+
+test('sanitizeSettingsForSync and sanitizeConversationForSync preserve coding mode and override flags', () => {
+  const settings = sanitizeSettingsForSync({
+    ...DEFAULT_SETTINGS,
+    localModelToolsEnabled: true,
+    manualModelOverrides: ['gemini-4-hydrogen', 'gemini-4-hydrogen', '  '],
+  });
+  assert.equal(settings.localModelToolsEnabled, true);
+  assert.deepEqual(settings.manualModelOverrides, ['gemini-4-hydrogen']);
+
+  const codingConv = sanitizeConversationForSync({
+    ...makeConv('c_code', 4000, 1),
+    chatMode: 'coding',
+  });
+  assert.equal(codingConv.chatMode, 'coding');
 });

@@ -82,8 +82,12 @@ service cloud.firestore {
           'toolPolicies',
           'biometricLockEnabled',
           'hapticsEnabled',
-          'onboardingCompleted'
-        ]);
+          'onboardingCompleted',
+          'localModelToolsEnabled',
+          'manualModelOverrides'
+        ])
+        && (!('localModelToolsEnabled' in settings) || settings.localModelToolsEnabled is bool)
+        && (!('manualModelOverrides' in settings) || (settings.manualModelOverrides is list && settings.manualModelOverrides.size() <= 100));
     }
 
     function isValidWorkspaceState(data, userId) {
@@ -184,7 +188,7 @@ service cloud.firestore {
         && data.effort in ['low', 'medium', 'high']
         && data.chatMode is string
         && data.chatMode.size() <= 32
-        && data.chatMode in ['general', 'professional', 'study']
+        && data.chatMode in ['general', 'professional', 'study', 'coding']
         && data.knowledgeSource is string
         && data.knowledgeSource.size() <= 32
         && data.knowledgeSource in ['auto', 'uploaded', 'web', 'general']

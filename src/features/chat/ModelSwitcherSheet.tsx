@@ -1,8 +1,20 @@
 import { useState } from 'react';
-import { Check, Cpu, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { Check, Cpu, RefreshCw, Search, ShieldAlert, Sparkles } from 'lucide-react';
 import { getShortModelName, normalizeModelId, PROVIDER_INFO } from '../../config/models';
-import { getAvailableModels, getUnavailableCatalogModels } from '../../services/llm/provider';
-import type { ModelConfig, ProviderId, ProviderKeys } from '../../types';
+import {
+  getAvailableModels,
+  getUnavailableCatalogModelsWithDetails,
+  isModelManuallyOverridden,
+  type UnavailableCatalogEntry,
+} from '../../services/llm/provider';
+import type {
+  CloudProvider,
+  ModelConfig,
+  ProviderId,
+  ProviderKeys,
+  ProviderKeyStatus,
+  ProviderValidationResult,
+} from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { getProviderQuotaStatus } from '../../utils/quotaTracker';
 
@@ -12,6 +24,10 @@ interface ModelSwitcherSheetProps {
   dynamicModels: ModelConfig[];
   activeModelId: string;
   providerKeys: ProviderKeys;
+  manualModelOverrides?: string[];
+  providerValidation?: Partial<Record<CloudProvider, ProviderValidationResult>>;
+  modelFailures?: Record<string, { status: ProviderKeyStatus; badge: string; detail: string }>;
+  onToggleManualOverride?: (modelId: string) => void;
   onSelectModel: (modelId: string) => void;
   onRefresh: () => Promise<{ transient: boolean }>;
   onOpenSettings?: () => void;
@@ -25,14 +41,41 @@ function formatContextWindow(tokens: number): string {
   return `${tokens} ctx`;
 }
 
+function statusBadgeTone(status: ProviderKeyStatus | 'unverified_route'): string {
+  if (status === 'invalid_key' || status === 'rate_limited') {
+    return 'bg-rose-100 text-rose-800 dark:bg-rose-950/70 dark:text-rose-200 border-rose-300 dark:border-rose-800';
+  }
+  if (status === 'unsupported_param' || status === 'cors_blocked' || status === 'paid_route' || status === 'network_error') {
+    return 'bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-200 border-amber-300 dark:border-amber-800';
+  }
+  return 'bg-slate-200/80 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700';
+}
+
 export function ModelSwitcherSheet({
-  open, onClose, dynamicModels, activeModelId, providerKeys, onSelectModel, onRefresh, onOpenSettings,
+  open,
+  onClose,
+  dynamicModels,
+  activeModelId,
+  providerKeys,
+  manualModelOverrides = [],
+  providerValidation = {},
+  modelFailures = {},
+  onToggleManualOverride,
+  onSelectModel,
+  onRefresh,
+  onOpenSettings,
 }: ModelSwitcherSheetProps) {
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [refreshStatus, setRefreshStatus] = useState('');
-  const models = getAvailableModels(providerKeys, dynamicModels);
-  const unavailable = getUnavailableCatalogModels(models, dynamicModels);
+  const models = getAvailableModels(providerKeys, dynamicModels, manualModelOverrides);
+  const unavailable = getUnavailableCatalogModelsWithDetails(
+    models,
+    providerKeys,
+    dynamicModels,
+    providerValidation,
+    modelFailures
+  );
   const selectedId = normalizeModelId(activeModelId);
   const search = query.trim().toLowerCase();
   const matching = (model: ModelConfig) => [
@@ -40,7 +83,7 @@ export function ModelSwitcherSheet({
     ...(model.routes ?? []).map((route) => PROVIDER_INFO[route.provider].name),
   ].some((value) => value.toLowerCase().includes(search));
   const visibleModels = models.filter(matching);
-  const visibleUnavailable = unavailable.filter(matching);
+  const visibleUnavailable = unavailable.filter((entry) => matching(entry.model));
   const hasCloudModels = models.some((model) => model.routes?.length);
 
   const select = (modelId: string) => {
@@ -52,7 +95,7 @@ export function ModelSwitcherSheet({
     setRefreshStatus('');
     try {
       const result = await onRefresh();
-      setRefreshStatus(result.transient ? 'Some catalogs are temporarily unavailable. Try again shortly.' : 'Model list refreshed.');
+      setRefreshStatus(result.transient ? 'Some catalogs are temporarily unavailable. Try again shortly.' : 'Model list refreshed and keys verified.');
     } catch {
       setRefreshStatus('Could not refresh the model list. Try again shortly.');
     } finally {
@@ -98,7 +141,7 @@ export function ModelSwitcherSheet({
         )}
         {!hasCloudModels && !search && (
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            No verified cloud models are currently available.
+            No verified free models are currently enabled. Add an API key or enable a model below via manual override.
             {onOpenSettings && (
               <> <button type="button" className="font-semibold underline" onClick={() => { onClose(); onOpenSettings(); }}>Open provider settings</button></>
             )}
@@ -111,11 +154,23 @@ export function ModelSwitcherSheet({
           const group = visibleModels.filter((model) => model.provider === provider);
           if (!group.length) return null;
           const quota = getProviderQuotaStatus(provider);
+          const pValidation = provider !== 'local' && provider !== 'demo' ? providerValidation[provider] : undefined;
           return (
             <section key={provider} aria-label={PROVIDER_INFO[provider].name} className="space-y-2">
-              <h3 className="break-words px-1 text-xs font-semibold text-slate-500 dark:text-slate-400">
-                {PROVIDER_INFO[provider].name}
-              </h3>
+              <div className="flex items-center justify-between gap-2 px-1">
+                <h3 className="break-words text-xs font-semibold text-slate-500 dark:text-slate-400">
+                  {PROVIDER_INFO[provider].name}
+                </h3>
+                {pValidation && pValidation.status !== 'unconfigured' && (
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                    pValidation.status === 'valid'
+                      ? 'border-emerald-300 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-200'
+                      : statusBadgeTone(pValidation.status)
+                  }`}>
+                    {pValidation.badge}
+                  </span>
+                )}
+              </div>
               {quota?.warningText && (
                 <p className="break-words rounded-xl border border-amber-200 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-900 dark:text-amber-300">
                   {quota.warningText}
@@ -123,56 +178,79 @@ export function ModelSwitcherSheet({
               )}
               {group.map((model) => {
                 const selected = model.id === selectedId;
+                const overridden = isModelManuallyOverridden(model.id, manualModelOverrides);
                 const otherProviders = [...new Set((model.routes ?? [])
                   .filter((route) => route.provider !== provider).map((route) => PROVIDER_INFO[route.provider].name))];
                 return (
-                  <button
-                    key={model.id}
-                    type="button"
-                    data-testid={`select-model-${model.id}`}
-                    aria-pressed={selected}
-                    onClick={() => select(model.id)}
-                    style={{
-                      backgroundColor: selected ? 'var(--m3-primary-container)' : 'var(--m3-surface-container)',
-                      borderColor: selected ? 'var(--m3-primary)' : 'var(--m3-outline)',
-                    }}
-                    className="flex min-h-[58px] w-full min-w-0 items-start gap-3 rounded-2xl border p-3 text-left transition-colors"
-                  >
-                    <span aria-hidden="true"
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-200/70 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  <div key={model.id} className="flex items-stretch gap-2">
+                    <button
+                      type="button"
+                      data-testid={`select-model-${model.id}`}
+                      aria-pressed={selected}
+                      onClick={() => select(model.id)}
+                      style={{
+                        backgroundColor: selected ? 'var(--m3-primary-container)' : 'var(--m3-surface-container)',
+                        borderColor: selected ? 'var(--m3-primary)' : 'var(--m3-outline)',
+                      }}
+                      className="flex min-h-[58px] flex-1 min-w-0 items-start gap-3 rounded-2xl border p-3 text-left transition-colors"
                     >
-                      {provider === 'gemini' ? <Sparkles className="h-4 w-4" /> : <Cpu className="h-4 w-4" />}
-                    </span>
-                    <span className="min-w-0 flex-1 space-y-1 [overflow-wrap:anywhere]">
-                      <span className="block text-sm font-semibold text-slate-900 dark:text-white">{getShortModelName(model)}</span>
-                      <span className="block text-xs tabular-nums text-slate-500 dark:text-slate-400">
-                        {formatContextWindow(model.contextWindow)}
-                        {model.routes?.some((route) => route.reasoning) && ' · Reasoning'}
+                      <span aria-hidden="true"
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-200/70 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                      >
+                        {provider === 'gemini' ? <Sparkles className="h-4 w-4" /> : <Cpu className="h-4 w-4" />}
                       </span>
-                      {!!otherProviders.length && (
-                        <span className="block text-xs text-slate-500 dark:text-slate-400">
-                          Also via {otherProviders.join(', ')}
+                      <span className="min-w-0 flex-1 space-y-1 [overflow-wrap:anywhere]">
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-sm font-semibold text-slate-900 dark:text-white">{getShortModelName(model)}</span>
+                          {overridden && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900 dark:bg-amber-950/70 dark:text-amber-200">
+                              Manual Override
+                            </span>
+                          )}
                         </span>
-                      )}
-                      {model.routes?.some((route) => route.dataTerms) && (
-                        <span className="block text-xs leading-relaxed text-amber-800 dark:text-amber-300">
-                          A free route may retain prompts for training.
+                        <span className="block text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                          {formatContextWindow(model.contextWindow)}
+                          {model.routes?.some((route) => route.reasoning) && ' · Reasoning'}
                         </span>
-                      )}
-                    </span>
-                    {selected && <Check aria-hidden="true" style={{ color: 'var(--m3-primary)' }} className="mt-0.5 h-5 w-5 shrink-0" />}
-                  </button>
+                        {!!otherProviders.length && (
+                          <span className="block text-xs text-slate-500 dark:text-slate-400">
+                            Also via {otherProviders.join(', ')}
+                          </span>
+                        )}
+                        {model.routes?.some((route) => route.dataTerms) && (
+                          <span className="block text-xs leading-relaxed text-amber-800 dark:text-amber-300">
+                            A free route may retain prompts for training.
+                          </span>
+                        )}
+                      </span>
+                      {selected && <Check aria-hidden="true" style={{ color: 'var(--m3-primary)' }} className="mt-0.5 h-5 w-5 shrink-0" />}
+                    </button>
+                    {overridden && onToggleManualOverride && (
+                      <button
+                        type="button"
+                        aria-label={`Disable manual override for ${getShortModelName(model)}`}
+                        onClick={() => onToggleManualOverride(model.id)}
+                        className="min-h-[44px] px-3 rounded-2xl border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                      >
+                        Disable
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </section>
           );
         })}
         {!!visibleUnavailable.length && (search ? (
-          <section aria-label="Unavailable models"><UnavailableModels models={visibleUnavailable} /></section>
+          <section aria-label="Models needing attention or override">
+            <UnavailableModels entries={visibleUnavailable} onToggleOverride={onToggleManualOverride} />
+          </section>
         ) : (
           <details className="rounded-2xl border px-3.5 py-2.5" style={{ borderColor: 'var(--m3-outline)' }}>
-            <summary className="cursor-pointer text-sm font-semibold">Unavailable models ({visibleUnavailable.length})</summary>
-            <UnavailableModels models={visibleUnavailable} />
+            <summary className="cursor-pointer text-sm font-semibold">
+              Unavailable / Unverified Models ({visibleUnavailable.length})
+            </summary>
+            <UnavailableModels entries={visibleUnavailable} onToggleOverride={onToggleManualOverride} />
           </details>
         ))}
       </div>
@@ -180,18 +258,64 @@ export function ModelSwitcherSheet({
   );
 }
 
-function UnavailableModels({ models }: { models: ModelConfig[] }) {
+function UnavailableModels({
+  entries,
+  onToggleOverride,
+}: {
+  entries: UnavailableCatalogEntry[];
+  onToggleOverride?: (modelId: string) => void;
+}) {
   return (
-    <div className="space-y-2 pt-2 text-xs text-slate-500 dark:text-slate-400">
-      <p>These models have no verified free route available with your current settings.</p>
+    <div className="space-y-2.5 pt-2.5 text-xs text-slate-500 dark:text-slate-400">
+      <p className="flex items-start gap-1.5">
+        <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+        <span>
+          Specific status for each excluded model. When a provider key is configured, you can enable a model directly with manual override.
+        </span>
+      </p>
       <ul className="space-y-2">
-        {models.map((model) => (
-          <li key={model.id} className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-            <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{getShortModelName(model)}</span>
-            <span>{PROVIDER_INFO[model.provider].name}</span>
+        {entries.map((entry) => (
+          <li
+            key={entry.model.id}
+            style={{ backgroundColor: 'var(--m3-surface)', borderColor: 'var(--m3-outline)' }}
+            className="rounded-2xl border p-2.5 space-y-1.5"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-semibold text-slate-800 dark:text-slate-100 [overflow-wrap:anywhere]">
+                    {getShortModelName(entry.model)}
+                  </span>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {PROVIDER_INFO[entry.model.provider].name}
+                  </span>
+                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusBadgeTone(entry.status)}`}>
+                    {entry.badge}
+                  </span>
+                </div>
+                <p className="text-[11px] leading-snug text-slate-600 dark:text-slate-400 [overflow-wrap:anywhere]">
+                  {entry.detail}
+                </p>
+              </div>
+              {entry.canOverride && onToggleOverride && (
+                <button
+                  type="button"
+                  data-testid={`override-model-${entry.model.id}`}
+                  onClick={() => onToggleOverride(entry.model.id)}
+                  style={{
+                    backgroundColor: 'var(--m3-primary-container)',
+                    color: 'var(--m3-on-primary-container)',
+                  }}
+                  className="min-h-[44px] px-3 rounded-xl text-xs font-semibold shrink-0 hover:opacity-90"
+                >
+                  Enable
+                </button>
+              )}
+            </div>
           </li>
         ))}
       </ul>
     </div>
   );
 }
+

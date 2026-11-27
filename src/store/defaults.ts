@@ -227,6 +227,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   biometricLockEnabled: false,
   hapticsEnabled: true,
   onboardingCompleted: false,
+  localModelToolsEnabled: false,
+  manualModelOverrides: [],
 };
 
 export const DEFAULT_SAVED_PROMPTS = [

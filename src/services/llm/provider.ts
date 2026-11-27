@@ -1,6 +1,14 @@
 import { FREE_ROUTE_EVIDENCE } from '../../config/freeRouteEvidence';
 import { formatReadableModelSlug, FREE_MODELS, getModelById, PROVIDER_INFO, normalizeModelId } from '../../config/models';
-import type { CloudProvider, EffortLevel, ModelConfig, ProviderId, ProviderKeys } from '../../types';
+import type {
+  CloudProvider,
+  EffortLevel,
+  ModelConfig,
+  ProviderId,
+  ProviderKeys,
+  ProviderKeyStatus,
+  ProviderValidationResult,
+} from '../../types';
 import { streamDemoCompletion } from './demoProvider';
 import { streamGeminiCompletion } from './gemini';
 import { streamOpenAiCompatibleCompletion } from './openaiCompatible';
@@ -11,7 +19,19 @@ import {
   RateLimitError,
   type StreamCompletionRequest,
 } from './types';
-import { canonicalIdFor, catalogRoute, cloudCredential, CLOUD_PROVIDERS, currentVerifiedRoute, eligibleRoutes, evidenceFor, isTransientCatalogError, readProviderCatalog } from './freeRegistry';
+import {
+  canonicalIdFor,
+  catalogRoute,
+  classifyProviderFailure,
+  cloudCredential,
+  CLOUD_PROVIDERS,
+  currentVerifiedRoute,
+  eligibleRoutes,
+  evidenceFor,
+  isTransientCatalogError,
+  readProviderCatalog,
+  validateProviderKey,
+} from './freeRegistry';
 import { recordProvider429, recordProviderRequest } from '../../utils/quotaTracker';
 
 export function buildEffortAugmentedPrompt(basePrompt: string, effort: EffortLevel, model: ModelConfig): string {
@@ -37,6 +57,24 @@ export function getApiKeyForProvider(provider: ProviderId, keys: ProviderKeys): 
   if (provider === 'demo') return 'demo';
   if (provider === 'kilo') return 'anonymous';
   return cloudCredential(provider, keys);
+}
+
+export function isModelManuallyOverridden(modelId: string, manualOverrides: string[] = []): boolean {
+  if (!manualOverrides.length) return false;
+  const normalized = normalizeModelId(modelId);
+  return manualOverrides.some((id) => id === modelId || normalizeModelId(id) === normalized);
+}
+
+export function isCloudProvider(provider: ProviderId): provider is CloudProvider {
+  return provider !== 'local' && provider !== 'demo';
+}
+
+export function hasConfiguredCloudKey(provider: ProviderId, keys: ProviderKeys): boolean {
+  if (provider === 'local' || provider === 'demo' || provider === 'kilo') return true;
+  if (provider === 'cloudflare') {
+    return Boolean(cloudCredential('cloudflare', keys) && keys.cloudflareAccountId && /^[0-9a-f]{32}$/i.test(keys.cloudflareAccountId));
+  }
+  return Boolean(cloudCredential(provider, keys));
 }
 
 export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfig[] {
@@ -67,12 +105,36 @@ export function mergeModelCatalog(dynamicModels: ModelConfig[] = []): ModelConfi
   return Array.from(byId.values());
 }
 
-export function getAvailableModels(keys: ProviderKeys, dynamicModels: ModelConfig[] = []): ModelConfig[] {
+export function getAvailableModels(
+  keys: ProviderKeys,
+  dynamicModels: ModelConfig[] = [],
+  manualModelOverrides: string[] = []
+): ModelConfig[] {
   return mergeModelCatalog(dynamicModels).flatMap((model) => {
     if (model.provider === 'demo' || model.provider === 'local') return [model];
     const routes = eligibleRoutes(model, keys);
     const primary = routes.find((route) => route.provider === model.provider) ?? routes[0];
-    return primary ? [{ ...model, provider: primary.provider, contextWindow: primary.contextWindow, routes }] : [];
+    if (primary) {
+      return [{ ...model, provider: primary.provider, contextWindow: primary.contextWindow, routes }];
+    }
+    if (
+      isCloudProvider(model.provider) &&
+      isModelManuallyOverridden(model.id, manualModelOverrides) &&
+      hasConfiguredCloudKey(model.provider, keys)
+    ) {
+      const fallbackRoute = model.routes?.[0] ?? {
+        provider: model.provider,
+        modelId: model.id,
+        contextWindow: model.contextWindow,
+        tools: true,
+        images: model.provider === 'gemini',
+        reasoning: Boolean(model.supportsReasoningEffort || model.supportsThinkingLevel),
+        checkedAt: Date.now(),
+        expiresAt: Date.now() + 3600_000,
+      };
+      return [{ ...model, routes: [fallbackRoute] }];
+    }
+    return [];
   });
 }
 
@@ -83,6 +145,12 @@ export function getUnavailableCatalogModels(available: ModelConfig[], dynamicMod
     const id = normalizeModelId(model.id);
     if (model.provider !== 'demo' && id !== 'cloud-auto') known.set(id, model);
   }
+  for (const dm of dynamicModels) {
+    if (dm.provider !== 'demo' && dm.provider !== 'local' && dm.id !== 'cloud-auto') {
+      const id = normalizeModelId(dm.id);
+      if (!known.has(id)) known.set(id, dm);
+    }
+  }
   for (const evidence of FREE_ROUTE_EVIDENCE) {
     if (!known.has(evidence.canonicalId)) {
       const model = getModelById(evidence.canonicalId, dynamicModels);
@@ -92,11 +160,90 @@ export function getUnavailableCatalogModels(available: ModelConfig[], dynamicMod
   return [...known].filter(([id]) => !availableIds.has(id)).map(([, model]) => model);
 }
 
+export interface UnavailableCatalogEntry {
+  model: ModelConfig;
+  status: ProviderKeyStatus | 'unverified_route';
+  badge: string;
+  detail: string;
+  canOverride: boolean;
+}
+
+export function getUnavailableCatalogModelsWithDetails(
+  available: ModelConfig[],
+  keys: ProviderKeys,
+  dynamicModels: ModelConfig[] = [],
+  providerValidation: Partial<Record<CloudProvider, ProviderValidationResult>> = {},
+  modelFailures: Record<string, { status: ProviderKeyStatus; badge: string; detail: string }> = {}
+): UnavailableCatalogEntry[] {
+  const models = getUnavailableCatalogModels(available, dynamicModels);
+  return models.map((model) => {
+    const modelErr = modelFailures[model.id] ?? modelFailures[normalizeModelId(model.id)];
+    if (modelErr) {
+      return {
+        model,
+        status: modelErr.status,
+        badge: modelErr.badge,
+        detail: modelErr.detail,
+        canOverride: model.provider !== 'demo' && hasConfiguredCloudKey(model.provider, keys) && modelErr.status !== 'invalid_key',
+      };
+    }
+    if (model.provider === 'local' || model.provider === 'demo') {
+      return {
+        model,
+        status: 'unverified_route',
+        badge: 'Local',
+        detail: 'Local endpoint model.',
+        canOverride: true,
+      };
+    }
+    const configured = hasConfiguredCloudKey(model.provider, keys);
+    const val = providerValidation[model.provider];
+    if (!configured) {
+      return {
+        model,
+        status: 'unconfigured',
+        badge: 'No Key',
+        detail: `Add your ${PROVIDER_INFO[model.provider].name} API key in Settings.`,
+        canOverride: false,
+      };
+    }
+    if (val && val.status !== 'valid' && val.status !== 'unconfigured') {
+      return {
+        model,
+        status: val.status,
+        badge: val.badge,
+        detail: val.detail,
+        canOverride: val.status !== 'invalid_key',
+      };
+    }
+    if (val?.status === 'valid') {
+      return {
+        model,
+        status: 'paid_route',
+        badge: 'Paid/Credit Route',
+        detail: 'API key is valid, but this model is outside the verified zero-cost allowlist. Enable override to use it.',
+        canOverride: true,
+      };
+    }
+    return {
+      model,
+      status: 'paid_route',
+      badge: 'Paid/Credit Route',
+      detail: 'No verified zero-cost route matched yet. Verify keys or enable manual override.',
+      canOverride: true,
+    };
+  });
+}
+
 export function preserveCatalogForSameCredentials(
   models: ModelConfig[], previous: ProviderKeys, current: ProviderKeys,
 ): ModelConfig[] {
   return models.flatMap((model) => {
-    if (!model.routes?.length) return [model];
+    if (!model.routes?.length) {
+      return model.description === 'Custom user model' || (model.provider !== 'local' && model.provider !== 'demo' && hasConfiguredCloudKey(model.provider, current))
+        ? [model]
+        : [];
+    }
     const routes = model.routes.filter((route) =>
       cloudCredential(route.provider, previous) === cloudCredential(route.provider, current)
       && (route.provider !== 'cloudflare' || previous.cloudflareAccountId === current.cloudflareAccountId));
@@ -125,7 +272,7 @@ export function getFallbackModelCandidates(
   primaryModelId: string,
   keys: ProviderKeys,
   dynamicModels: ModelConfig[] = [],
-  needs: { tools?: boolean; images?: boolean; autoFallback?: boolean } = {},
+  needs: { tools?: boolean; images?: boolean; autoFallback?: boolean; manualModelOverrides?: string[] } = {},
 ): ModelConfig[] {
   const normalized = normalizeModelId(primaryModelId);
   const catalog = mergeModelCatalog(dynamicModels);
@@ -136,18 +283,42 @@ export function getFallbackModelCandidates(
   const models = normalized === 'cloud-auto'
     ? catalog.filter((model) => model.routes?.length).sort((a, b) => rank(b) - rank(a) || a.id.localeCompare(b.id))
     : [picked];
-  const candidates = models.flatMap((model) => eligibleRoutes(model, keys)
-    .filter((route) => (!needs.tools || route.tools) && (!needs.images || route.images)
-      && (routeHealth.get(routeKey(route.provider, route.modelId))?.cooldown ?? 0) <= Date.now())
-    .sort((a, b) => {
-      const first = routeHealth.get(routeKey(a.provider, a.modelId));
-      const second = routeHealth.get(routeKey(b.provider, b.modelId));
-      const quotaOrder = Number(first?.remaining === 0) - Number(second?.remaining === 0);
-      return quotaOrder || (first?.latency ?? Infinity) - (second?.latency ?? Infinity) || a.provider.localeCompare(b.provider);
-    })
-    .map((route) => ({ ...model, routes: [route], provider: route.provider, contextWindow: route.contextWindow,
-      supportsThinkingLevel: route.provider === 'gemini' && route.reasoning,
-      supportsReasoningEffort: route.provider === 'openrouter' && route.reasoning })));
+  const candidates = models.flatMap((model) => {
+    const routes = eligibleRoutes(model, keys);
+    if (routes.length > 0) {
+      return routes
+        .filter((route) => (!needs.tools || route.tools) && (!needs.images || route.images)
+          && (routeHealth.get(routeKey(route.provider, route.modelId))?.cooldown ?? 0) <= Date.now())
+        .sort((a, b) => {
+          const first = routeHealth.get(routeKey(a.provider, a.modelId));
+          const second = routeHealth.get(routeKey(b.provider, b.modelId));
+          const quotaOrder = Number(first?.remaining === 0) - Number(second?.remaining === 0);
+          return quotaOrder || (first?.latency ?? Infinity) - (second?.latency ?? Infinity) || a.provider.localeCompare(b.provider);
+        })
+        .map((route) => ({ ...model, routes: [route], provider: route.provider, contextWindow: route.contextWindow,
+          supportsThinkingLevel: route.provider === 'gemini' && route.reasoning,
+          supportsReasoningEffort: route.provider === 'openrouter' && route.reasoning }));
+    }
+    if (
+      normalized !== 'cloud-auto' &&
+      isCloudProvider(model.provider) &&
+      isModelManuallyOverridden(model.id, needs.manualModelOverrides) &&
+      hasConfiguredCloudKey(model.provider, keys)
+    ) {
+      const overrideRoute = model.routes?.[0] ?? {
+        provider: model.provider,
+        modelId: model.id,
+        contextWindow: model.contextWindow,
+        tools: true,
+        images: model.provider === 'gemini',
+        reasoning: Boolean(model.supportsReasoningEffort || model.supportsThinkingLevel),
+        checkedAt: Date.now(),
+        expiresAt: Date.now() + 3600_000,
+      };
+      return [{ ...model, routes: [overrideRoute] }];
+    }
+    return [];
+  });
   return normalized === 'cloud-auto' && !needs.autoFallback
     ? candidates.filter((model) => model.id === candidates[0]?.id)
     : candidates;
@@ -157,6 +328,13 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
   if (req.model.provider === 'local' || req.model.provider === 'demo') return runTransport(req);
   const route = req.model.routes?.find((item) => item.provider === req.model.provider);
   const keys = req.credentials ?? { [req.model.provider]: req.apiKey };
+  if (req.manualOverride) {
+    if (req.model.provider !== 'kilo' && !cloudCredential(req.model.provider, keys)) {
+      throw new ProviderAuthError(`${PROVIDER_INFO[req.model.provider].name} API key is not configured.`);
+    }
+    await runTransport(req);
+    return;
+  }
   const current = route && evidenceFor(route)?.canonicalId === req.model.id
     ? await currentVerifiedRoute(route, keys, req.fetchFn ?? fetch, req.signal).catch(() => undefined)
     : undefined;
@@ -232,6 +410,9 @@ export async function streamWithRateLimitFallback(params: {
   excludeFallbackModelId?: string;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
+  manualModelOverrides?: string[];
+  isProbe?: boolean;
+  allowLocalTools?: boolean;
   systemPrompt: string;
   effort: EffortLevel;
   chatMode?: import('../../types').ChatMode;
@@ -254,6 +435,7 @@ export async function streamWithRateLimitFallback(params: {
     params.primaryModelId, params.keys, params.dynamicModels, {
       tools: params.tools.length > 0,
       autoFallback: params.chatMode === 'coding',
+      manualModelOverrides: params.manualModelOverrides,
       images: params.messages.some((message) => message.role === 'user'
         ? message.attachments?.some((attachment) => attachment.kind === 'image' && attachment.dataBase64)
         : message.role === 'tool' && message.mediaBlocks?.some((block) => block.type === 'image')),
@@ -265,6 +447,11 @@ export async function streamWithRateLimitFallback(params: {
     const model = candidates[i];
     const apiKey = getApiKeyForProvider(model.provider, params.keys);
     const augmentedPrompt = buildEffortAugmentedPrompt(params.systemPrompt, params.effort, model);
+    const manualOverride =
+      model.provider !== 'local' &&
+      model.provider !== 'demo' &&
+      isModelManuallyOverridden(model.id, params.manualModelOverrides) &&
+      !eligibleRoutes(model, params.keys).length;
 
     params.onModelAttemptStart?.(model, i, augmentedPrompt);
     let startedResponse = false;
@@ -282,6 +469,9 @@ export async function streamWithRateLimitFallback(params: {
         knowledgeSource: params.knowledgeSource,
         a2uiEnabled: params.a2uiEnabled,
         websiteBuild: params.websiteBuild,
+        isProbe: params.isProbe,
+        manualOverride,
+        allowLocalTools: params.allowLocalTools,
         messages: params.prepareMessages?.(model) ?? params.messages,
         tools: params.tools,
         signal: params.signal,
@@ -319,6 +509,8 @@ export async function testModelConnection(params: {
   modelId: string;
   keys: ProviderKeys;
   dynamicModels?: ModelConfig[];
+  manualModelOverrides?: string[];
+  allowLocalTools?: boolean;
   fetchFn?: typeof fetch;
 }): Promise<{ ok: boolean; latencyMs: number; preview: string }> {
   const started = Date.now();
@@ -328,6 +520,9 @@ export async function testModelConnection(params: {
     primaryModelId: params.modelId,
     keys: params.keys,
     dynamicModels: params.dynamicModels,
+    manualModelOverrides: params.manualModelOverrides,
+    isProbe: true,
+    allowLocalTools: params.allowLocalTools,
     systemPrompt: 'Respond with exactly "OK" and nothing else.',
     effort: 'low',
     messages: [{ role: 'user', text: 'Ping' }],
@@ -344,6 +539,57 @@ export async function testModelConnection(params: {
     preview: preview.trim() || 'Connected',
   };
 }
+
+export async function validateAllConfiguredProviderKeys(
+  keys: ProviderKeys,
+  fetchFn: typeof fetch = fetch
+): Promise<{
+  validation: Partial<Record<CloudProvider, ProviderValidationResult>>;
+  discoveredModels: ModelConfig[];
+}> {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), 10_000);
+  const validation: Partial<Record<CloudProvider, ProviderValidationResult>> = {};
+  const discoveredModels: ModelConfig[] = [];
+  const seenIds = new Set(FREE_MODELS.map((m) => normalizeModelId(m.id)));
+
+  try {
+    const entries = await Promise.all(
+      CLOUD_PROVIDERS.map(async (provider) => ({
+        provider,
+        result: await validateProviderKey(provider, keys, fetchFn, abort.signal),
+      }))
+    );
+    for (const { provider, result } of entries) {
+      validation[provider] = result.validation;
+      if (result.validation.status === 'valid') {
+        for (const row of result.rows) {
+          if (row.active === false) continue;
+          const id = canonicalIdFor(provider, row.id) ?? row.id;
+          if (!id || id === 'openrouter/free' || id === 'kilo-auto/free') continue;
+          if (seenIds.has(normalizeModelId(id))) continue;
+          seenIds.add(normalizeModelId(id));
+          discoveredModels.push({
+            id,
+            provider,
+            label: row.displayName || row.name || formatReadableModelSlug(id),
+            description: `${PROVIDER_INFO[provider].name} catalog model`,
+            contextWindow: row.context_length ?? row.context_window ?? row.inputTokenLimit ?? 128_000,
+            supportsThinkingLevel: provider === 'gemini',
+            supportsReasoningEffort: row.supported_parameters?.includes('reasoning_effort') ?? false,
+            isFreeTier: Boolean(catalogRoute(provider, row)),
+          });
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  return { validation, discoveredModels };
+}
+
+export { classifyProviderFailure };
 
 export async function syncLiveProviderModels(
   keys: ProviderKeys,

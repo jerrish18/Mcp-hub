@@ -21,12 +21,14 @@ import {
 } from 'lucide-react';
 import type { ModelConfig, RunTrace, RunTraceStep } from '../../types';
 import { BottomSheet } from '../../ui/BottomSheet';
+import { useHubStore } from '../../store/useHubStore';
 import {
   aggregateTraceServerStats,
   filterTraceSteps,
   formatDurationCompact,
   formatTraceAsMarkdown,
   normalizeTraceSteps,
+  redactRunTrace,
   SLOW_STEP_THRESHOLD_MS,
   type TraceStepFilter,
 } from '../../utils/runTrace';
@@ -165,13 +167,20 @@ export function RunTraceSheet({
     }
   };
 
+  const providerKeys = useHubStore((s) => s.providerKeys);
+  const knownSecrets = useMemo(
+    () => Object.values(providerKeys).filter((v): v is string => typeof v === 'string' && v.length > 0),
+    [providerKeys]
+  );
+
   const handleDownloadJson = () => {
     if (!trace) return;
-    const blob = new Blob([JSON.stringify(trace, null, 2)], { type: 'application/json' });
+    const sanitized = redactRunTrace(trace, knownSecrets);
+    const blob = new Blob([JSON.stringify(sanitized, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `mcphub-run-trace-${trace.startedAt}.json`;
+    a.download = `mcphub-run-trace-${sanitized.startedAt}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -791,7 +800,7 @@ export function RunTraceSheet({
                   type="button"
                   data-testid="copy-trace-md-btn"
                   onClick={() =>
-                    void copyText('trace_md', formatTraceAsMarkdown(trace, messageTitle))
+                    void copyText('trace_md', formatTraceAsMarkdown(trace, messageTitle, knownSecrets))
                   }
                   style={{
                     backgroundColor: 'var(--m3-surface-container-high)',

@@ -65,6 +65,9 @@ export interface StreamCompletionRequest {
   knowledgeSource?: KnowledgeSourceMode;
   a2uiEnabled?: boolean;
   websiteBuild?: boolean;
+  isProbe?: boolean;
+  manualOverride?: boolean;
+  allowLocalTools?: boolean;
   messages: LlmConversationItem[];
   tools: LlmToolDefinition[];
   signal?: AbortSignal;

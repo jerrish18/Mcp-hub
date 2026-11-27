@@ -246,7 +246,11 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     conversations,
     activeConversationId,
     providerKeys,
+    providerValidation,
+    modelFailures,
     dynamicModels,
+    validateProviderKeysNow,
+    toggleManualModelOverride,
     syncModels,
     settings,
     savedStudyNotes,
@@ -393,7 +397,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const activeProject = activeConv?.projectId
     ? projects.find((p) => p.id === activeConv.projectId) ?? null
     : null;
-  const allCatalogModels = useMemo(() => getAvailableModels(providerKeys, dynamicModels), [dynamicModels, providerKeys]);
+  const allCatalogModels = useMemo(
+    () => getAvailableModels(providerKeys, dynamicModels, settings.manualModelOverrides ?? []),
+    [dynamicModels, providerKeys, settings.manualModelOverrides]
+  );
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeModelShort = getShortModelName(activeModel);
   const activeEffort: EffortLevel = activeConv?.effort ?? activeAgent.defaultEffort;
@@ -2931,8 +2938,15 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         dynamicModels={dynamicModels}
         activeModelId={activeModel.id}
         providerKeys={providerKeys}
+        manualModelOverrides={settings.manualModelOverrides ?? []}
+        providerValidation={providerValidation}
+        modelFailures={modelFailures}
+        onToggleManualOverride={toggleManualModelOverride}
         onSelectModel={setActiveModel}
-        onRefresh={syncModels}
+        onRefresh={async () => {
+          await validateProviderKeysNow();
+          return syncModels();
+        }}
         onOpenSettings={onOpenSettings}
       />
 

@@ -1,7 +1,7 @@
 import { nvidiaRequestOptions } from './nvidiaOptions';
 import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
-import { providerEndpoint, usesFreeAiRelay } from './freeRegistry';
+import { isBrowserHttpRuntime, providerEndpoint, usesFreeAiRelay } from './freeRegistry';
 import { redactSecrets } from '../../utils/redact';
 import {
   extractReadableApiError,
@@ -36,12 +36,14 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} API key is not configured.`);
   }
 
+  const isProbe = Boolean(req.isProbe);
   const route = model.routes?.[0];
   const baseUrl = model.provider === 'local' || model.provider === 'demo'
     ? PROVIDER_INFO[model.provider].baseUrl : providerEndpoint(model.provider, req.credentials?.cloudflareAccountId);
   if (!baseUrl) throw new ProviderAuthError('A valid Cloudflare account ID is required.');
   const webRelay = model.provider !== 'local' && model.provider !== 'demo' && usesFreeAiRelay(model.provider, fetchFn);
-  const url = webRelay ? `/api/free-ai/${model.provider}/chat/completions` : `${baseUrl}/chat/completions`;
+  let targetUrl = webRelay ? `/api/free-ai/${model.provider}/chat/completions` : `${baseUrl}/chat/completions`;
+  let usingProxyFallback = webRelay;
   const formattedMessages: Array<Record<string, unknown>> = [
     { role: 'system', content: systemPrompt },
   ];
@@ -123,7 +125,11 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   }
 
   const upstreamModelId = model.provider === 'local' ? model.id.replace(/^local:/, '') : route?.modelId ?? model.id;
-  const nvidiaOptions = model.provider === 'nvidia' ? nvidiaRequestOptions(upstreamModelId, effort) : undefined;
+  const allowReasoningFields = !isProbe && model.supportsReasoningEffort !== false;
+  const nvidiaOptions =
+    allowReasoningFields && model.provider === 'nvidia'
+      ? nvidiaRequestOptions(upstreamModelId, effort)
+      : undefined;
   const body: Record<string, unknown> = {
     model: upstreamModelId,
     messages: formattedMessages,
@@ -131,12 +137,12 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   };
 
   if (route?.maxOutput) body.max_tokens = Math.min(route.maxOutput, 24576);
-  if (model.supportsReasoningEffort && model.provider !== 'openrouter') {
+  if (!isProbe && model.supportsReasoningEffort === true && model.provider !== 'openrouter') {
     body.reasoning_effort = effort;
   }
   if (nvidiaOptions) Object.assign(body, nvidiaOptions);
 
-  if (model.provider !== 'local' && tools.length > 0) {
+  if ((model.provider !== 'local' || req.allowLocalTools) && tools.length > 0) {
     body.tools = tools.map((t) => ({
       type: 'function',
       function: {
@@ -152,11 +158,17 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     'Content-Type': 'application/json',
     ...(nvidiaOptions ? { Accept: 'text/event-stream' } : {}),
     ...(model.provider !== 'local' && model.provider !== 'kilo' ? { Authorization: `Bearer ${apiKey}` } : {}),
+    ...(model.provider === 'cloudflare' && req.credentials?.cloudflareAccountId
+      ? { 'X-MCPHub-Account': req.credentials.cloudflareAccountId }
+      : {}),
     ...(webRelay ? { 'X-MCPHub-UI': '1' } : {}),
+    ...(webRelay && req.manualOverride ? { 'X-MCPHub-Manual-Override': '1' } : {}),
   };
   if (model.provider === 'openrouter') {
-    body.provider = { max_price: { prompt: 0, completion: 0, request: 0, image: 0 }, require_parameters: true };
-    if (model.supportsReasoningEffort) body.reasoning = { effort };
+    if (!req.manualOverride) {
+      body.provider = { max_price: { prompt: 0, completion: 0, request: 0, image: 0 }, require_parameters: true };
+    }
+    if (!isProbe && model.supportsReasoningEffort === true) body.reasoning = { effort };
     headers['HTTP-Referer'] = 'https://mcphub.app';
     headers['X-Title'] = 'MCP Hub';
   }
@@ -164,7 +176,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   let res: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      res = await fetchFn(url, {
+      res = await fetchFn(targetUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
@@ -173,6 +185,13 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       });
     } catch (error) {
       if (model.provider === 'local' || signal?.aborted || !(error instanceof TypeError)) throw error;
+      if (!usingProxyFallback && model.provider !== 'demo' && isBrowserHttpRuntime(fetchFn)) {
+        usingProxyFallback = true;
+        targetUrl = `/api/free-ai/${model.provider}/chat/completions`;
+        headers['X-MCPHub-UI'] = '1';
+        if (req.manualOverride) headers['X-MCPHub-Manual-Override'] = '1';
+        continue;
+      }
       if (attempt === 0) {
         await sleep(650, signal);
         continue;
@@ -183,10 +202,23 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       await sleep(650, signal);
       continue;
     }
-    if (res.status === 400 && attempt === 0 && !nvidiaOptions && 'reasoning_effort' in body) {
+    if (
+      res.status === 400 &&
+      attempt === 0 &&
+      ('reasoning_effort' in body || 'chat_template_kwargs' in body || 'reasoning' in body)
+    ) {
       const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
-      if (errPreview.includes('reasoning')) {
+      if (
+        errPreview.includes('reasoning') ||
+        errPreview.includes('chat_template_kwargs') ||
+        errPreview.includes('unknown') ||
+        errPreview.includes('extra_forbidden') ||
+        errPreview.includes('unrecognized') ||
+        errPreview.includes('unsupported')
+      ) {
         delete body.reasoning_effort;
+        delete body.chat_template_kwargs;
+        delete body.reasoning;
         continue;
       }
     }
@@ -207,6 +239,13 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   if (res.status === 401 || res.status === 403) {
     const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
+  }
+  if (res.status === 400) {
+    const errText = extractReadableApiError(await res.text());
+    throw new ModelUnavailableError(
+      `${PROVIDER_INFO[model.provider].name} rejected request parameter (400): ${redactSecrets(errText, [apiKey])}`,
+      400
+    );
   }
   if (res.status === 402 || res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
     const errText = extractReadableApiError(await res.text());
@@ -308,7 +347,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} ended the response before completion. Any received source is kept.`);
   }
 
-  if (model.provider !== 'local' && toolAcc.size > 0) {
+  if ((model.provider !== 'local' || req.allowLocalTools) && toolAcc.size > 0) {
     const calls: LlmToolCall[] = Array.from(toolAcc.entries())
       .sort(([a], [b]) => a - b)
       .map(([, v]) => {
