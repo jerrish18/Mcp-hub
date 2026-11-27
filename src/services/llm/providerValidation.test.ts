@@ -6,16 +6,18 @@ import { getModelById } from '../../config/models';
 import { createFreeAiRouter } from '../../server/freeAiRouter';
 import { formatTraceAsMarkdown, redactRunTrace } from '../../utils/runTrace';
 import { streamGeminiCompletion } from './gemini';
-import { streamOpenAiCompatibleCompletion } from './openaiCompatible';
+import { createThinkTagParser, streamOpenAiCompatibleCompletion } from './openaiCompatible';
 import {
   classifyProviderFailure,
   dispatchStreamCompletion,
   getAvailableModels,
   getUnavailableCatalogModelsWithDetails,
   streamWithRateLimitFallback,
+  syncLiveProviderModels,
   testModelConnection,
   validateAllConfiguredProviderKeys,
 } from './provider';
+import { ModelUnavailableError, ProviderAuthError, RateLimitError, type LlmStreamEvent } from './types';
 import { validateProviderKey } from './freeRegistry';
 
 test('decoupled key validation marks valid Gemini, Groq, and NVIDIA keys independently of FREE_ROUTE_EVIDENCE', async () => {
@@ -352,6 +354,294 @@ test('freeAiRouter rejects unknown providers and unauthenticated/cross-site infe
     });
     assert.equal(unverifiedWithoutOverride.status, 403);
   } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('NVIDIA Minimax M3.1 Flash and Kimi K3.1 Pro send provider-specific reasoning options without forced max_tokens', async () => {
+  const keys = { nvidia: 'nvapi-unit-test' };
+  const nimRows = [{ id: 'minimaxai/minimax-m3.1-flash' }, { id: 'moonshotai/kimi-k3.1-pro' }];
+  const sentBodies: Record<string, Record<string, unknown>> = {};
+  const sentHeaders: Record<string, Headers> = {};
+
+  const fetchFn: typeof fetch = async (url, init) => {
+    const u = String(url);
+    if (!init?.method || init.method === 'GET') {
+      if (u.includes('integrate.api.nvidia.com')) {
+        return Response.json({ data: nimRows });
+      }
+      return Response.json({ data: [] });
+    }
+    const parsed = JSON.parse(String(init.body ?? '{}')) as Record<string, unknown>;
+    sentBodies[String(parsed.model)] = parsed;
+    sentHeaders[String(parsed.model)] = new Headers(init.headers);
+    return new Response('data: {"choices":[{"delta":{"content":"Ready"}}]}\n\ndata: [DONE]\n\n');
+  };
+
+  const { models } = await syncLiveProviderModels(keys, fetchFn);
+  await streamWithRateLimitFallback({
+    primaryModelId: 'minimax/minimax-m3.1-flash',
+    keys,
+    dynamicModels: models,
+    systemPrompt: 'Sys',
+    effort: 'high',
+    messages: [{ role: 'user', text: 'Hi' }],
+    tools: [],
+    fetchFn,
+    onEvent: () => {},
+  });
+
+  const minimaxBody = sentBodies['minimaxai/minimax-m3.1-flash'];
+  assert.ok(minimaxBody);
+  assert.equal(minimaxBody.reasoning_effort, undefined);
+  assert.deepEqual(minimaxBody.chat_template_kwargs, { reasoning_effort: 'high' });
+  assert.equal(minimaxBody.max_tokens, undefined);
+  assert.equal(sentHeaders['minimaxai/minimax-m3.1-flash'].get('accept'), 'text/event-stream');
+
+  await streamWithRateLimitFallback({
+    primaryModelId: 'moonshotai/kimi-k3.1-pro',
+    keys,
+    dynamicModels: models,
+    systemPrompt: 'Sys',
+    effort: 'high',
+    messages: [{ role: 'user', text: 'Hi' }],
+    tools: [],
+    fetchFn,
+    onEvent: () => {},
+  });
+
+  const kimiBody = sentBodies['moonshotai/kimi-k3.1-pro'];
+  assert.ok(kimiBody);
+  assert.equal(kimiBody.reasoning_effort, 'high');
+  assert.equal(kimiBody.chat_template_kwargs, undefined);
+  assert.equal(kimiBody.max_tokens, undefined);
+});
+
+test('dispatchStreamCompletion propagates 401/429 ProviderCatalogError instead of masking it as missing free route', async () => {
+  const model = {
+    ...getModelById('moonshotai/kimi-k3.1-pro'),
+    provider: 'nvidia' as const,
+    routes: [
+      {
+        provider: 'nvidia' as const,
+        modelId: 'moonshotai/kimi-k3.1-pro',
+        contextWindow: 1_000_000,
+        tools: true,
+        images: true,
+        reasoning: true,
+        checkedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      },
+    ],
+  };
+
+  await assert.rejects(
+    dispatchStreamCompletion({
+      model,
+      apiKey: 'nvapi-bad',
+      effort: 'low',
+      systemPrompt: '',
+      messages: [{ role: 'user', text: 'Hi' }],
+      tools: [],
+      onEvent: () => {},
+      fetchFn: async () => new Response('Unauthorized', { status: 401 }),
+    }),
+    ProviderAuthError
+  );
+
+  await assert.rejects(
+    dispatchStreamCompletion({
+      model,
+      apiKey: 'nvapi-rate',
+      effort: 'low',
+      systemPrompt: '',
+      messages: [{ role: 'user', text: 'Hi' }],
+      tools: [],
+      onEvent: () => {},
+      fetchFn: async () => new Response('Too many requests', { status: 429 }),
+    }),
+    RateLimitError
+  );
+});
+
+test('createThinkTagParser splits split <think> tags cleanly and preserves HTML tags without lag', () => {
+  let reasoning = '';
+  let text = '';
+  const parser = createThinkTagParser(
+    (d) => {
+      reasoning += d;
+    },
+    (d) => {
+      text += d;
+    }
+  );
+  parser.push('<th');
+  parser.push('ink>Plan ');
+  parser.push('step 1</thi');
+  parser.push('nk>\n\n');
+  parser.push('<div>Hello</div>');
+  parser.flush();
+
+  assert.equal(reasoning, 'Plan step 1');
+  assert.equal(text, '<div>Hello</div>');
+});
+
+test('openaiCompatible supports non-SSE JSON responses, reused-index tool_calls, and HTTP 422 recovery', async () => {
+  const model = { ...getModelById('moonshotai/kimi-k3.1-pro'), provider: 'nvidia' as const, supportsReasoningEffort: true };
+
+  // Non-SSE JSON completion with <think> and tool_calls
+  const jsonEvents: LlmStreamEvent[] = [];
+  await streamOpenAiCompatibleCompletion({
+    model,
+    apiKey: 'nvapi-test',
+    effort: 'low',
+    systemPrompt: '',
+    messages: [{ role: 'user', text: 'Run' }],
+    tools: [],
+    onEvent: (ev) => jsonEvents.push(ev),
+    fetchFn: async () =>
+      Response.json({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              content: '<think>Internal plan</think>\nFinal reply',
+              tool_calls: [{ id: 'tc_1', function: { name: 'srv__read', arguments: '{"a":1}' } }],
+            },
+          },
+        ],
+      }),
+  });
+  assert.equal(
+    jsonEvents.filter((e) => e.type === 'reasoning_delta').map((e) => e.delta).join(''),
+    'Internal plan'
+  );
+  assert.equal(
+    jsonEvents.filter((e) => e.type === 'text_delta').map((e) => e.delta).join(''),
+    'Final reply'
+  );
+  const tcEv = jsonEvents.find((e) => e.type === 'tool_calls');
+  assert.ok(tcEv && tcEv.type === 'tool_calls' && tcEv.calls[0].name === 'srv__read');
+
+  // Reused tool index 0 with distinct tc.id creates two separate tool calls
+  const multiEvents: LlmStreamEvent[] = [];
+  const sseBody = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"tool_one","arguments":"{\\"x\\":1}"}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_b","function":{"name":"tool_two","arguments":"{\\"y\\":2}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+    'data: [DONE]\n\n',
+  ].join('');
+  await streamOpenAiCompatibleCompletion({
+    model,
+    apiKey: 'nvapi-test',
+    effort: 'low',
+    systemPrompt: '',
+    messages: [{ role: 'user', text: 'Run both' }],
+    tools: [],
+    onEvent: (ev) => multiEvents.push(ev),
+    fetchFn: async () => new Response(sseBody),
+  });
+  const multiTc = multiEvents.find((e) => e.type === 'tool_calls');
+  assert.ok(multiTc && multiTc.type === 'tool_calls');
+  assert.equal(multiTc.calls.length, 2);
+  assert.equal(multiTc.calls[0].name, 'tool_one');
+  assert.equal(multiTc.calls[1].name, 'tool_two');
+
+  // HTTP 422 retries after stripping unsupported reasoning param and maps unrecovered 422 cleanly
+  let attempts = 0;
+  await streamOpenAiCompatibleCompletion({
+    model,
+    apiKey: 'nvapi-test',
+    effort: 'low',
+    systemPrompt: '',
+    messages: [{ role: 'user', text: 'Hi' }],
+    tools: [],
+    onEvent: () => {},
+    fetchFn: async (_url, init) => {
+      attempts += 1;
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      if (attempts === 1) {
+        assert.equal(body.reasoning_effort, 'low');
+        return new Response(JSON.stringify({ detail: 'Extra inputs are not permitted: reasoning_effort' }), { status: 422 });
+      }
+      assert.equal(body.reasoning_effort, undefined);
+      return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');
+    },
+  });
+  assert.equal(attempts, 2);
+
+  await assert.rejects(
+    streamOpenAiCompatibleCompletion({
+      model,
+      apiKey: 'nvapi-test',
+      effort: 'low',
+      systemPrompt: '',
+      messages: [{ role: 'user', text: 'Hi' }],
+      tools: [],
+      onEvent: () => {},
+      fetchFn: async () => new Response('Unprocessable entity', { status: 422 }),
+    }),
+    ModelUnavailableError
+  );
+  assert.equal(classifyProviderFailure(422, 'Unsupported field').badge, 'Unsupported Param (422)');
+});
+
+test('freeAiRouter forwards NVIDIA Minimax options cleanly without injecting max_tokens 24576', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedUpstreamPayload: Record<string, unknown> = {};
+  let upstreamModelsCalls = 0;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith('https://integrate.api.nvidia.com/v1/models')) {
+      upstreamModelsCalls += 1;
+      return Response.json({ data: [{ id: 'minimaxai/minimax-m3.1-flash' }] });
+    }
+    if (url.startsWith('https://integrate.api.nvidia.com/v1/chat/completions')) {
+      capturedUpstreamPayload = JSON.parse(String(init?.body ?? '{}'));
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  const app = express();
+  app.use('/api', createFreeAiRouter());
+  let server!: http.Server;
+  let baseUrl = '';
+  await new Promise<void>((resolve) => {
+    server = app.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (addr && typeof addr === 'object') baseUrl = `http://127.0.0.1:${addr.port}`;
+      resolve();
+    });
+  });
+
+  try {
+    for (let i = 0; i < 2; i++) {
+      const res = await originalFetch(`${baseUrl}/api/free-ai/nvidia/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-MCPHub-UI': '1',
+          Authorization: 'Bearer nvapi-router-cache-test',
+        },
+        body: JSON.stringify({
+          model: 'minimaxai/minimax-m3.1-flash',
+          messages: [{ role: 'user', content: 'Hello' }],
+          chat_template_kwargs: { reasoning_effort: 'high' },
+        }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+    }
+    assert.equal(upstreamModelsCalls, 1);
+    assert.equal(capturedUpstreamPayload.max_tokens, undefined);
+    assert.equal(capturedUpstreamPayload.reasoning_effort, undefined);
+    assert.deepEqual(capturedUpstreamPayload.chat_template_kwargs, { reasoning_effort: 'high' });
+  } finally {
+    globalThis.fetch = originalFetch;
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

@@ -1,15 +1,53 @@
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { Router, json } from 'express';
 import { nvidiaRequestOptions } from '../services/llm/nvidiaOptions.ts';
 import {
   catalogRoute,
+  type CatalogRow,
   CLOUD_PROVIDERS,
   evidenceFor,
+  ProviderCatalogError,
   providerEndpoint,
   readProviderCatalog,
 } from '../services/llm/freeRegistry.ts';
 import type { CloudProvider } from '../types/index.ts';
 import { redactSecrets } from '../utils/redact.ts';
+
+const CATALOG_CACHE_TTL_MS = 60_000;
+const MAX_CATALOG_CACHE_ENTRIES = 100;
+const catalogCache = new Map<string, { expiresAt: number; rows: CatalogRow[] }>();
+
+function catalogCacheKey(provider: CloudProvider, token: string, account?: string): string {
+  const tokenHash = token ? createHash('sha256').update(token).digest('hex').slice(0, 16) : 'anon';
+  return `${provider}:${tokenHash}:${account ?? ''}`;
+}
+
+async function getCachedProviderCatalog(
+  provider: Exclude<CloudProvider, 'gemini'>,
+  token: string,
+  account: string | undefined,
+  signal: AbortSignal,
+): Promise<CatalogRow[]> {
+  const key = catalogCacheKey(provider, token, account);
+  const now = Date.now();
+  const cached = catalogCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.rows;
+  }
+  const rows = await readProviderCatalog(
+    provider,
+    { [provider]: token, ...(account ? { cloudflareAccountId: account } : {}) },
+    fetch,
+    signal
+  );
+  if (catalogCache.size >= MAX_CATALOG_CACHE_ENTRIES) {
+    const firstKey = catalogCache.keys().next().value;
+    if (firstKey !== undefined) catalogCache.delete(firstKey);
+  }
+  catalogCache.set(key, { expiresAt: now + CATALOG_CACHE_TTL_MS, rows });
+  return rows;
+}
 
 function readProviderToken(provider: CloudProvider, req: import('express').Request): string {
   if (provider === 'kilo') return '';
@@ -104,9 +142,14 @@ export function createFreeAiRouter() {
         signal,
         res
       );
-    } catch {
+    } catch (err) {
       if (res.headersSent) res.end();
-      else if (!abort.signal.aborted) res.status(503).json({ error: 'Provider connection was interrupted.' });
+      else if (err instanceof ProviderCatalogError) {
+        const clean = redactSecrets(err.message, token ? [token] : []);
+        res.status(err.status).json({ error: clean || 'Provider catalog is unavailable.' });
+      } else if (!abort.signal.aborted) {
+        res.status(503).json({ error: 'Provider connection was interrupted.' });
+      }
     }
   });
 
@@ -173,19 +216,14 @@ async function relayOpenAiInference(
     return;
   }
 
-  let effectiveMaxOutput = 24576;
+  let effectiveMaxOutput: number | undefined;
   if (!manualOverride) {
     const evidence = evidenceFor({ provider, modelId });
     if (!evidence) {
       res.status(403).json({ error: 'This provider route has not passed free access verification.' });
       return;
     }
-    const rows = await readProviderCatalog(
-      provider,
-      { [provider]: token, ...(cloudflareAccountId ? { cloudflareAccountId } : {}) },
-      fetch,
-      signal
-    );
+    const rows = await getCachedProviderCatalog(provider, token, cloudflareAccountId, signal);
     const row = rows.find((entry) => entry.id === modelId);
     const route = row && catalogRoute(provider, row);
     if (!route) {
@@ -196,29 +234,45 @@ async function relayOpenAiInference(
       res.status(400).json({ error: 'Tool use is unavailable on this verified route.' });
       return;
     }
-    effectiveMaxOutput = route.maxOutput ?? 24576;
+    effectiveMaxOutput = route.maxOutput;
   }
 
-  const requestedMax = typeof body.max_tokens === 'number' && body.max_tokens > 0 ? Math.floor(body.max_tokens) : 24576;
+  const requestedMax = typeof body.max_tokens === 'number' && body.max_tokens > 0 ? Math.floor(body.max_tokens) : undefined;
+  const cappedMax = requestedMax !== undefined
+    ? Math.min(requestedMax, effectiveMaxOutput ?? 24576, 24576)
+    : effectiveMaxOutput !== undefined
+      ? Math.min(effectiveMaxOutput, 24576)
+      : undefined;
   const templateOptions = body.chat_template_kwargs;
   const effort = body.reasoning_effort ?? (templateOptions && typeof templateOptions === 'object'
-    && 'reasoning_effort' in templateOptions ? templateOptions.reasoning_effort : undefined);
+    && 'reasoning_effort' in templateOptions ? (templateOptions as { reasoning_effort?: unknown }).reasoning_effort : undefined);
   const nvidiaOptions = provider === 'nvidia' && effort !== undefined ? nvidiaRequestOptions(modelId, effort) : undefined;
   const upstreamPayload: Record<string, unknown> = {
     model: modelId,
     messages: body.messages,
     stream: true,
-    max_tokens: Math.min(requestedMax, effectiveMaxOutput, 24576),
-    ...(body.tools ? { tools: body.tools, tool_choice: body.tool_choice } : {}),
-    ...(body.reasoning_effort !== undefined ? { reasoning_effort: body.reasoning_effort } : {}),
+    ...(cappedMax !== undefined ? { max_tokens: cappedMax } : {}),
+    ...(body.tools
+      ? {
+          tools: body.tools,
+          ...(body.tool_choice !== undefined ? { tool_choice: body.tool_choice } : {}),
+        }
+      : {}),
+    ...(nvidiaOptions
+      ? nvidiaOptions
+      : {
+          ...(body.reasoning_effort !== undefined ? { reasoning_effort: body.reasoning_effort } : {}),
+          ...(templateOptions && typeof templateOptions === 'object'
+            ? { chat_template_kwargs: templateOptions }
+            : {}),
+        }),
     ...(body.reasoning !== undefined && provider === 'openrouter' ? { reasoning: body.reasoning } : {}),
     ...(provider === 'openrouter' && body.provider ? { provider: body.provider } : {}),
-    ...nvidiaOptions,
   };
 
   const upstream = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
-    headers: nvidiaOptions ? { ...headers, Accept: 'text/event-stream' } : headers,
+    headers: nvidiaOptions || provider === 'nvidia' ? { ...headers, Accept: 'text/event-stream' } : headers,
     signal,
     redirect: 'error',
     body: JSON.stringify(upstreamPayload),

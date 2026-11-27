@@ -126,7 +126,7 @@ export function classifyProviderFailure(
   const lower = combined.toLowerCase();
 
   if (httpStatus === undefined) {
-    const match = /\b(400|401|402|403|404|429|502|503|504)\b/.exec(combined);
+    const match = /\b(400|401|402|403|404|408|422|429|500|502|503|504)\b/.exec(combined);
     if (match) httpStatus = Number(match[1]);
   }
 
@@ -179,16 +179,18 @@ export function classifyProviderFailure(
 
   if (
     httpStatus === 400 ||
+    httpStatus === 422 ||
     lower.includes('reasoning_effort') ||
     lower.includes('chat_template_kwargs') ||
     lower.includes('unsupported') ||
     lower.includes('unknown field') ||
     lower.includes('extra_forbidden')
   ) {
+    const status = httpStatus === 422 ? 422 : 400;
     return {
       status: 'unsupported_param',
-      httpStatus: 400,
-      badge: 'Unsupported Param (400)',
+      httpStatus: status,
+      badge: `Unsupported Param (${status})`,
       detail: combined || 'Endpoint rejected an unsupported request parameter.',
     };
   }

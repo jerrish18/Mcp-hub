@@ -1,6 +1,7 @@
 export function nvidiaRequestOptions(modelId: string, effort: unknown) {
   const boundedEffort = effort === 'high' ? 'high' : 'low';
   switch (modelId) {
+    case 'z-ai/glm-5.3':
     case 'z-ai/glm-5.3-flash':
       // GLM defaults to the maximum thinking budget.
       return { reasoning_effort: boundedEffort, chat_template_kwargs: { clear_thinking: true } };

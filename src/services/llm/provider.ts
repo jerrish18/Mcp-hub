@@ -29,6 +29,7 @@ import {
   eligibleRoutes,
   evidenceFor,
   isTransientCatalogError,
+  ProviderCatalogError,
   readProviderCatalog,
   validateProviderKey,
 } from './freeRegistry';
@@ -124,7 +125,7 @@ export function getAvailableModels(
     ) {
       const fallbackRoute = model.routes?.[0] ?? {
         provider: model.provider,
-        modelId: model.id,
+        modelId: model.upstreamModelId ?? model.id,
         contextWindow: model.contextWindow,
         tools: true,
         images: model.provider === 'gemini',
@@ -295,9 +296,16 @@ export function getFallbackModelCandidates(
           const quotaOrder = Number(first?.remaining === 0) - Number(second?.remaining === 0);
           return quotaOrder || (first?.latency ?? Infinity) - (second?.latency ?? Infinity) || a.provider.localeCompare(b.provider);
         })
-        .map((route) => ({ ...model, routes: [route], provider: route.provider, contextWindow: route.contextWindow,
+        .map((route) => ({
+          ...model,
+          routes: [route],
+          provider: route.provider,
+          contextWindow: route.contextWindow,
           supportsThinkingLevel: route.provider === 'gemini' && route.reasoning,
-          supportsReasoningEffort: route.provider === 'openrouter' && route.reasoning }));
+          supportsReasoningEffort:
+            (route.provider === 'openrouter' || route.provider === 'nvidia' || route.provider === 'groq') &&
+            route.reasoning,
+        }));
     }
     if (
       normalized !== 'cloud-auto' &&
@@ -307,7 +315,7 @@ export function getFallbackModelCandidates(
     ) {
       const overrideRoute = model.routes?.[0] ?? {
         provider: model.provider,
-        modelId: model.id,
+        modelId: model.upstreamModelId ?? model.id,
         contextWindow: model.contextWindow,
         tools: true,
         images: model.provider === 'gemini',
@@ -335,9 +343,27 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
     await runTransport(req);
     return;
   }
-  const current = route && evidenceFor(route)?.canonicalId === req.model.id
-    ? await currentVerifiedRoute(route, keys, req.fetchFn ?? fetch, req.signal).catch(() => undefined)
-    : undefined;
+  let current: Awaited<ReturnType<typeof currentVerifiedRoute>>;
+  if (route && evidenceFor(route)?.canonicalId === req.model.id) {
+    try {
+      current = await currentVerifiedRoute(route, keys, req.fetchFn ?? fetch, req.signal);
+    } catch (err) {
+      if (req.signal?.aborted) throw err;
+      if (err instanceof ProviderCatalogError) {
+        if (err.status === 401 || err.status === 403) {
+          throw new ProviderAuthError(err.message, err.status);
+        }
+        if (err.status === 429) {
+          throw new RateLimitError(err.message);
+        }
+        throw new ModelUnavailableError(err.message, err.status, { cause: err });
+      }
+      if (err instanceof TypeError) {
+        throw new ModelUnavailableError(`${PROVIDER_INFO[req.model.provider].name} could not be reached.`, 503, { cause: err });
+      }
+      current = undefined;
+    }
+  }
   if (!current) throw new ModelUnavailableError('This model has no currently verified free route.', 503);
   const images = req.messages.some((message) => message.role === 'user'
     ? message.attachments?.some((attachment) => attachment.kind === 'image' && attachment.dataBase64)
@@ -345,9 +371,14 @@ export async function dispatchStreamCompletion(req: StreamCompletionRequest): Pr
   if (images && !current.images) throw new ModelUnavailableError('This free route does not support image input.', 503);
   await runTransport({
     ...req,
-    model: { ...req.model, routes: [current],
+    model: {
+      ...req.model,
+      routes: [current],
       supportsThinkingLevel: current.provider === 'gemini' && current.reasoning,
-      supportsReasoningEffort: current.provider === 'openrouter' && current.reasoning },
+      supportsReasoningEffort:
+        (current.provider === 'openrouter' || current.provider === 'nvidia' || current.provider === 'groq') &&
+        current.reasoning,
+    },
     tools: current.tools ? req.tools : [],
     onQuota: (headers) => {
       const value = headers.get('x-ratelimit-remaining-requests');
@@ -571,6 +602,7 @@ export async function validateAllConfiguredProviderKeys(
           seenIds.add(normalizeModelId(id));
           discoveredModels.push({
             id,
+            ...(row.id !== id ? { upstreamModelId: row.id } : {}),
             provider,
             label: row.displayName || row.name || formatReadableModelSlug(id),
             description: `${PROVIDER_INFO[provider].name} catalog model`,

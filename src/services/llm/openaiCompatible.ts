@@ -30,6 +30,105 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function isUnavailableStatus(status: number): boolean {
+  return (
+    status === 402 ||
+    status === 404 ||
+    status === 408 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    (status >= 520 && status <= 529)
+  );
+}
+
+function suffixPrefixLength(lowerText: string, tag: string): number {
+  const maxCheck = Math.min(lowerText.length, tag.length - 1);
+  for (let len = maxCheck; len >= 1; len--) {
+    if (tag.startsWith(lowerText.slice(-len))) {
+      return len;
+    }
+  }
+  return 0;
+}
+
+export function createThinkTagParser(
+  onReasoning: (delta: string) => void,
+  onText: (delta: string) => void
+) {
+  const OPEN_TAG = '<think>';
+  const CLOSE_TAG = '</think>';
+  let inThink = false;
+  let buffer = '';
+  let trimLeadingNewlines = false;
+
+  const emitText = (chunk: string) => {
+    let text = chunk;
+    if (trimLeadingNewlines) {
+      text = text.replace(/^[\r\n]+/, '');
+      if (!text) return;
+      trimLeadingNewlines = false;
+    }
+    if (text) onText(text);
+  };
+
+  const push = (chunk: string) => {
+    if (!chunk) return;
+    buffer += chunk;
+    while (buffer.length > 0) {
+      const lower = buffer.toLowerCase();
+      if (inThink) {
+        const closeIdx = lower.indexOf(CLOSE_TAG);
+        if (closeIdx !== -1) {
+          const thought = buffer.slice(0, closeIdx);
+          if (thought) onReasoning(thought);
+          buffer = buffer.slice(closeIdx + CLOSE_TAG.length);
+          inThink = false;
+          trimLeadingNewlines = true;
+          continue;
+        }
+        const hold = suffixPrefixLength(lower, CLOSE_TAG);
+        const safeLen = buffer.length - hold;
+        if (safeLen > 0) {
+          onReasoning(buffer.slice(0, safeLen));
+          buffer = buffer.slice(safeLen);
+        }
+        break;
+      } else {
+        const openIdx = lower.indexOf(OPEN_TAG);
+        if (openIdx !== -1) {
+          const text = buffer.slice(0, openIdx);
+          if (text) emitText(text);
+          buffer = buffer.slice(openIdx + OPEN_TAG.length);
+          inThink = true;
+          continue;
+        }
+        const hold = suffixPrefixLength(lower, OPEN_TAG);
+        const safeLen = buffer.length - hold;
+        if (safeLen > 0) {
+          emitText(buffer.slice(0, safeLen));
+          buffer = buffer.slice(safeLen);
+        }
+        break;
+      }
+    }
+  };
+
+  const flush = () => {
+    if (!buffer) return;
+    const remainder = buffer;
+    buffer = '';
+    if (inThink) {
+      onReasoning(remainder);
+    } else {
+      emitText(remainder);
+    }
+  };
+
+  return { push, flush };
+}
+
 export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequest): Promise<void> {
   const { model, apiKey, systemPrompt, effort, messages, tools, signal, onEvent, fetchFn = fetch } = req;
   if (!apiKey && model.provider !== 'kilo') {
@@ -124,7 +223,10 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     }
   }
 
-  const upstreamModelId = model.provider === 'local' ? model.id.replace(/^local:/, '') : route?.modelId ?? model.id;
+  const upstreamModelId =
+    model.provider === 'local'
+      ? model.id.replace(/^local:/, '')
+      : route?.modelId ?? model.upstreamModelId ?? model.id;
   const allowReasoningFields = !isProbe && model.supportsReasoningEffort !== false;
   const nvidiaOptions =
     allowReasoningFields && model.provider === 'nvidia'
@@ -137,7 +239,12 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   };
 
   if (route?.maxOutput) body.max_tokens = Math.min(route.maxOutput, 24576);
-  if (!isProbe && model.supportsReasoningEffort === true && model.provider !== 'openrouter') {
+  if (
+    !isProbe &&
+    model.supportsReasoningEffort === true &&
+    model.provider !== 'openrouter' &&
+    model.provider !== 'nvidia'
+  ) {
     body.reasoning_effort = effort;
   }
   if (nvidiaOptions) Object.assign(body, nvidiaOptions);
@@ -174,7 +281,11 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   }
 
   let res: Response | null = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let usedTransientRetry = false;
+  let strippedReasoning = false;
+  let strippedMaxTokens = false;
+  let strippedToolChoice = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       res = await fetchFn(targetUrl, {
         method: 'POST',
@@ -192,33 +303,54 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
         if (req.manualOverride) headers['X-MCPHub-Manual-Override'] = '1';
         continue;
       }
-      if (attempt === 0) {
+      if (!usedTransientRetry) {
+        usedTransientRetry = true;
         await sleep(650, signal);
         continue;
       }
       throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} could not be reached.`, 503, { cause: error });
     }
-    if (res.status === 503 && attempt === 0) {
+    if (!usedTransientRetry && (res.status === 408 || res.status === 502 || res.status === 503 || res.status === 504)) {
+      usedTransientRetry = true;
       await sleep(650, signal);
       continue;
     }
-    if (
-      res.status === 400 &&
-      attempt === 0 &&
-      ('reasoning_effort' in body || 'chat_template_kwargs' in body || 'reasoning' in body)
-    ) {
+    if (res.status === 400 || res.status === 422) {
       const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
       if (
-        errPreview.includes('reasoning') ||
-        errPreview.includes('chat_template_kwargs') ||
-        errPreview.includes('unknown') ||
-        errPreview.includes('extra_forbidden') ||
-        errPreview.includes('unrecognized') ||
-        errPreview.includes('unsupported')
+        !strippedReasoning &&
+        ('reasoning_effort' in body || 'chat_template_kwargs' in body || 'reasoning' in body) &&
+        (errPreview.includes('reasoning') ||
+          errPreview.includes('chat_template_kwargs') ||
+          errPreview.includes('clear_thinking') ||
+          errPreview.includes('unknown') ||
+          errPreview.includes('extra_forbidden') ||
+          errPreview.includes('unrecognized') ||
+          errPreview.includes('unsupported') ||
+          errPreview.includes('not permitted'))
       ) {
+        strippedReasoning = true;
         delete body.reasoning_effort;
         delete body.chat_template_kwargs;
         delete body.reasoning;
+        continue;
+      }
+      if (
+        !strippedMaxTokens &&
+        'max_tokens' in body &&
+        (errPreview.includes('max_tokens') ||
+          errPreview.includes('max_completion_tokens') ||
+          errPreview.includes('range') ||
+          errPreview.includes('exceeds') ||
+          errPreview.includes('less than'))
+      ) {
+        strippedMaxTokens = true;
+        delete body.max_tokens;
+        continue;
+      }
+      if (!strippedToolChoice && 'tool_choice' in body && errPreview.includes('tool_choice')) {
+        strippedToolChoice = true;
+        delete body.tool_choice;
         continue;
       }
     }
@@ -240,14 +372,14 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
   }
-  if (res.status === 400) {
+  if (res.status === 400 || res.status === 422) {
     const errText = extractReadableApiError(await res.text());
     throw new ModelUnavailableError(
-      `${PROVIDER_INFO[model.provider].name} rejected request parameter (400): ${redactSecrets(errText, [apiKey])}`,
-      400
+      `${PROVIDER_INFO[model.provider].name} rejected request parameter (${res.status}): ${redactSecrets(errText, [apiKey])}`,
+      res.status
     );
   }
-  if (res.status === 402 || res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+  if (isUnavailableStatus(res.status)) {
     const errText = extractReadableApiError(await res.text());
     throw new ModelUnavailableError(
       `${model.label} unavailable (${res.status}): ${redactSecrets(errText, [apiKey])}`,
@@ -258,11 +390,114 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     const errText = extractReadableApiError(await res.text());
     throw new Error(`${PROVIDER_INFO[model.provider].name} API error (${res.status}): ${redactSecrets(errText, [apiKey])}`);
   }
+
+  let emittedText = false;
+  const thinkParser = createThinkTagParser(
+    (delta) => onEvent({ type: 'reasoning_delta', delta }),
+    (delta) => {
+      emittedText = true;
+      onEvent({ type: 'text_delta', delta });
+    }
+  );
+
+  const mapRawError = (errObj: { message?: string; code?: number | string; status?: number }): Error => {
+    const code = Number(errObj.code ?? errObj.status ?? 0);
+    const msg = redactSecrets(errObj.message ?? 'Upstream streaming error', [apiKey]);
+    if (code === 429) {
+      return new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
+    }
+    if (code === 401 || code === 403) {
+      return new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
+    }
+    if (isUnavailableStatus(code) || code === 400 || code === 422) {
+      return new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
+    }
+    return new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
+  };
+
+  const contentType = res.headers.get('content-type')?.toLowerCase() ?? '';
+  if (contentType.includes('application/json')) {
+    const rawJson = await res.text();
+    let payload: {
+      error?: { message?: string; code?: number | string; status?: number };
+      choices?: Array<{
+        finish_reason?: string;
+        message?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+          reasoning?: string | null;
+          tool_calls?: Array<{
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+        delta?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+          reasoning?: string | null;
+        };
+      }>;
+    };
+    try {
+      payload = JSON.parse(rawJson) as typeof payload;
+    } catch {
+      throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} returned malformed JSON.`, 502);
+    }
+    if (payload.error) {
+      throw mapRawError(payload.error);
+    }
+    const choice = payload.choices?.[0];
+    const message = choice?.message ?? choice?.delta ?? {};
+    const reasoning = message.reasoning_content ?? message.reasoning;
+    if (reasoning) {
+      onEvent({ type: 'reasoning_delta', delta: reasoning });
+    }
+    if (message.content) {
+      thinkParser.push(message.content);
+    }
+    thinkParser.flush();
+    const rawCalls = choice && 'message' in choice ? choice.message?.tool_calls : undefined;
+    let hasToolCalls = false;
+    if ((model.provider !== 'local' || req.allowLocalTools) && Array.isArray(rawCalls) && rawCalls.length > 0) {
+      hasToolCalls = true;
+      const calls: LlmToolCall[] = rawCalls.map((tc, i) => {
+        const trimmedArgs = (tc.function?.arguments ?? '').trim();
+        let parsedArguments: Record<string, unknown> | undefined;
+        let parseError: string | undefined;
+        try {
+          parsedArguments = trimmedArgs ? (JSON.parse(trimmedArgs) as Record<string, unknown>) : {};
+        } catch (e) {
+          parseError = e instanceof Error ? e.message : 'Malformed JSON tool arguments';
+        }
+        return {
+          id: tc.id || `call_${Date.now()}_${i}`,
+          name: (tc.function?.name ?? '').trim(),
+          rawArguments: trimmedArgs,
+          parsedArguments,
+          parseError,
+        };
+      });
+      onEvent({ type: 'tool_calls', calls });
+    }
+    if (choice?.finish_reason === 'error') {
+      throw new Error(`${PROVIDER_INFO[model.provider].name} stopped generating. Any received source is kept below.`);
+    }
+    if (choice?.finish_reason === 'length') {
+      throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
+    }
+    if (choice?.finish_reason === 'content_filter' && !emittedText && !hasToolCalls) {
+      throw new Error(`${PROVIDER_INFO[model.provider].name} blocked the response due to a content filter.`);
+    }
+    onEvent({ type: 'done' });
+    return;
+  }
+
   if (!res.body) {
     throw new Error(`${PROVIDER_INFO[model.provider].name} returned an empty stream.`);
   }
 
-  const toolAcc = new Map<number, { id: string; name: string; rawArgs: string }>();
+  const toolSlots: Array<{ id: string; explicitId?: string; name: string; rawArgs: string }> = [];
+  const indexToSlot = new Map<number, number>();
 
   let finished = false;
   const readable = streamSseData(res.body, () => { finished = true; });
@@ -291,18 +526,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       }
 
       if (chunk.error) {
-        const code = Number(chunk.error.code ?? chunk.error.status ?? 0);
-        const msg = redactSecrets(chunk.error.message ?? 'Upstream streaming error', [apiKey]);
-        if (code === 429) {
-          throw new RateLimitError(`${PROVIDER_INFO[model.provider].name} rate limit (429): ${msg}`);
-        }
-        if (code === 401 || code === 403) {
-          throw new ProviderAuthError(`${PROVIDER_INFO[model.provider].name} auth failed (${code}): ${msg}`, code);
-        }
-        if (code === 404 || code === 502 || code === 503 || code === 504) {
-          throw new ModelUnavailableError(`${model.label} unavailable (${code}): ${msg}`, code);
-        }
-        throw new Error(`${PROVIDER_INFO[model.provider].name} stream error: ${msg}`);
+        throw mapRawError(chunk.error);
       }
 
       const choice = chunk.choices?.[0];
@@ -313,28 +537,51 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
         onEvent({ type: 'reasoning_delta', delta: reasoning });
       }
       if (delta.content) {
-        onEvent({ type: 'text_delta', delta: delta.content });
+        thinkParser.push(delta.content);
       }
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
           const idx = tc.index ?? 0;
-          const prev = toolAcc.get(idx) ?? {
-            id: tc.id ?? `call_${Date.now()}_${idx}`,
-            name: '',
-            rawArgs: '',
-          };
-          if (tc.id) prev.id = tc.id;
-          if (tc.function?.name) prev.name += tc.function.name;
-          if (tc.function?.arguments) prev.rawArgs += tc.function.arguments;
-          toolAcc.set(idx, prev);
+          let slotIdx = indexToSlot.get(idx);
+          if (slotIdx !== undefined) {
+            const currentSlot = toolSlots[slotIdx];
+            if (tc.id && currentSlot.explicitId && tc.id !== currentSlot.explicitId && currentSlot.name.length > 0) {
+              slotIdx = undefined;
+            }
+          }
+          if (slotIdx === undefined) {
+            slotIdx = toolSlots.length;
+            toolSlots.push({
+              id: tc.id || `call_${Date.now()}_${slotIdx}`,
+              explicitId: tc.id || undefined,
+              name: '',
+              rawArgs: '',
+            });
+            indexToSlot.set(idx, slotIdx);
+          }
+          const slot = toolSlots[slotIdx];
+          if (tc.id && !slot.explicitId) {
+            slot.id = tc.id;
+            slot.explicitId = tc.id;
+          }
+          if (tc.function?.name) slot.name += tc.function.name;
+          if (typeof tc.function?.arguments === 'string') slot.rawArgs += tc.function.arguments;
         }
       }
       if (choice?.finish_reason) finished = true;
       if (choice?.finish_reason === 'error') {
+        thinkParser.flush();
         throw new Error(`${PROVIDER_INFO[model.provider].name} stopped generating. Any received source is kept below.`);
       }
       if (choice?.finish_reason === 'length') {
+        thinkParser.flush();
         throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
+      }
+      if (choice?.finish_reason === 'content_filter') {
+        thinkParser.flush();
+        if (!emittedText && toolSlots.length === 0) {
+          throw new Error(`${PROVIDER_INFO[model.provider].name} blocked the response due to a content filter.`);
+        }
       }
     }
   } catch (error) {
@@ -343,29 +590,29 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     }
     throw error;
   }
+  thinkParser.flush();
   if (model.provider !== 'local' && !finished) {
     throw new ModelUnavailableError(`${PROVIDER_INFO[model.provider].name} ended the response before completion. Any received source is kept.`);
   }
 
-  if ((model.provider !== 'local' || req.allowLocalTools) && toolAcc.size > 0) {
-    const calls: LlmToolCall[] = Array.from(toolAcc.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([, v]) => {
-        let parsedArguments: Record<string, unknown> | undefined;
-        let parseError: string | undefined;
-        try {
-          parsedArguments = v.rawArgs ? (JSON.parse(v.rawArgs) as Record<string, unknown>) : {};
-        } catch (e) {
-          parseError = e instanceof Error ? e.message : 'Malformed JSON tool arguments';
-        }
-        return {
-          id: v.id,
-          name: v.name,
-          rawArguments: v.rawArgs,
-          parsedArguments,
-          parseError,
-        };
-      });
+  if ((model.provider !== 'local' || req.allowLocalTools) && toolSlots.length > 0) {
+    const calls: LlmToolCall[] = toolSlots.map((v) => {
+      const trimmedArgs = v.rawArgs.trim();
+      let parsedArguments: Record<string, unknown> | undefined;
+      let parseError: string | undefined;
+      try {
+        parsedArguments = trimmedArgs ? (JSON.parse(trimmedArgs) as Record<string, unknown>) : {};
+      } catch (e) {
+        parseError = e instanceof Error ? e.message : 'Malformed JSON tool arguments';
+      }
+      return {
+        id: v.id,
+        name: v.name.trim(),
+        rawArguments: trimmedArgs,
+        parsedArguments,
+        parseError,
+      };
+    });
     onEvent({ type: 'tool_calls', calls });
   }
   onEvent({ type: 'done' });

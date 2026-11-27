@@ -1002,11 +1002,28 @@ export const useHubStore = create<HubState>((set, get) => {
             const freshDiscovered = discoveredModels.filter(
               (m) => !existingIds.has(normalizeModelId(m.id))
             );
+            const mergedDynamic = freshDiscovered.length
+              ? [...s.dynamicModels, ...freshDiscovered]
+              : s.dynamicModels;
+            const validProviders = new Set(
+              Object.entries(validation)
+                .filter(([, v]) => v?.status === 'valid')
+                .map(([p]) => p)
+            );
+            let nextFailures = s.modelFailures;
+            if (validProviders.size > 0 && Object.keys(s.modelFailures).length > 0) {
+              nextFailures = { ...s.modelFailures };
+              for (const failKey of Object.keys(nextFailures)) {
+                const matched = getModelById(failKey, mergedDynamic);
+                if (matched && validProviders.has(matched.provider)) {
+                  delete nextFailures[failKey];
+                }
+              }
+            }
             return {
               providerValidation: validation,
-              dynamicModels: freshDiscovered.length
-                ? [...s.dynamicModels, ...freshDiscovered]
-                : s.dynamicModels,
+              dynamicModels: mergedDynamic,
+              modelFailures: nextFailures,
             };
           });
           persist();
@@ -2122,11 +2139,10 @@ export const useHubStore = create<HubState>((set, get) => {
                 ...item,
                 status: 'error',
                 durationMs: Date.now() - started,
-                error: safeErrorMessage(err, [
-                  state.providerKeys.gemini ?? '',
-                  state.providerKeys.groq ?? '',
-                  state.providerKeys.openrouter ?? '',
-                ]),
+                error: safeErrorMessage(
+                  err,
+                  Object.values(state.providerKeys).filter((k): k is string => Boolean(k))
+                ),
               };
               options?.onModelUpdate?.(targetModelId, failed);
               return failed;
@@ -2470,6 +2486,13 @@ export const useHubStore = create<HubState>((set, get) => {
           thinkingDurationMs ??
           (thinkingStartMs !== null ? Math.max(100, Date.now() - thinkingStartMs) : undefined);
 
+        const emptyReplyError =
+          !result.finalText && !result.stoppedByUser && result.toolCalls.length === 0
+            ? result.finalReasoning
+              ? 'The model completed reasoning without emitting a final answer. Try lowering effort to Low or retry.'
+              : 'The model returned an empty response. Try again or switch models.'
+            : undefined;
+
         const finalConv = patchConv((c) => ({
           ...c,
           updatedAt: Date.now(),
@@ -2480,6 +2503,7 @@ export const useHubStore = create<HubState>((set, get) => {
                   content: result.finalText || (result.stoppedByUser ? '_Generation stopped._' : ''),
                   reasoning: result.finalReasoning,
                   ...(finalDuration !== undefined ? { thinkingDurationMs: finalDuration } : {}),
+                  ...(emptyReplyError ? { error: emptyReplyError } : {}),
                   toolCalls: result.toolCalls,
                   citations: result.citations,
                   modelId: result.usedModelId,

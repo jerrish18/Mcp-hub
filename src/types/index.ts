@@ -56,6 +56,7 @@ export interface ModelRoute {
 
 export interface ModelConfig {
   id: string;
+  upstreamModelId?: string;
   provider: ProviderId;
   label: string;
   description: string;

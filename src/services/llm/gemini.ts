@@ -235,7 +235,10 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   const isBrowser = typeof window !== 'undefined' && /^https?:$/.test(window.location?.protocol) && fetchFn === fetch;
 
   let res: Response | null = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let usedTransientRetry = false;
+  let strippedThinking = false;
+  let strippedSearchTool = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       res = await fetchFn(endpoint, {
         method: 'POST',
@@ -256,16 +259,49 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
         endpoint = '/api/free-ai/gemini/chat/completions';
         continue;
       }
+      if (!signal?.aborted && err instanceof TypeError) {
+        if (!usedTransientRetry) {
+          usedTransientRetry = true;
+          await sleep(650, signal);
+          continue;
+        }
+        throw new ModelUnavailableError('Gemini could not be reached.', 503, { cause: err });
+      }
       throw err;
     }
-    if (res.status === 503 && attempt === 0) {
+    if (!usedTransientRetry && (res.status === 408 || res.status === 502 || res.status === 503 || res.status === 504)) {
+      usedTransientRetry = true;
       await sleep(650, signal);
       continue;
     }
-    if (res.status === 400 && attempt === 0 && 'thinkingConfig' in generationConfig) {
+    if (res.status === 400 || res.status === 422) {
       const errPreview = (await res.clone().text().catch(() => '')).toLowerCase();
-      if (errPreview.includes('thinking') || errPreview.includes('unknown')) {
+      if (
+        !strippedThinking &&
+        'thinkingConfig' in generationConfig &&
+        (errPreview.includes('thinking') || errPreview.includes('unknown'))
+      ) {
+        strippedThinking = true;
         delete generationConfig.thinkingConfig;
+        continue;
+      }
+      if (
+        !strippedSearchTool &&
+        knowledgeSource === 'web' &&
+        (errPreview.includes('googlesearch') ||
+          errPreview.includes('google_search') ||
+          errPreview.includes('toolconfig') ||
+          errPreview.includes('includeserversidetoolinvocations') ||
+          errPreview.includes('search'))
+      ) {
+        strippedSearchTool = true;
+        const fnOnly = geminiTools.filter((entry) => !('googleSearch' in entry));
+        if (fnOnly.length > 0) {
+          body.tools = fnOnly;
+        } else {
+          delete body.tools;
+        }
+        delete body.toolConfig;
         continue;
       }
     }
@@ -284,14 +320,22 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     const errText = extractReadableApiError(await res.text());
     throw new ProviderAuthError(`Gemini auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
   }
-  if (res.status === 400) {
+  if (res.status === 400 || res.status === 422) {
     const errText = extractReadableApiError(await res.text());
     if (errText.toLowerCase().includes('api key not valid') || errText.toLowerCase().includes('api_key_invalid')) {
-      throw new ProviderAuthError(`Gemini auth failed (400): ${redactSecrets(errText, [apiKey])}`, 401);
+      throw new ProviderAuthError(`Gemini auth failed (${res.status}): ${redactSecrets(errText, [apiKey])}`, 401);
     }
-    throw new ModelUnavailableError(`Gemini rejected request parameter (400): ${redactSecrets(errText, [apiKey])}`, 400);
+    throw new ModelUnavailableError(`Gemini rejected request parameter (${res.status}): ${redactSecrets(errText, [apiKey])}`, res.status);
   }
-  if (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) {
+  if (
+    res.status === 404 ||
+    res.status === 408 ||
+    res.status === 500 ||
+    res.status === 502 ||
+    res.status === 503 ||
+    res.status === 504 ||
+    (res.status >= 520 && res.status <= 529)
+  ) {
     const errText = extractReadableApiError(await res.text());
     throw new ModelUnavailableError(
       `${model.label} unavailable (${res.status}): ${redactSecrets(errText, [apiKey])}`,
@@ -310,8 +354,10 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
   const collectedCalls: LlmToolCall[] = [];
   const collectedCitations = new Map<string, GroundingCitation>();
   let pendingThoughtSignature: string | undefined;
+  let emittedText = false;
 
-  for await (const raw of streamSseData(res.body)) {
+  try {
+    for await (const raw of streamSseData(res.body)) {
     let chunk: {
       error?: { message?: string; code?: number; status?: string };
       candidates?: Array<{
@@ -360,6 +406,7 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
       if (part.thought && part.text) {
         onEvent({ type: 'reasoning_delta', delta: part.text });
       } else if (part.text) {
+        emittedText = true;
         onEvent({ type: 'text_delta', delta: part.text });
       }
       if (partSig && !part.functionCall) {
@@ -396,6 +443,21 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
     if (candidate?.finishReason === 'MAX_TOKENS') {
       throw new Error('The model reached its output limit. Try a model with a larger output limit or generate the project in smaller parts.');
     }
+    if (
+      (candidate?.finishReason === 'SAFETY' ||
+        candidate?.finishReason === 'RECITATION' ||
+        candidate?.finishReason === 'BLOCKLIST') &&
+      !emittedText &&
+      collectedCalls.length === 0
+    ) {
+      throw new Error(`Gemini blocked the response (${candidate.finishReason.toLowerCase()}).`);
+    }
+    }
+  } catch (err) {
+    if (!signal?.aborted && err instanceof TypeError) {
+      throw new ModelUnavailableError('Gemini disconnected while generating the reply. Any received source is kept.', 503, { cause: err });
+    }
+    throw err;
   }
 
   if (collectedCitations.size > 0) {
