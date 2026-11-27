@@ -6,7 +6,6 @@ import type {
   ModelConfig,
   ProviderKeys,
 } from '../../types';
-import { selectDefaultRoleModels } from '../../config/models';
 import { compactConversationHistory, runAgentLoop } from './agentLoop';
 import {
   createInitialCodingSession,
@@ -15,7 +14,7 @@ import {
   runCodingExecutionPhase,
   runCodingPlanPhase,
 } from './codingOrchestrator';
-import { getOrchestratorModels } from './provider';
+import { getFallbackModelCandidates, getOrchestratorModels, getUnavailableCatalogModelsWithDetails, syncLiveProviderModels } from './provider';
 import type { LlmConversationItem } from './types';
 
 const TEST_AGENT: AgentProfile = {
@@ -106,6 +105,9 @@ test('parseCodingPlanFromText extracts fenced CodingPlan JSON and respects autoR
 
   const auto = parseCodingPlanFromText(raw, 'Build a Kanban board', true, {});
   assert.equal(auto.phase, 'executing');
+  const invalid = parseCodingPlanFromText('partial response', 'Build a Kanban board', true, {});
+  assert.equal(invalid.phase, 'awaiting_approval');
+  assert.equal(invalid.autoRun, false);
 });
 
 test('Spec -> Build -> Verify pipeline executes cleanly in sandbox and self-heals broken workspace files', async () => {
@@ -370,9 +372,9 @@ test('compactConversationHistory compacts above 75% budget while pinning active 
   assert.ok(summaryMsg.text.includes('app.js'));
 });
 
-test('getOrchestratorModels surfaces all API-key-linked models across providers even with expired routes, while filtering invalid keys and non-chat models', () => {
+test('linked unverified and expired models are discoverable but never automatically runnable', () => {
   const expiredAt = Date.now() - 60_000;
-  const linkedModels = getOrchestratorModels({
+  const catalog = {
     keys: {
       gemini: 'AIzaTestKey',
       groq: 'gsk_test',
@@ -449,37 +451,49 @@ test('getOrchestratorModels surfaces all API-key-linked models across providers 
         modelsFound: 0,
       },
     },
-  });
+  } satisfies Parameters<typeof getOrchestratorModels>[0];
 
-  const ids = new Set(linkedModels.map((m) => m.id));
-  assert.ok(ids.has('minimax/minimax-m3.1-flash'));
-  assert.ok(ids.has('moonshotai/kimi-k3.1-pro'));
-  assert.ok(ids.has('deepseek-ai/deepseek-v4.1-flash-1017'));
-  assert.ok(ids.has('qwen/qwen3.5-35b-a3b'));
-  assert.ok(ids.has('gemini-2.5-flash'));
-  assert.ok(ids.has('gemini-4-hydrogen'));
-  assert.ok(ids.has('openai/gpt-oss-120b'));
-  assert.ok(ids.has('custom/my-nvidia-coder'));
-  assert.ok(ids.has('demo-sandbox'));
-  assert.equal(ids.has('text-embedding-004'), false);
-  assert.equal(ids.has('qwen/qwen3.7-plus:free'), false);
+  const available = getOrchestratorModels(catalog);
+  assert.deepEqual(available.map((model) => model.id), ['demo-sandbox']);
+  const unavailable = getUnavailableCatalogModelsWithDetails(
+    available, catalog.keys, catalog.dynamicModels, catalog.providerValidation
+  );
+  const unavailableIds = unavailable.map((entry) => entry.model.id);
+  assert.ok(unavailableIds.includes('minimax/minimax-m3.1-flash'));
+  assert.ok(unavailableIds.includes('gemini-2.5-flash'));
+  assert.ok(unavailableIds.includes('custom/my-nvidia-coder'));
+  assert.ok(!unavailableIds.includes('text-embedding-004'));
 
-  const minimax = linkedModels.find((m) => m.id === 'minimax/minimax-m3.1-flash');
-  assert.equal(minimax?.upstreamModelId, 'minimaxai/minimax-m3.1-flash');
-  const deepseek = linkedModels.find((m) => m.id === 'deepseek-ai/deepseek-v4.1-flash-1017');
-  assert.equal(deepseek?.upstreamModelId, 'deepseek-ai/DeepSeek-V4.1-Flash-1017');
-
-  const defaults = selectDefaultRoleModels(linkedModels, 'cloud-auto');
-  assert.notEqual(defaults.architect, 'demo-sandbox');
-  assert.notEqual(defaults.coder, 'demo-sandbox');
+  const manualModelOverrides = ['custom/my-nvidia-coder'];
+  const explicitlyEnabled = getOrchestratorModels({ ...catalog, manualModelOverrides });
+  assert.ok(explicitlyEnabled.some((model) => model.id === manualModelOverrides[0]));
+  const automatic = resolveCodingRoleModel('coder', undefined, explicitlyEnabled, 'cloud-auto');
+  assert.equal(automatic.model.id, 'demo-sandbox');
+  assert.deepEqual(automatic.fallbackChain, []);
+  assert.deepEqual(getFallbackModelCandidates('cloud-auto', catalog.keys, explicitlyEnabled, {
+    manualModelOverrides, fallbackModelIds: manualModelOverrides, autoFallback: true,
+  }), []);
+  assert.equal(getFallbackModelCandidates(manualModelOverrides[0], catalog.keys, explicitlyEnabled, {
+    manualModelOverrides,
+  })[0]?.upstreamModelId, manualModelOverrides[0]);
 });
 
-test('Code Orchestrator runs Architect and Coder with API-key-linked NVIDIA models, skips website artifact hijack, and falls back on 429', async () => {
+test('Code Orchestrator runs Architect and Coder with verified linked models, skips website artifact hijack, and falls back on 429', async () => {
   const requests: Array<{ model: string; system: string; hasTools: boolean }> = [];
   const fallbacks: Array<{ from: string; to: string }> = [];
   let coderAttempts = 0;
 
-  const mockFetch: typeof fetch = async (_url, init) => {
+  const mockFetch: typeof fetch = async (url, init) => {
+    if (!init?.method || init.method === 'GET') {
+      const hostname = new URL(String(url)).hostname;
+      if (hostname.includes('nvidia.com')) {
+        return Response.json({ data: [{ id: 'moonshotai/kimi-k3.1-pro' }, { id: 'minimaxai/minimax-m3.1-flash' }] });
+      }
+      if (hostname.includes('modelscope.')) {
+        return Response.json({ data: [{ id: 'deepseek-ai/DeepSeek-V4.1-Flash-1017', owned_by: 'system' }] });
+      }
+      return Response.json({ data: [] });
+    }
     const body = JSON.parse(String(init?.body ?? '{}')) as {
       model: string;
       messages: Array<{ role: string; content: string }>;
@@ -563,7 +577,19 @@ test('Code Orchestrator runs Architect and Coder with API-key-linked NVIDIA mode
     );
   };
 
-  const keys: ProviderKeys = { nvidia: 'nvapi-live-test-key' };
+  const keys: ProviderKeys = { nvidia: 'nvapi-live-test-key', modelscope: 'ms-fixture' };
+  const { models, validation } = await syncLiveProviderModels(keys, mockFetch);
+  const choices = getOrchestratorModels({ keys, dynamicModels: models, providerValidation: validation });
+  const cloudIds = choices.filter((m) => m.provider !== 'demo').map((model) => model.id).sort();
+  assert.deepEqual(cloudIds, [
+    'deepseek-ai/deepseek-v4.1-flash-1017', 'minimax/minimax-m3.1-flash', 'moonshotai/kimi-k3.1-pro'
+  ]);
+  const single: CodeOrchestrationSettings = { mode: 'single', roles: { architect: null, coder: null, reviewer: null }, autoRun: false };
+  const singleRoles = (['architect', 'coder', 'reviewer'] as const)
+    .map((role) => resolveCodingRoleModel(role, single, choices, 'cloud-auto'));
+  assert.equal(new Set(singleRoles.map((target) => target.model.id)).size, 1);
+  assert.ok(singleRoles.every((target) => target.fallbackChain.length === 0));
+
   const orchestration: CodeOrchestrationSettings = {
     mode: 'custom',
     roles: {
@@ -597,7 +623,8 @@ test('Code Orchestrator runs Architect and Coder with API-key-linked NVIDIA mode
     effort: 'medium',
     agent: TEST_AGENT,
     keys,
-    dynamicModels: [],
+    dynamicModels: models,
+    providerValidation: validation,
     manualModelOverrides: [],
     allowLocalTools: false,
     servers: [],
@@ -620,7 +647,8 @@ test('Code Orchestrator runs Architect and Coder with API-key-linked NVIDIA mode
     effort: 'medium',
     agent: TEST_AGENT,
     keys,
-    dynamicModels: [],
+    dynamicModels: models,
+    providerValidation: validation,
     manualModelOverrides: [],
     allowLocalTools: false,
     servers: [],
@@ -638,5 +666,35 @@ test('Code Orchestrator runs Architect and Coder with API-key-linked NVIDIA mode
   assert.equal(fallbacks.length, 1);
   assert.equal(fallbacks[0].from, 'minimax/minimax-m3.1-flash');
   assert.notEqual(fallbacks[0].to, 'minimax/minimax-m3.1-flash');
+
+  const abort = new AbortController();
+  let emittedPlans = 0;
+  await assert.rejects(runCodingPlanPhase({
+    prompt: 'Build a website',
+    session: createInitialCodingSession(),
+    orchestration,
+    activeModelId: 'cloud-auto',
+    effort: 'medium',
+    agent: TEST_AGENT,
+    keys,
+    dynamicModels: models,
+    manualModelOverrides: [],
+    allowLocalTools: false,
+    servers: [],
+    confirmBeforeWrite: true,
+    alwaysAllowedTools: [],
+    signal: abort.signal,
+    fetchFn: async (url, init) => {
+      if (!init?.method || init.method === 'GET') return mockFetch(url, init);
+      abort.abort();
+      throw new DOMException('Stopped', 'AbortError');
+    },
+    callbacks: {
+      ...callbacks,
+      onPlanUpdated: () => { emittedPlans += 1; },
+    },
+  }), { name: 'AbortError' });
+  assert.equal(emittedPlans, 0);
+
 });
 

@@ -56,6 +56,7 @@ import {
   Command,
 } from 'lucide-react';
 import { getModelById, getShortModelName } from '../../config/models';
+import { resolveCodingRoleModel } from '../../services/llm/codingOrchestrator';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
 import { getMcpPrompt, readMcpResource } from '../../services/mcp/client';
 import { getAvailableModels, getOrchestratorModels } from '../../services/llm/provider';
@@ -67,6 +68,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   ChatMode,
+  CodingRole,
   EffortLevel,
   KnowledgeSourceMode,
   McpPrompt,
@@ -251,9 +253,9 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     activeConversationId,
     providerKeys,
     providerValidation,
+    validatingKeys,
     modelFailures,
     dynamicModels,
-    validateProviderKeysNow,
     toggleManualModelOverride,
     syncModels,
     settings,
@@ -310,6 +312,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Separate sheets for Models vs Agents
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
+  const [roleSheet, setRoleSheet] = useState<CodingRole | null>(null);
   const [agentSheetOpen, setAgentSheetOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
@@ -421,9 +424,8 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         dynamicModels,
         manualModelOverrides: settings.manualModelOverrides ?? [],
         providerValidation,
-        modelFailures,
       }),
-    [dynamicModels, modelFailures, providerKeys, providerValidation, settings.manualModelOverrides]
+    [dynamicModels, providerKeys, providerValidation, settings.manualModelOverrides]
   );
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeModelShort = getShortModelName(activeModel);
@@ -1539,7 +1541,10 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               });
             }}
             onSetOrchestrationMode={setCodeOrchestrationMode}
-            onSetRoleAssignment={setCodeRoleAssignment}
+            onChooseRole={(role) => {
+              setRoleSheet(role);
+              void syncModels();
+            }}
             onToggleAutoRun={toggleCodeAutoRun}
           />
         )}
@@ -3030,23 +3035,29 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       />
 
       {/* Dedicated Model Switcher Sheet (Completely Separate from Agents) */}
-      <ModelSwitcherSheet
-        open={modelSheetOpen}
-        onClose={() => setModelSheetOpen(false)}
-        dynamicModels={dynamicModels}
-        activeModelId={activeModel.id}
-        providerKeys={providerKeys}
-        manualModelOverrides={settings.manualModelOverrides ?? []}
-        providerValidation={providerValidation}
-        modelFailures={modelFailures}
-        onToggleManualOverride={toggleManualModelOverride}
-        onSelectModel={setActiveModel}
-        onRefresh={async () => {
-          await validateProviderKeysNow();
-          return syncModels();
-        }}
-        onOpenSettings={onOpenSettings}
-      />
+      {(modelSheetOpen || roleSheet) && (
+        <ModelSwitcherSheet
+          key={roleSheet ?? 'chat'}
+          open
+          onClose={() => { setModelSheetOpen(false); setRoleSheet(null); }}
+          dynamicModels={dynamicModels}
+          activeModelId={roleSheet
+            ? resolveCodingRoleModel(roleSheet, codeOrchestration, orchestratorModels, activeModel.id).model.id
+            : activeModel.id}
+          providerKeys={providerKeys}
+          manualModelOverrides={settings.manualModelOverrides ?? []}
+          providerValidation={providerValidation}
+          modelFailures={modelFailures}
+          codingRole={roleSheet ?? undefined}
+          roleIsAutomatic={Boolean(roleSheet && !codeOrchestration.roles[roleSheet])}
+          catalogRefreshing={validatingKeys}
+          onUseAutomatic={roleSheet ? () => setCodeRoleAssignment(roleSheet, null) : undefined}
+          onToggleManualOverride={roleSheet ? undefined : toggleManualModelOverride}
+          onSelectModel={roleSheet ? (modelId) => setCodeRoleAssignment(roleSheet, modelId) : setActiveModel}
+          onRefresh={syncModels}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
 
       {/* Dedicated Agent & Effort Switcher Sheet */}
       <AgentSwitcherSheet

@@ -567,7 +567,6 @@ export interface RunAgentLoopParams {
   codingContextPin?: CodingContextPin;
   codingRole?: CodingRole;
   fallbackModelIds?: string[];
-  allowKeyLinkedModels?: boolean;
   maxSilentRepairs?: number;
   history: LlmConversationItem[];
   maxSteps: number;
@@ -869,7 +868,6 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         keys,
         dynamicModels,
         manualModelOverrides,
-        allowKeyLinkedModels: params.allowKeyLinkedModels,
         allowLocalTools,
         toolsOptional: params.codingRole === 'architect',
         systemPrompt: effectiveSystemPrompt,
