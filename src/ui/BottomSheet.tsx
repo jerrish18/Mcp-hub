@@ -62,7 +62,7 @@ export function BottomSheet({ open, onClose, title, subtitle, children }: Bottom
                     {title}
                   </h2>
                   {subtitle && (
-                    <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 break-words mt-0.5">
                       {subtitle}
                     </p>
                   )}
@@ -71,14 +71,14 @@ export function BottomSheet({ open, onClose, title, subtitle, children }: Bottom
                   type="button"
                   onClick={onClose}
                   aria-label={`Close ${title}`}
-                  className="min-h-[44px] min-w-[44px] -mr-2 rounded-full flex items-center justify-center text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+                  className="min-h-[44px] min-w-[44px] shrink-0 -mr-2 rounded-full flex items-center justify-center text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5 pb-safe">{children}</div>
+            <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 sm:px-5 sm:py-5 pb-[max(1rem,env(safe-area-inset-bottom))]">{children}</div>
           </motion.div>
         </motion.div>
       )}

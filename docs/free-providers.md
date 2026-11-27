@@ -25,6 +25,12 @@ MCP Hub lists each verified model once. A canonical model can have multiple rout
 For ModelScope testing, add `MODELSCOPE_API_TOKEN` as an environment secret and use the [international access-token page](https://modelscope.ai/my/myaccesstoken). Link the ModelScope profile to an Alibaba Cloud account, verify the email on the ModelScope profile, and use its own free inference access. Model quotas and availability vary.
 
 
+## Older models and catalog refresh
+
+The model picker keeps older entries visible under **Unavailable models** when no verified no-charge route is available. This includes older Gemini, Groq, and OpenRouter entries. Cloud routing checks the provider again before inference. A transient catalog failure keeps only the unchanged account's still-current verified routes and triggers an early refresh. A successful catalog response removes withdrawn or priced routes immediately.
+
+Qwen 3.8 27B and Qwen 3.5 35B-A3B passed live ModelScope streaming, coding, reasoning, tool calls, and image input. The older Qwen 3.7 Plus ModelScope candidate returned HTTP 403. The GPT-OSS 120B and 20B and Llama 3.1 8B NVIDIA free endpoints are deprecated.
+
 ## Live verification
 
 | Route | Live result |

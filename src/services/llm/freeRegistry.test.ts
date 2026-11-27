@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeModelId } from '../../config/models';
 import { catalogRoute, readProviderCatalog } from './freeRegistry';
-import { dispatchStreamCompletion, getAvailableModels, streamWithRateLimitFallback, syncLiveProviderModels } from './provider';
+import { dispatchStreamCompletion, getAvailableModels, getUnavailableCatalogModels, preserveCatalogForSameCredentials, retainTransientCatalogRoutes, streamWithRateLimitFallback, syncLiveProviderModels } from './provider';
 import type { ModelConfig } from '../../types';
 
 const beam = {
@@ -127,4 +127,33 @@ test('AMD rejects a listed route when its model details conflict with a public f
   });
   assert.equal(rows.length, 1);
   assert.equal(catalogRoute('amd', rows[0]), undefined);
+});
+
+test('catalog refresh keeps previously checked routes only for temporary failures and unchanged keys', async () => {
+  const keys = { openrouter: 'fixture' };
+  const row = { ...beam, id: 'nvidia/nemotron-3-ultra-550b-a55b:free' };
+  const previous = await syncLiveProviderModels(keys, async () => Response.json({ data: [row] }));
+  const refresh = await syncLiveProviderModels(keys, async (url) =>
+    String(url).includes('kilo.ai') ? new Response('', { status: 429 })
+      : Response.json({ data: [row] }));
+  assert.deepEqual(refresh.transientProviders, ['kilo']);
+  const merged = retainTransientCatalogRoutes(refresh.models, previous.models, refresh.transientProviders, keys);
+  assert.deepEqual(merged[0].routes?.map((route) => route.provider).sort(), ['kilo', 'openrouter']);
+  const available = getAvailableModels({}, merged).find((model) => model.id === merged[0].id);
+  assert.equal(available?.provider, 'kilo');
+  assert.deepEqual(available?.routes?.map((route) => route.provider), ['kilo']);
+
+  const denied = await syncLiveProviderModels(keys, async () => new Response('', { status: 403 }));
+  assert.deepEqual(retainTransientCatalogRoutes(denied.models, previous.models, denied.transientProviders, keys), []);
+  const changed = preserveCatalogForSameCredentials(previous.models, keys, { openrouter: 'replacement' });
+  assert.deepEqual(changed[0].routes?.map((route) => route.provider), ['kilo']);
+});
+
+test('older model names remain discoverable without enabling an unverified route', () => {
+  const available = getAvailableModels({ gemini: 'saved', groq: 'saved' });
+  const older = getUnavailableCatalogModels(available);
+  assert.ok(older.some((model) => model.id === 'openai/gpt-oss-120b'));
+  assert.ok(older.some((model) => model.id === 'qwen/qwen3.7-plus:free'));
+  assert.ok(!older.some((model) => model.id === 'openrouter/free'));
+  assert.ok(!available.some((model) => model.id === 'openai/gpt-oss-120b'));
 });

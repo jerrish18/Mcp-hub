@@ -247,6 +247,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     activeConversationId,
     providerKeys,
     dynamicModels,
+    syncModels,
     settings,
     savedStudyNotes,
     savedPrompts,
@@ -2931,6 +2932,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         activeModelId={activeModel.id}
         providerKeys={providerKeys}
         onSelectModel={setActiveModel}
+        onRefresh={syncModels}
         onOpenSettings={onOpenSettings}
       />
 

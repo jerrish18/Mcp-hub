@@ -86,4 +86,16 @@ export const FREE_ROUTE_EVIDENCE: readonly FreeRouteEvidence[] = [
     images: true, tools: true, reasoning: true,
     results: 'Passed streaming, TypeScript, reasoning output, and a tool round trip plus image input on ModelScope direct free inference.',
   },
+  {
+    provider: 'modelscope', modelId: 'Qwen/Qwen3.8-27B', canonicalId: 'qwen/qwen3.8-27b',
+    testedAt: '2026-11-26T18:26:33.163Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output, tool round trip and image input on ModelScope free inference.',
+  },
+  {
+    provider: 'modelscope', modelId: 'Qwen/Qwen3.5-35B-A3B', canonicalId: 'qwen/qwen3.5-35b-a3b',
+    testedAt: '2026-11-26T18:27:02.123Z', codingScore: 1,
+    images: true, tools: true, reasoning: true,
+    results: 'Passed streaming, TypeScript, reasoning output, tool round trip and image input on ModelScope free inference.',
+  },
 ];
