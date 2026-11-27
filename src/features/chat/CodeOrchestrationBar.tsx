@@ -7,16 +7,14 @@ import {
   getShortModelName,
   normalizeModelId,
   PROVIDER_INFO,
-  scoreModelForCodingRole,
-  selectDefaultRoleModels,
 } from '../../config/models';
+import { resolveCodingRoleModel } from '../../services/llm/codingOrchestrator';
 import type {
   CodeOrchestrationMode,
   CodeOrchestrationSettings,
   CodingRole,
   CodingSessionState,
   ModelConfig,
-  ProviderId,
 } from '../../types';
 
 interface CodeOrchestrationBarProps {
@@ -27,23 +25,11 @@ interface CodeOrchestrationBarProps {
   workspaceOpen: boolean;
   onToggleWorkspace: () => void;
   onSetOrchestrationMode: (mode: CodeOrchestrationMode) => void;
-  onSetRoleAssignment: (role: CodingRole, modelId: string | null) => void;
+  onChooseRole: (role: CodingRole) => void;
   onToggleAutoRun: () => void;
 }
 
 const ROLES: CodingRole[] = ['architect', 'coder', 'reviewer'];
-const PROVIDER_ORDER: ProviderId[] = [
-  'gemini',
-  'groq',
-  'openrouter',
-  'cloudflare',
-  'nvidia',
-  'modelscope',
-  'amd',
-  'kilo',
-  'local',
-  'demo',
-];
 
 function formatTokensCompact(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens <= 0) return '0';
@@ -59,13 +45,12 @@ export function CodeOrchestrationBar({
   workspaceOpen,
   onToggleWorkspace,
   onSetOrchestrationMode,
-  onSetRoleAssignment,
+  onChooseRole,
   onToggleAutoRun,
 }: CodeOrchestrationBarProps) {
   const [rolesExpanded, setRolesExpanded] = useState(false);
 
   const usableModels = availableModels.filter((m) => m.id !== 'cloud-auto');
-  const defaults = selectDefaultRoleModels(availableModels, activeModelId);
   const isSingle = orchestration.mode === 'single';
 
   const stats = codingSession?.contextStats ?? {
@@ -258,61 +243,39 @@ export function CodeOrchestrationBar({
 
         {ROLES.map((role) => {
           const meta = CODING_ROLE_METADATA[role];
-          const normalizedActive = normalizeModelId(activeModelId);
-          const rawCandidate = isSingle
-            ? normalizedActive !== 'cloud-auto'
-              ? normalizedActive
-              : defaults[role]
-            : orchestration.roles[role] ?? defaults[role];
-          const normalizedCandidate = rawCandidate ? normalizeModelId(rawCandidate) : '';
-          const matchedOption =
-            usableModels.find((m) => normalizeModelId(m.id) === normalizedCandidate) ??
-            usableModels.find((m) => normalizeModelId(m.id) === normalizeModelId(defaults[role] ?? '')) ??
-            usableModels[0];
-          const selectedId = matchedOption?.id ?? 'demo-sandbox';
+          const { model } = resolveCodingRoleModel(role, orchestration, availableModels, activeModelId);
+          const assignment = orchestration.roles[role];
+          const assigned = assignment && normalizeModelId(assignment) === model.id;
 
           return (
-            <label
-              key={role}
-              title={meta.shortHint}
-              className="flex flex-col gap-0.5 min-w-0 text-[11px] text-slate-600 dark:text-slate-300"
-            >
-              <span className="px-0.5 font-semibold text-slate-700 dark:text-slate-200 truncate">
+            <div key={role} className="flex min-w-0 flex-col gap-0.5">
+              <span className="px-0.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200">
                 {meta.label}
               </span>
-              <select
-                aria-label={`${meta.label} model`}
+              <button
+                type="button"
+                aria-label={`${meta.label} model: ${getShortModelName(model)}`}
+                aria-haspopup="dialog"
                 data-testid={`role-select-${role}`}
                 disabled={isSingle}
-                value={selectedId}
-                onChange={(e) => onSetRoleAssignment(role, e.target.value)}
+                onClick={() => onChooseRole(role)}
                 style={{
                   backgroundColor: 'var(--m3-surface)',
                   borderColor: 'var(--m3-outline)',
                 }}
-                className="min-h-[44px] w-full px-2.5 rounded-xl border text-xs font-medium text-slate-900 dark:text-slate-100 disabled:opacity-60 truncate focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="flex min-h-[44px] w-full min-w-0 items-center justify-between gap-2 rounded-xl border px-2.5 py-1.5 text-left text-xs text-slate-900 dark:text-slate-100 disabled:opacity-70"
               >
-                {PROVIDER_ORDER.map((provider) => {
-                  const group = usableModels
-                    .filter((m) => m.provider === provider)
-                    .sort(
-                      (a, b) =>
-                        scoreModelForCodingRole(b, role) - scoreModelForCodingRole(a, role) ||
-                        a.label.localeCompare(b.label)
-                    );
-                  if (group.length === 0) return null;
-                  return (
-                    <optgroup key={provider} label={PROVIDER_INFO[provider].name}>
-                      {group.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {getShortModelName(m)} · {m.provider} · {formatContextWindowLabel(m.contextWindow)}
-                        </option>
-                      ))}
-                    </optgroup>
-                  );
-                })}
-              </select>
-            </label>
+                <span className="min-w-0 [overflow-wrap:anywhere]">
+                  <span className="block font-semibold">{getShortModelName(model)}</span>
+                  <span className="block text-[11px] text-slate-600 dark:text-slate-400">
+                    {!isSingle && !assigned && 'Auto · '}
+                    {PROVIDER_INFO[model.provider].name} · {formatContextWindowLabel(model.contextWindow)}
+                    {!isSingle && assignment && !assigned && ' · Assigned model unavailable'}
+                  </span>
+                </span>
+                {!isSingle && <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0" />}
+              </button>
+            </div>
           );
         })}
       </div>

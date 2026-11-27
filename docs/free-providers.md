@@ -29,6 +29,9 @@ For ModelScope testing, add `MODELSCOPE_API_TOKEN` as an environment secret and 
 
 The model picker keeps older entries visible under **Unavailable models** when no verified no-charge route is available. This includes older Gemini, Groq, and OpenRouter entries. Cloud routing checks the provider again before inference. A transient catalog failure keeps only the unchanged account's still-current verified routes and triggers an early refresh. A successful catalog response removes withdrawn or priced routes immediately.
 
+Code mode uses the same catalog for Architect, Coder, and Reviewer. A valid API key makes a provider's chat models discoverable. Selecting a model requires a verified free route or an explicit manual override from the Chat model picker. An override may incur charges and is excluded from automatic selection and fallback. Coder and Reviewer require tool calling.
+
+
 Qwen 3.8 27B and Qwen 3.5 35B-A3B passed live ModelScope streaming, coding, reasoning, tool calls, and image input. The older Qwen 3.7 Plus ModelScope candidate returned HTTP 403. The GPT-OSS 120B and 20B and Llama 3.1 8B NVIDIA free endpoints are deprecated.
 
 ## Live verification

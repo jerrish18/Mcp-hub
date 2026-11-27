@@ -30,7 +30,6 @@ import type {
   PendingApproval,
   ProjectProfile,
   ProviderKeys,
-  ProviderKeyStatus,
   ProviderValidationResult,
   RunTrace,
   ServerSecretPayload,
@@ -41,7 +40,7 @@ import type {
 } from '../../types';
 import { safeErrorMessage } from '../../utils/redact';
 import { runAgentLoop } from './agentLoop';
-import { getOrchestratorModels } from './provider';
+import { getOrchestratorModels, isAutomaticCodingModel } from './provider';
 import {
   buildWorkspaceArtifactAppJson,
   buildWorkspaceToolDefinitions,
@@ -57,6 +56,17 @@ export interface ResolvedRoleTarget {
   fallbackChain: string[];
 }
 
+export function supportsCodingRole(model: ModelConfig, role: CodingRole): boolean {
+  return role === 'architect' || !model.routes?.length || model.routes.some((route) => route.tools);
+}
+
+function codingRoleAssignment(
+  role: CodingRole, orchestration: CodeOrchestrationSettings | undefined, activeModelId: string
+) {
+  const assignment = orchestration?.mode === 'single' ? activeModelId : orchestration?.roles[role];
+  return assignment ? normalizeModelId(assignment) : null;
+}
+
 export function resolveCodingRoleModel(
   role: CodingRole,
   orchestration: CodeOrchestrationSettings | undefined,
@@ -64,39 +74,32 @@ export function resolveCodingRoleModel(
   activeModelId: string
 ): ResolvedRoleTarget {
   const mode = orchestration?.mode ?? 'custom';
-  const defaults = selectDefaultRoleModels(availableModels, activeModelId);
-  const usable = availableModels.filter((m) => normalizeModelId(m.id) !== 'cloud-auto');
-  const normalizedActive = normalizeModelId(activeModelId);
-
-  let chosenId: string | null | undefined;
-  if (mode === 'single') {
-    chosenId =
-      normalizedActive && normalizedActive !== 'cloud-auto'
-        ? normalizedActive
-        : defaults[role] ?? 'demo-sandbox';
-  } else {
-    chosenId = orchestration?.roles?.[role] ?? defaults[role] ?? normalizedActive;
-  }
-
-  const normalizedChosen = chosenId ? normalizeModelId(chosenId) : '';
-  const normalizedDefault = defaults[role] ? normalizeModelId(defaults[role]!) : '';
-
+  const usable = availableModels.filter((model) =>
+    normalizeModelId(model.id) !== 'cloud-auto' && supportsCodingRole(model, mode === 'single' ? 'coder' : role));
+  const automatic = usable.filter(isAutomaticCodingModel);
+  const defaults = selectDefaultRoleModels(automatic);
+  const assignment = codingRoleAssignment(role, orchestration, activeModelId);
+  const defaultId = mode === 'single' ? defaults.architect : defaults[role];
   const matched =
-    usable.find((m) => normalizeModelId(m.id) === normalizedChosen) ??
-    usable.find((m) => normalizeModelId(m.id) === normalizedDefault) ??
-    usable[0] ??
-    getModelById(normalizedChosen || 'demo-sandbox', availableModels);
+    (assignment ? usable.find((model) => normalizeModelId(model.id) === assignment) : undefined) ??
+    automatic.find((model) => model.id === defaultId) ??
+    getModelById('demo-sandbox', availableModels);
 
-  const fallbackChain = usable
-    .filter((m) => normalizeModelId(m.id) !== normalizeModelId(matched.id) && m.id !== 'demo-sandbox')
+  const fallbackChain = mode === 'single' ? [] : automatic
+    .filter((model) => model.id !== matched.id && model.provider !== 'local' && model.provider !== 'demo')
     .sort((a, b) => scoreModelForCodingRole(b, role) - scoreModelForCodingRole(a, role) || a.id.localeCompare(b.id))
-    .map((m) => m.id);
+    .map((model) => model.id);
 
   return {
     role,
     model: matched,
     fallbackChain,
   };
+}
+
+function completedProvider(trace: RunTrace, model: ModelConfig) {
+  return trace.steps?.filter((step) => step.kind === 'model_call')
+    .reverse().find((step) => step.status === 'ok')?.provider ?? model.provider;
 }
 
 function buildPlanSummaryForPin(plan: CodingPlan): string {
@@ -325,6 +328,8 @@ export function parseCodingPlanFromText(
   return {
     id: `plan_${now}`,
     ...baseDefaults,
+    phase: 'awaiting_approval',
+    autoRun: false,
     repairAttempts: 0,
     maxRepairAttempts: 3,
     verificationErrors: [],
@@ -404,7 +409,6 @@ export interface RunCodingPlanParams {
   dynamicModels: ModelConfig[];
   manualModelOverrides: string[];
   providerValidation?: Partial<Record<CloudProvider, ProviderValidationResult>>;
-  modelFailures?: Record<string, { status: ProviderKeyStatus; badge: string; detail: string }>;
   allowLocalTools: boolean;
   servers: McpServerConfig[];
   confirmBeforeWrite: boolean;
@@ -662,7 +666,6 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
     dynamicModels,
     manualModelOverrides,
     providerValidation,
-    modelFailures,
     allowLocalTools,
     servers,
     confirmBeforeWrite,
@@ -687,9 +690,9 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
     dynamicModels,
     manualModelOverrides,
     providerValidation,
-    modelFailures,
   });
   const architectTarget = resolveCodingRoleModel('architect', orchestration, availableModels, activeModelId);
+  if (signal?.aborted) throw new DOMException('Planning stopped', 'AbortError');
   const autoRun = Boolean(orchestration.autoRun);
   const workspaceReadTools = buildWorkspaceToolDefinitions().filter((t) => t.isReadOnly);
 
@@ -730,7 +733,8 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
       modelId: architectTarget.model.id,
     });
 
-    plan = parseCodingPlanFromText('', prompt, autoRun, vfs.getFilesSnapshot());
+    plan = { ...parseCodingPlanFromText('', prompt, false, vfs.getFilesSnapshot()),
+      autoRun, phase: autoRun ? 'executing' : 'awaiting_approval' };
     const estTokens = Math.ceil((prompt.length + JSON.stringify(plan).length) / 3.5);
     const ctxWin = architectTarget.model.contextWindow || 32_000;
     contextStats = {
@@ -775,8 +779,9 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
       a2uiMode: 'off',
       project,
       keys,
-      dynamicModels,
-      manualModelOverrides,
+      dynamicModels: availableModels,
+      manualModelOverrides: codingRoleAssignment('architect', orchestration, activeModelId) === architectTarget.model.id
+        ? manualModelOverrides : [],
       allowLocalTools,
       servers: servers.map((s) => ({
         ...s,
@@ -787,7 +792,6 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
       codingContextPin: { files: vfs.getFilesSnapshot() },
       codingRole: 'architect',
       fallbackModelIds: architectTarget.fallbackChain,
-      allowKeyLinkedModels: true,
       history,
       maxSteps: 6,
       confirmBeforeWrite,
@@ -817,6 +821,9 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
       },
     });
 
+    if (signal?.aborted || loopRes.stoppedByUser) {
+      throw new DOMException('Planning stopped', 'AbortError');
+    }
     plan = parseCodingPlanFromText(loopRes.finalText, prompt, autoRun, vfs.getFilesSnapshot());
     const usedModel = getModelById(loopRes.usedModelId, availableModels);
     plan.subagentTraces = [
@@ -825,7 +832,7 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
         phase: 'planning',
         role: 'architect',
         modelId: usedModel.id,
-        provider: usedModel.provider,
+        provider: completedProvider(loopRes.runTrace, usedModel),
         tokens: loopRes.runTrace.estimatedPromptTokens + Math.ceil(loopRes.finalText.length / 3.5),
         durationMs: Math.max(10, Date.now() - startedAt),
         ...(usedModel.id !== architectTarget.model.id ? { fallbackFrom: architectTarget.model.id } : {}),
@@ -837,7 +844,7 @@ export async function runCodingPlanPhase(params: RunCodingPlanParams): Promise<{
   callbacks.onPlanUpdated(plan);
   const nextSession = recordSessionState(plan);
 
-  const summaryText = autoRun
+  const summaryText = plan.autoRun
     ? `**Plan approved automatically (Auto-Run):** ${plan.summary}`
     : `**Architecture plan ready:** ${plan.summary}\n\nReview the requirements, file manifest, and tasks below, then tap **Approve & Build** to start execution.`;
   callbacks.onTextDelta(summaryText);
@@ -857,7 +864,6 @@ export async function runCodingExecutionPhase(params: {
   dynamicModels: ModelConfig[];
   manualModelOverrides: string[];
   providerValidation?: Partial<Record<CloudProvider, ProviderValidationResult>>;
-  modelFailures?: Record<string, { status: ProviderKeyStatus; badge: string; detail: string }>;
   allowLocalTools: boolean;
   servers: McpServerConfig[];
   confirmBeforeWrite: boolean;
@@ -885,7 +891,6 @@ export async function runCodingExecutionPhase(params: {
     dynamicModels,
     manualModelOverrides,
     providerValidation,
-    modelFailures,
     allowLocalTools,
     servers,
     confirmBeforeWrite,
@@ -910,7 +915,6 @@ export async function runCodingExecutionPhase(params: {
     dynamicModels,
     manualModelOverrides,
     providerValidation,
-    modelFailures,
   });
   const coderTarget = resolveCodingRoleModel('coder', orchestration, availableModels, activeModelId);
   const reviewerTarget = resolveCodingRoleModel('reviewer', orchestration, availableModels, activeModelId);
@@ -945,22 +949,23 @@ export async function runCodingExecutionPhase(params: {
     return nextSession;
   };
 
+  const stopExecution = () => {
+    workingPlan.phase = 'failed';
+    return {
+      plan: workingPlan,
+      session: syncLive(),
+      finalText: '_Execution stopped by user._',
+      stoppedByUser: true,
+    };
+  };
+
   // Snapshot before batch
   vfs.createCheckpoint(`Before "${workingPlan.prompt.slice(0, 36)}"`);
   syncLive();
 
   // Execute each task sequentially
   for (let i = 0; i < workingPlan.tasks.length; i++) {
-    if (signal.aborted) {
-      workingPlan.phase = 'failed';
-      const stoppedSession = syncLive();
-      return {
-        plan: workingPlan,
-        session: stoppedSession,
-        finalText: '_Execution stopped by user._',
-        stoppedByUser: true,
-      };
-    }
+    if (signal.aborted) return stopExecution();
 
     const task = workingPlan.tasks[i];
     const taskStartedAt = Date.now();
@@ -1105,8 +1110,9 @@ export async function runCodingExecutionPhase(params: {
           a2uiMode: 'off',
           project,
           keys,
-          dynamicModels,
-          manualModelOverrides,
+          dynamicModels: availableModels,
+          manualModelOverrides: codingRoleAssignment('coder', orchestration, activeModelId) === coderTarget.model.id
+            ? manualModelOverrides : [],
           allowLocalTools,
           servers,
           extraTools: allWorkspaceTools,
@@ -1122,7 +1128,6 @@ export async function runCodingExecutionPhase(params: {
           },
           codingRole: 'coder',
           fallbackModelIds: coderTarget.fallbackChain,
-          allowKeyLinkedModels: true,
           history: [{ role: 'user', text: taskPrompt }],
           maxSteps: 8,
           // Keep VFS write_file/patch_file frictionless inside the sandboxed workspace while still gating destructive delete_file & external MCP writes
@@ -1166,17 +1171,10 @@ export async function runCodingExecutionPhase(params: {
           },
         });
 
-        if (res.stoppedByUser) {
+        if (res.stoppedByUser || signal.aborted) {
           task.status = 'failed';
           task.error = 'Stopped by user';
-          workingPlan.phase = 'failed';
-          const stoppedSession = syncLive();
-          return {
-            plan: workingPlan,
-            session: stoppedSession,
-            finalText: '_Execution stopped by user._',
-            stoppedByUser: true,
-          };
+          return stopExecution();
         }
 
         const usedModel = getModelById(res.usedModelId, availableModels);
@@ -1205,7 +1203,7 @@ export async function runCodingExecutionPhase(params: {
           res.runTrace.estimatedPromptTokens + Math.ceil(res.finalText.length / 3.5);
         task.status = 'verifying';
         task.modelId = usedModel.id;
-        task.provider = usedModel.provider;
+        task.provider = completedProvider(res.runTrace, usedModel);
         task.tokens = taskTokens;
         task.durationMs = Math.max(10, Date.now() - taskStartedAt);
         task.fallbackNote = taskFallbackNote;
@@ -1217,7 +1215,7 @@ export async function runCodingExecutionPhase(params: {
           role: 'coder',
           taskId: task.id,
           modelId: usedModel.id,
-          provider: usedModel.provider,
+          provider: task.provider,
           tokens: taskTokens,
           durationMs: task.durationMs,
           ...(usedModel.id !== coderTarget.model.id ? { fallbackFrom: coderTarget.model.id } : {}),
@@ -1225,6 +1223,11 @@ export async function runCodingExecutionPhase(params: {
         });
         syncLive();
       } catch (err) {
+        if (signal.aborted) {
+          task.status = 'failed';
+          task.error = 'Stopped by user';
+          return stopExecution();
+        }
         task.durationMs = Math.max(10, Date.now() - taskStartedAt);
         task.status = 'failed';
         task.error = safeErrorMessage(err);
@@ -1335,8 +1338,9 @@ export async function runCodingExecutionPhase(params: {
           a2uiMode: 'off',
           project,
           keys,
-          dynamicModels,
-          manualModelOverrides,
+          dynamicModels: availableModels,
+          manualModelOverrides: codingRoleAssignment('reviewer', orchestration, activeModelId) === reviewerTarget.model.id
+            ? manualModelOverrides : [],
           allowLocalTools,
           servers,
           extraTools: allWorkspaceTools,
@@ -1348,7 +1352,6 @@ export async function runCodingExecutionPhase(params: {
           },
           codingRole: 'reviewer',
           fallbackModelIds: reviewerTarget.fallbackChain,
-          allowKeyLinkedModels: true,
           history: [{ role: 'user', text: repairPrompt }],
           maxSteps: 6,
           confirmBeforeWrite,
@@ -1387,13 +1390,14 @@ export async function runCodingExecutionPhase(params: {
             saveServerSecrets: callbacks.saveServerSecrets,
           },
         });
+        if (healRes.stoppedByUser || signal.aborted) return stopExecution();
         const usedReviewer = getModelById(healRes.usedModelId, availableModels);
         workingPlan.subagentTraces.push({
           id: `sub_heal_${workingPlan.repairAttempts}_${Date.now()}`,
           phase: 'verifying',
           role: 'reviewer',
           modelId: usedReviewer.id,
-          provider: usedReviewer.provider,
+          provider: completedProvider(healRes.runTrace, usedReviewer),
           tokens:
             healRes.runTrace.estimatedPromptTokens + Math.ceil(healRes.finalText.length / 3.5),
           durationMs: Math.max(10, Date.now() - repairStart),
@@ -1403,6 +1407,7 @@ export async function runCodingExecutionPhase(params: {
           status: usedReviewer.id !== reviewerTarget.model.id ? 'fallback' : 'ok',
         });
       } catch (err) {
+        if (signal.aborted) return stopExecution();
         verifyReport.errors.push(`Reviewer pass failed: ${safeErrorMessage(err)}`);
         break;
       }
@@ -1410,6 +1415,7 @@ export async function runCodingExecutionPhase(params: {
     }
   }
 
+  if (signal.aborted) return stopExecution();
   workingPlan.verificationErrors = verifyReport.ok ? [] : [...verifyReport.errors];
   workingPlan.phase = verifyReport.ok ? 'completed' : 'failed';
   if (verifyReport.ok) {

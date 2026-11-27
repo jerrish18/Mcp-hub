@@ -23,7 +23,6 @@ import {
   syncLiveProviderModels,
   preserveCatalogForSameCredentials,
   retainTransientCatalogRoutes,
-  validateAllConfiguredProviderKeys,
 } from '../services/llm/provider';
 import type { LlmConversationItem } from '../services/llm/types';
 import type { ParsedMcpDeepLink } from '../config/connectors';
@@ -899,7 +898,7 @@ export const useHubStore = create<HubState>((set, get) => {
       });
       persist();
       if (!vaultLocked) {
-        void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+        void get().syncModels();
       }
 
       if (!visibilitySyncBound && typeof window !== 'undefined') {
@@ -983,7 +982,7 @@ export const useHubStore = create<HubState>((set, get) => {
         passphraseVaultEnabled: isPassphraseVaultEnabled(),
         providerKeys: keys,
       });
-      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+      void get().syncModels();
       return true;
     },
     enableVaultPassphrase: async (passphrase) => {
@@ -992,7 +991,7 @@ export const useHubStore = create<HubState>((set, get) => {
         passphraseVaultEnabled: true,
         vaultLocked: false,
       });
-      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+      void get().syncModels();
     },
     disableVaultPassphrase: async () => {
       await disablePassphraseVault();
@@ -1000,7 +999,7 @@ export const useHubStore = create<HubState>((set, get) => {
         passphraseVaultEnabled: false,
         vaultLocked: false,
       });
-      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+      void get().syncModels();
     },
     lockVaultSession: () => {
       lockVault();
@@ -1030,56 +1029,17 @@ export const useHubStore = create<HubState>((set, get) => {
       set((state) => ({
         providerKeys: keys,
         pendingFreeModels: [],
+        providerValidation: {},
         modelFailures: {},
         dynamicModels: preserveCatalogForSameCredentials(state.dynamicModels, state.providerKeys, keys),
       }));
-      void Promise.all([get().validateProviderKeysNow(), get().syncModels()]);
+      void get().syncModels();
     },
 
     validateProviderKeysNow: async () => {
-      const state = get();
-      if (state.vaultLocked) return {};
-      const keys = state.providerKeys;
-      const scope = activeScope();
-      set({ validatingKeys: true });
-      try {
-        const { validation, discoveredModels } = await validateAllConfiguredProviderKeys(keys);
-        if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
-          set((s) => {
-            const existingIds = new Set(s.dynamicModels.map((m) => normalizeModelId(m.id)));
-            const freshDiscovered = discoveredModels.filter(
-              (m) => !existingIds.has(normalizeModelId(m.id))
-            );
-            const mergedDynamic = freshDiscovered.length
-              ? [...s.dynamicModels, ...freshDiscovered]
-              : s.dynamicModels;
-            const validProviders = new Set(
-              Object.entries(validation)
-                .filter(([, v]) => v?.status === 'valid')
-                .map(([p]) => p)
-            );
-            let nextFailures = s.modelFailures;
-            if (validProviders.size > 0 && Object.keys(s.modelFailures).length > 0) {
-              nextFailures = { ...s.modelFailures };
-              for (const failKey of Object.keys(nextFailures)) {
-                const matched = getModelById(failKey, mergedDynamic);
-                if (matched && validProviders.has(matched.provider)) {
-                  delete nextFailures[failKey];
-                }
-              }
-            }
-            return {
-              providerValidation: validation,
-              dynamicModels: mergedDynamic,
-              modelFailures: nextFailures,
-            };
-          });
-          persist();
-        }
-        return validation;
-      } finally {
-        set({ validatingKeys: false });
-      }
+      if (get().vaultLocked) return {};
+      await get().syncModels();
+      return get().providerValidation;
     },
 
     toggleManualModelOverride: (modelId) => {
@@ -1123,29 +1083,30 @@ export const useHubStore = create<HubState>((set, get) => {
       }
       const scope = activeScope();
       if (catalogRefresh && catalogRefresh.keys === keys && catalogRefresh.scope === scope) return catalogRefresh.promise;
-      const promise = syncLiveProviderModels(keys).then(({ models, pending, syncedProviders, transientProviders }) => {
+      set({ validatingKeys: true });
+      const promise = syncLiveProviderModels(keys).then((snapshot) => {
+        const { models, pending, syncedProviders, transientProviders, validation, discoveredModels } = snapshot;
         if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
           const previous = get().dynamicModels;
           const verified = retainTransientCatalogRoutes(models, previous, transientProviders, keys);
-          const verifiedIds = new Set(verified.map((fresh) => normalizeModelId(fresh.id)));
-          const preservedUnrouted = previous
-            .filter((model) => {
-              if (verifiedIds.has(normalizeModelId(model.id))) return false;
-              if (model.description === 'Custom user model' || !model.routes?.length) return true;
-              return (
-                model.provider !== 'local' &&
-                model.provider !== 'demo' &&
-                model.provider !== 'kilo' &&
-                hasConfiguredCloudKey(model.provider, keys)
-              );
-            })
-            .map((model) => (model.routes?.length ? { ...model, routes: undefined } : model));
-          set({ dynamicModels: [...verified, ...preservedUnrouted], pendingFreeModels: pending });
+          const inventory = new Map(discoveredModels.map((model) => [normalizeModelId(model.id), model]));
+          for (const model of previous) {
+            if (model.description === 'Custom user model' ||
+                transientProviders.some((provider) => provider === model.provider)) {
+              const id = normalizeModelId(model.id);
+              if (!inventory.has(id)) inventory.set(id, { ...model, routes: undefined });
+            }
+          }
+          for (const model of verified) inventory.set(normalizeModelId(model.id), model);
+          set({ dynamicModels: [...inventory.values()], pendingFreeModels: pending, providerValidation: validation });
           persist();
         }
         return { count: models.length, providers: syncedProviders, transient: transientProviders.length > 0 };
       }).finally(() => {
-        if (catalogRefresh?.promise === promise) catalogRefresh = undefined;
+        if (catalogRefresh?.promise === promise) {
+          catalogRefresh = undefined;
+          set({ validatingKeys: false });
+        }
       });
       catalogRefresh = { keys, scope, promise };
       return promise;
@@ -2551,7 +2512,6 @@ export const useHubStore = create<HubState>((set, get) => {
             dynamicModels: get().dynamicModels,
             manualModelOverrides: get().settings.manualModelOverrides ?? [],
             providerValidation: get().providerValidation,
-            modelFailures: get().modelFailures,
             allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
             servers: get().servers,
             confirmBeforeWrite: options?.autoApproveWrites
@@ -2602,7 +2562,6 @@ export const useHubStore = create<HubState>((set, get) => {
             dynamicModels: get().dynamicModels,
             manualModelOverrides: get().settings.manualModelOverrides ?? [],
             providerValidation: get().providerValidation,
-            modelFailures: get().modelFailures,
             allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
             servers: get().servers,
             confirmBeforeWrite: options?.autoApproveWrites
@@ -2796,7 +2755,8 @@ export const useHubStore = create<HubState>((set, get) => {
         }
       } catch (err) {
         flushPendingDeltas();
-        get().recordModelFailure(conv.modelId, err);
+        const stopped = abortController.signal.aborted;
+        if (!stopped) get().recordModelFailure(conv.modelId, err);
         const keys = get().providerKeys;
         const msg = safeErrorMessage(err, Object.values(keys).filter((key): key is string => Boolean(key)));
         const finalConv = patchConv((c) => ({
@@ -2807,7 +2767,7 @@ export const useHubStore = create<HubState>((set, get) => {
               ? {
                   ...m,
                   isStreaming: false,
-                  error: msg,
+                  ...(stopped ? { content: m.content || '_Generation stopped._' } : { error: msg }),
                 }
               : m
           ),
@@ -2888,7 +2848,6 @@ export const useHubStore = create<HubState>((set, get) => {
           dynamicModels: get().dynamicModels,
           manualModelOverrides: get().settings.manualModelOverrides ?? [],
           providerValidation: get().providerValidation,
-          modelFailures: get().modelFailures,
           allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
           servers: get().servers,
           confirmBeforeWrite: get().settings.confirmBeforeWrite,

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Check, Cpu, RefreshCw, Search, ShieldAlert, Sparkles } from 'lucide-react';
-import { getShortModelName, normalizeModelId, PROVIDER_INFO } from '../../config/models';
+import { CODING_ROLE_METADATA, getShortModelName, normalizeModelId, PROVIDER_INFO } from '../../config/models';
 import {
   getAvailableModels,
   getUnavailableCatalogModelsWithDetails,
@@ -9,12 +9,14 @@ import {
 } from '../../services/llm/provider';
 import type {
   CloudProvider,
+  CodingRole,
   ModelConfig,
   ProviderId,
   ProviderKeys,
   ProviderKeyStatus,
   ProviderValidationResult,
 } from '../../types';
+import { supportsCodingRole } from '../../services/llm/codingOrchestrator';
 import { BottomSheet } from '../../ui/BottomSheet';
 import { getProviderQuotaStatus } from '../../utils/quotaTracker';
 
@@ -30,6 +32,10 @@ interface ModelSwitcherSheetProps {
   onToggleManualOverride?: (modelId: string) => void;
   onSelectModel: (modelId: string) => void;
   onRefresh: () => Promise<{ transient: boolean }>;
+  codingRole?: CodingRole;
+  roleIsAutomatic?: boolean;
+  onUseAutomatic?: () => void;
+  catalogRefreshing?: boolean;
   onOpenSettings?: () => void;
 }
 
@@ -63,12 +69,16 @@ export function ModelSwitcherSheet({
   onToggleManualOverride,
   onSelectModel,
   onRefresh,
+  codingRole,
+  roleIsAutomatic,
+  onUseAutomatic,
+  catalogRefreshing = false,
   onOpenSettings,
 }: ModelSwitcherSheetProps) {
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [refreshStatus, setRefreshStatus] = useState('');
-  const models = getAvailableModels(providerKeys, dynamicModels, manualModelOverrides);
+  const models = getAvailableModels(providerKeys, dynamicModels, manualModelOverrides, providerValidation);
   const unavailable = getUnavailableCatalogModelsWithDetails(
     models,
     providerKeys,
@@ -85,6 +95,7 @@ export function ModelSwitcherSheet({
   const visibleModels = models.filter(matching);
   const visibleUnavailable = unavailable.filter((entry) => matching(entry.model));
   const hasCloudModels = models.some((model) => model.routes?.length);
+  const busy = refreshing || catalogRefreshing;
 
   const select = (modelId: string) => {
     onSelectModel(modelId);
@@ -104,7 +115,7 @@ export function ModelSwitcherSheet({
   };
 
   return (
-    <BottomSheet open={open} onClose={onClose} title="Choose AI Model">
+    <BottomSheet open={open} onClose={onClose} title={codingRole ? `Choose ${CODING_ROLE_METADATA[codingRole].label} model` : "Choose AI Model"}>
       <div className="space-y-4">
         <div className="flex gap-2">
           <div className="relative min-w-0 flex-1">
@@ -123,29 +134,33 @@ export function ModelSwitcherSheet({
             type="button"
             aria-label="Refresh models"
             title="Refresh models"
-            disabled={refreshing}
+            disabled={busy}
             onClick={() => void refresh()}
             className="workspace-secondary flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center"
           >
-            <RefreshCw aria-hidden="true" className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw aria-hidden="true" className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
           </button>
         </div>
         {refreshStatus && <p role="status" className="text-xs text-slate-500 dark:text-slate-400">{refreshStatus}</p>}
-        {hasCloudModels && !search && (
-          <button type="button" onClick={() => select('cloud-auto')} aria-pressed={selectedId === 'cloud-auto'}
+        {!search && (onUseAutomatic || hasCloudModels) && (
+          <button type="button"
+            onClick={onUseAutomatic ? () => { onUseAutomatic(); onClose(); } : () => select('cloud-auto')}
+            aria-pressed={onUseAutomatic ? roleIsAutomatic : selectedId === 'cloud-auto'}
             className="workspace-secondary inline-flex min-h-[44px] items-center gap-2 text-left"
           >
-            Automatic free model
-            {selectedId === 'cloud-auto' && <Check aria-hidden="true" className="h-4 w-4 shrink-0" />}
+            {codingRole ? `Automatic ${CODING_ROLE_METADATA[codingRole].label} model` : 'Automatic free model'}
+            {(onUseAutomatic ? roleIsAutomatic : selectedId === 'cloud-auto') && <Check aria-hidden="true" className="h-4 w-4 shrink-0" />}
           </button>
         )}
         {!hasCloudModels && !search && (
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            No verified free models are currently enabled. Add an API key or enable a model below via manual override.
-            {onOpenSettings && (
-              <> <button type="button" className="font-semibold underline" onClick={() => { onClose(); onOpenSettings(); }}>Open provider settings</button></>
-            )}
+            {busy ? 'Checking provider catalogs…' : 'Add or refresh provider keys to load verified free models.'}
           </p>
+        )}
+        {!search && onOpenSettings && (codingRole || !hasCloudModels) && (
+          <button type="button" className="block text-sm font-semibold underline" onClick={() => { onClose(); onOpenSettings(); }}>
+            Open provider settings
+          </button>
         )}
         {search && !visibleModels.length && !visibleUnavailable.length && (
           <p className="text-sm text-slate-500 dark:text-slate-400">No models match your search.</p>
@@ -178,6 +193,7 @@ export function ModelSwitcherSheet({
               )}
               {group.map((model) => {
                 const selected = model.id === selectedId;
+                const incompatible = Boolean(codingRole && !supportsCodingRole(model, codingRole));
                 const overridden = isModelManuallyOverridden(model.id, manualModelOverrides);
                 const otherProviders = [...new Set((model.routes ?? [])
                   .filter((route) => route.provider !== provider).map((route) => PROVIDER_INFO[route.provider].name))];
@@ -187,12 +203,13 @@ export function ModelSwitcherSheet({
                       type="button"
                       data-testid={`select-model-${model.id}`}
                       aria-pressed={selected}
+                      disabled={incompatible}
                       onClick={() => select(model.id)}
                       style={{
                         backgroundColor: selected ? 'var(--m3-primary-container)' : 'var(--m3-surface-container)',
                         borderColor: selected ? 'var(--m3-primary)' : 'var(--m3-outline)',
                       }}
-                      className="flex min-h-[58px] flex-1 min-w-0 items-start gap-3 rounded-2xl border p-3 text-left transition-colors"
+                      className="flex min-h-[58px] flex-1 min-w-0 items-start gap-3 rounded-2xl border p-3 text-left transition-colors disabled:opacity-65"
                     >
                       <span aria-hidden="true"
                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-200/70 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
@@ -202,16 +219,20 @@ export function ModelSwitcherSheet({
                       <span className="min-w-0 flex-1 space-y-1 [overflow-wrap:anywhere]">
                         <span className="flex flex-wrap items-center gap-1.5">
                           <span className="text-sm font-semibold text-slate-900 dark:text-white">{getShortModelName(model)}</span>
-                          {overridden && (
+                          {overridden && !model.routes?.length && (
                             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900 dark:bg-amber-950/70 dark:text-amber-200">
-                              Manual Override
+                              Manual override · may incur charges
                             </span>
                           )}
                         </span>
                         <span className="block text-xs tabular-nums text-slate-500 dark:text-slate-400">
                           {formatContextWindow(model.contextWindow)}
                           {model.routes?.some((route) => route.reasoning) && ' · Reasoning'}
+                          {codingRole && model.routes?.some((route) => route.tools) && ' · Tool calling'}
                         </span>
+                        {incompatible && (
+                          <span className="block text-xs text-amber-800 dark:text-amber-300">This role requires tool calling.</span>
+                        )}
                         {!!otherProviders.length && (
                           <span className="block text-xs text-slate-500 dark:text-slate-400">
                             Also via {otherProviders.join(', ')}
@@ -270,7 +291,9 @@ function UnavailableModels({
       <p className="flex items-start gap-1.5">
         <ShieldAlert className="h-3.5 w-3.5 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
         <span>
-          Specific status for each excluded model. When a provider key is configured, you can enable a model directly with manual override.
+          {onToggleOverride
+            ? 'Manual override can send requests to a paid or unverified route.'
+            : 'These models remain unavailable until there is a verified free route or a manual override in the chat model picker.'}
         </span>
       </p>
       <ul className="space-y-2">

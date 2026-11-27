@@ -309,7 +309,7 @@ export async function validateProviderKey(
   keys: ProviderKeys,
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal
-): Promise<{ validation: ProviderValidationResult; rows: CatalogRow[] }> {
+): Promise<{ validation: ProviderValidationResult; rows: CatalogRow[]; transient?: boolean }> {
   const checkedAt = Date.now();
   const token = cloudCredential(provider, keys);
   const endpoint = providerEndpoint(provider, keys.cloudflareAccountId);
@@ -358,6 +358,7 @@ export async function validateProviderKey(
         modelsFound: 0,
       },
       rows: [],
+      transient: isTransientCatalogError(err),
     };
   }
 }

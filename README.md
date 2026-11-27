@@ -62,6 +62,8 @@ Use **Settings → Provider API keys** for authenticated providers. Kilo Gateway
 
 Choose **Code** in Chat to prioritize verified coding models for implementation, debugging, and repository work. Coding mode uses your existing MCP tool permissions and approvals.
 
+In **Chat → Code → Roles**, choose an Architect, Coder, or Reviewer from the same searchable model catalog used in Chat. Automatic role selection and fallback use verified free cloud routes when available. Coder and Reviewer require tool calling to edit and verify workspace files. In Single-Model Mode, all three stages use the same model and can retry through another verified provider for that model.
+
 See [free provider documentation](docs/free-providers.md) for provider status, exact IDs, routing rules, and the live test command.
 
 ---
