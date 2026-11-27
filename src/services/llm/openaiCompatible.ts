@@ -1,8 +1,10 @@
+import { FREE_ROUTE_EVIDENCE } from '../../config/freeRouteEvidence';
+import { normalizeModelId, PROVIDER_INFO } from '../../config/models';
 import { nvidiaRequestOptions } from './nvidiaOptions';
 import { streamSseData } from './sse';
-import { PROVIDER_INFO } from '../../config/models';
 import { isBrowserHttpRuntime, providerEndpoint, usesFreeAiRelay } from './freeRegistry';
 import { redactSecrets } from '../../utils/redact';
+import { normalizeToolSchemaForProvider } from './toolSchemaNormalizer';
 import {
   extractReadableApiError,
   type LlmToolCall,
@@ -143,6 +145,21 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   const webRelay = model.provider !== 'local' && model.provider !== 'demo' && usesFreeAiRelay(model.provider, fetchFn);
   let targetUrl = webRelay ? `/api/free-ai/${model.provider}/chat/completions` : `${baseUrl}/chat/completions`;
   let usingProxyFallback = webRelay;
+  const rawUpstreamId =
+    model.provider === 'local'
+      ? model.id.replace(/^local:/, '')
+      : route?.modelId ?? model.upstreamModelId ?? model.id;
+  const evidenceMatch =
+    model.provider !== 'local' && model.provider !== 'demo'
+      ? FREE_ROUTE_EVIDENCE.find(
+          (entry) =>
+            entry.provider === model.provider &&
+            (entry.canonicalId === rawUpstreamId ||
+              normalizeModelId(entry.canonicalId) === normalizeModelId(rawUpstreamId))
+        )
+      : undefined;
+  const upstreamModelId = evidenceMatch?.modelId ?? rawUpstreamId;
+
   const formattedMessages: Array<Record<string, unknown>> = [
     { role: 'system', content: systemPrompt },
   ];
@@ -184,7 +201,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
         content: msg.text || null,
       };
       if (msg.toolCalls && msg.toolCalls.length > 0) {
-        if (model.provider === 'nvidia' && (route?.modelId ?? model.id) === 'moonshotai/kimi-k3.1-pro'
+        if (model.provider === 'nvidia' && upstreamModelId === 'moonshotai/kimi-k3.1-pro'
           && msg.providerReasoning?.provider === model.provider) {
           entry.reasoning_content = msg.providerReasoning.text;
         }
@@ -223,10 +240,6 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
     }
   }
 
-  const upstreamModelId =
-    model.provider === 'local'
-      ? model.id.replace(/^local:/, '')
-      : route?.modelId ?? model.upstreamModelId ?? model.id;
   const allowReasoningFields = !isProbe && model.supportsReasoningEffort !== false;
   const nvidiaOptions =
     allowReasoningFields && model.provider === 'nvidia'
@@ -255,7 +268,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       function: {
         name: t.qualifiedName,
         description: t.description,
-        parameters: t.parameters,
+        parameters: normalizeToolSchemaForProvider(t.parameters, model.provider),
       },
     }));
     body.tool_choice = 'auto';
@@ -285,6 +298,7 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
   let strippedReasoning = false;
   let strippedMaxTokens = false;
   let strippedToolChoice = false;
+  let strippedTools = false;
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
       res = await fetchFn(targetUrl, {
@@ -350,6 +364,17 @@ export async function streamOpenAiCompatibleCompletion(req: StreamCompletionRequ
       }
       if (!strippedToolChoice && 'tool_choice' in body && errPreview.includes('tool_choice')) {
         strippedToolChoice = true;
+        delete body.tool_choice;
+        continue;
+      }
+      if (
+        req.toolsOptional &&
+        !strippedTools &&
+        'tools' in body &&
+        /\btools?\b.*\b(not support|unsupported|unavailable|disable)|function calling.*not support|tool_use_failed/i.test(errPreview)
+      ) {
+        strippedTools = true;
+        delete body.tools;
         delete body.tool_choice;
         continue;
       }

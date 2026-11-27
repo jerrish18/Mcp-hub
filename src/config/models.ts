@@ -1,4 +1,4 @@
-import type { ModelConfig, ProviderId } from '../types';
+import type { CodeRoleAssignments, CodingRole, ModelConfig, ProviderId } from '../types';
 
 /**
  * Single configuration source for all cloud LLM model IDs.
@@ -223,4 +223,135 @@ export function getModelById(modelId: string, dynamicModels: ModelConfig[] = [])
     FREE_MODELS.find((m) => m.id === normalized) ??
     { id: normalized, provider: 'openrouter', label: formatReadableModelSlug(normalized), description: 'Cloud model awaiting verification', contextWindow: 128_000, isFreeTier: false }
   );
+}
+
+export const CODING_ROLE_METADATA: Record<
+  CodingRole,
+  { label: string; shortHint: string }
+> = {
+  architect: {
+    label: 'Architect',
+    shortHint: 'Plans spec, manifest, and task sequence',
+  },
+  coder: {
+    label: 'Coder',
+    shortHint: 'Applies targeted diffs and file writes',
+  },
+  reviewer: {
+    label: 'Reviewer',
+    shortHint: 'Audits diffs, runs checks, and drives self-healing',
+  },
+};
+
+export function formatContextWindowLabel(contextWindow: number): string {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return '32K ctx';
+  if (contextWindow >= 1_000_000) {
+    const m = contextWindow / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M ctx`;
+  }
+  return `${Math.round(contextWindow / 1000)}K ctx`;
+}
+
+export function scoreModelForCodingRole(model: ModelConfig, role: CodingRole): number {
+  const normalizedId = normalizeModelId(model.id);
+  const idLower = normalizedId.toLowerCase();
+  if (normalizedId === 'cloud-auto') return -1000;
+  if (model.provider === 'demo') return -500;
+  if (model.provider === 'local') return -200;
+
+  let score = 0;
+  const hasTools = !model.routes?.length || model.routes.some((r) => r.tools);
+  if (hasTools) score += 200;
+  else if (role === 'coder') score -= 120;
+  if (model.supportsThinkingLevel) score += role === 'coder' ? 45 : 95;
+  if (model.supportsReasoningEffort) score += role === 'coder' ? 40 : 85;
+  score += Math.min(100, Math.floor((model.contextWindow || 32_000) / 10_000));
+
+  // Penalize bare auto-routers or tiny models compared to dedicated coding/reasoning models
+  if (idLower.endsWith('/free') || idLower.endsWith(':auto')) score -= 60;
+  if (/(?:^|[-_/])(1b|2b|3b|4b|7b|8b)(?:[-_/:]|$)/.test(idLower)) score -= 45;
+
+  if (role === 'architect' || role === 'reviewer') {
+    if (
+      idLower.includes('neon') ||
+      idLower.includes('pro') ||
+      idLower.includes('ultra') ||
+      idLower.includes('120b') ||
+      idLower.includes('kimi')
+    ) {
+      score += 80;
+    }
+    if (
+      idLower.includes('deepseek') ||
+      idLower.includes('qwen3.7') ||
+      idLower.includes('qwen3.8') ||
+      idLower.includes('glm-5') ||
+      idLower.includes('beam')
+    ) {
+      score += 65;
+    }
+    if (idLower.includes('hydrogen') || idLower.includes('flash') || idLower.includes('qwen3.5')) {
+      score += 40;
+    }
+  } else {
+    if (
+      idLower.includes('coder') ||
+      idLower.includes('minimax') ||
+      idLower.includes('deepseek') ||
+      idLower.includes('qwen3.5') ||
+      idLower.includes('qwen3.7') ||
+      idLower.includes('qwen3.8')
+    ) {
+      score += 85;
+    }
+    if (
+      idLower.includes('hydrogen') ||
+      idLower.includes('flash') ||
+      idLower.includes('qwen') ||
+      idLower.includes('gpt-oss') ||
+      idLower.includes('glm-5') ||
+      idLower.includes('kimi')
+    ) {
+      score += 65;
+    }
+    if (idLower.includes('lite') || idLower.includes('instant')) score += 30;
+  }
+
+  return score;
+}
+
+export function selectDefaultRoleModels(
+  availableModels: ModelConfig[],
+  fallbackModelId = 'demo-sandbox'
+): CodeRoleAssignments {
+  const usable = availableModels.filter((m) => normalizeModelId(m.id) !== 'cloud-auto');
+  const cloudUsable = usable.filter((m) => m.provider !== 'demo' && m.provider !== 'local');
+  const pool = cloudUsable.length > 0 ? cloudUsable : usable;
+  const normalizedFallback = normalizeModelId(fallbackModelId);
+
+  if (pool.length === 0) {
+    const safeFallback = normalizedFallback === 'cloud-auto' ? 'demo-sandbox' : normalizedFallback;
+    return {
+      architect: safeFallback,
+      coder: safeFallback,
+      reviewer: safeFallback,
+    };
+  }
+
+  const pickBest = (role: CodingRole, excludeId?: string): string => {
+    const ranked = [...pool].sort(
+      (a, b) => scoreModelForCodingRole(b, role) - scoreModelForCodingRole(a, role) || a.id.localeCompare(b.id)
+    );
+    if (excludeId && ranked.length > 1 && ranked[0].id === excludeId) {
+      const next = ranked.find((m) => m.id !== excludeId && scoreModelForCodingRole(m, role) > 0);
+      if (next) return next.id;
+    }
+    return ranked[0]?.id ?? (normalizedFallback === 'cloud-auto' ? 'demo-sandbox' : normalizedFallback);
+  };
+
+  const architect = pickBest('architect');
+  const coder = pickBest('coder');
+  const reviewer = pickBest('reviewer', coder);
+
+  return { architect, coder, reviewer };
 }

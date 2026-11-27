@@ -645,3 +645,50 @@ test('freeAiRouter forwards NVIDIA Minimax options cleanly without injecting max
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('validateAllConfiguredProviderKeys skips non-chat models and openaiCompatible resolves canonical upstream IDs', async () => {
+  const fetchFn: typeof fetch = async (url, init) => {
+    const u = String(url);
+    if (!init?.method || init.method === 'GET') {
+      if (u.includes('generativelanguage.googleapis.com')) {
+        return Response.json({
+          models: [
+            { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', supportedGenerationMethods: ['generateContent'] },
+            { name: 'models/text-embedding-004', displayName: 'Text Embedding', supportedGenerationMethods: ['embedContent'] },
+            { name: 'models/imagen-3.0-generate-002', displayName: 'Imagen 3' },
+          ],
+        });
+      }
+      return Response.json({ data: [] });
+    }
+    const body = JSON.parse(String(init.body ?? '{}')) as { model?: string; chat_template_kwargs?: unknown };
+    assert.equal(body.model, 'minimaxai/minimax-m3.1-flash');
+    assert.deepEqual(body.chat_template_kwargs, { reasoning_effort: 'high' });
+    return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');
+  };
+
+  const { discoveredModels } = await validateAllConfiguredProviderKeys({ gemini: 'AIzaTestKey' }, fetchFn);
+  assert.ok(discoveredModels.some((m) => m.id === 'gemini-2.5-flash'));
+  assert.equal(discoveredModels.some((m) => m.id === 'text-embedding-004'), false);
+  assert.equal(discoveredModels.some((m) => m.id === 'imagen-3.0-generate-002'), false);
+
+  await streamOpenAiCompatibleCompletion({
+    model: {
+      id: 'minimax/minimax-m3.1-flash',
+      provider: 'nvidia',
+      label: 'Minimax M3.1 Flash',
+      description: 'Canonical model without preattached route',
+      contextWindow: 1_000_000,
+      isFreeTier: true,
+      supportsReasoningEffort: true,
+    },
+    apiKey: 'nvapi-test',
+    effort: 'high',
+    systemPrompt: '',
+    messages: [{ role: 'user', text: 'Ping' }],
+    tools: [],
+    onEvent: () => {},
+    fetchFn,
+  });
+});
+

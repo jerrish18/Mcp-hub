@@ -229,6 +229,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   onboardingCompleted: false,
   localModelToolsEnabled: false,
   manualModelOverrides: [],
+  codeOrchestration: {
+    mode: 'custom',
+    roles: {
+      architect: null,
+      coder: null,
+      reviewer: null,
+    },
+    autoRun: false,
+  },
 };
 
 export const DEFAULT_SAVED_PROMPTS = [

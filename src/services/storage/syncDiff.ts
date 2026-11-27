@@ -2,11 +2,16 @@ import type {
   AgentProfile,
   AppSettings,
   ChatAttachment,
+  CodeOrchestrationSettings,
+  CodingPlan,
+  CodingSessionState,
   Conversation,
   McpServerConfig,
   ModelConfig,
   ProjectProfile,
   SavedPrompt,
+  WorkspaceDiffEntry,
+  WorkspaceFileEntry,
 } from '../../types';
 import type { SavedStudyNote } from '../../utils/studyTools';
 import { resolveA2uiMode } from '../../utils/a2ui';
@@ -80,9 +85,33 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
       ).slice(0, 100)
     : [];
 
-  return {
-    theme: settings.theme,
-    accentTheme: settings.accentTheme,
+  const rawOrch = settings.codeOrchestration;
+  const codeOrchestration: CodeOrchestrationSettings | undefined = rawOrch
+    ? stripUndefined({
+        mode: rawOrch.mode === 'single' ? ('single' as const) : ('custom' as const),
+        roles: {
+          architect: rawOrch.roles?.architect ? String(rawOrch.roles.architect).slice(0, 160) : null,
+          coder: rawOrch.roles?.coder ? String(rawOrch.roles.coder).slice(0, 160) : null,
+          reviewer: rawOrch.roles?.reviewer ? String(rawOrch.roles.reviewer).slice(0, 160) : null,
+        },
+        autoRun: Boolean(rawOrch.autoRun),
+      })
+    : undefined;
+
+  const resolvedTheme =
+    settings.theme === 'light' || settings.theme === 'dark' ? settings.theme : 'system';
+  const resolvedAccent =
+    settings.accentTheme === 'pixel_blue' ||
+    settings.accentTheme === 'sage' ||
+    settings.accentTheme === 'clay' ||
+    settings.accentTheme === 'lavender' ||
+    settings.accentTheme === 'monochrome'
+      ? settings.accentTheme
+      : 'pixel_blue';
+
+  return stripUndefined({
+    theme: resolvedTheme,
+    accentTheme: resolvedAccent,
     chatLayout: settings.chatLayout === 'focus' ? 'focus' : 'standard',
     oledDark: Boolean(settings.oledDark),
     a2uiEnabled: resolvedA2uiMode !== 'off',
@@ -91,7 +120,10 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
     maxAgentSteps: Math.max(1, Math.min(25, Number(settings.maxAgentSteps) || 10)),
     toolOutputBudgetChars: budget,
     alwaysAllowedTools: Array.isArray(settings.alwaysAllowedTools)
-      ? settings.alwaysAllowedTools.slice(0, 100)
+      ? settings.alwaysAllowedTools
+          .filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
+          .map((id) => id.slice(0, 160))
+          .slice(0, 100)
       : [],
     alwaysAllowedRules: rules,
     toolPolicies: policies,
@@ -100,7 +132,8 @@ export function sanitizeSettingsForSync(settings: AppSettings): AppSettings {
     onboardingCompleted: Boolean(settings.onboardingCompleted),
     localModelToolsEnabled: Boolean(settings.localModelToolsEnabled),
     manualModelOverrides,
-  };
+    ...(codeOrchestration ? { codeOrchestration } : {}),
+  });
 }
 
 export function sanitizeServersForSync(servers: McpServerConfig[]): McpServerConfig[] {
@@ -139,24 +172,145 @@ function sanitizeAttachments(attachments?: ChatAttachment[]): ChatAttachment[] |
   );
 }
 
+function sanitizeCodingPlan(plan?: CodingPlan | null): CodingPlan | undefined {
+  if (!plan || typeof plan !== 'object') return undefined;
+  return stripUndefined({
+    ...plan,
+    prompt: String(plan.prompt ?? '').slice(0, 8000),
+    summary: String(plan.summary ?? '').slice(0, 2000),
+    requirements: (plan.requirements ?? []).slice(0, 30).map((r) => ({
+      id: String(r.id ?? ''),
+      text: String(r.text ?? '').slice(0, 400),
+      checked: Boolean(r.checked),
+    })),
+    fileManifest: (plan.fileManifest ?? []).slice(0, 40).map((f) => ({
+      path: String(f.path ?? '').slice(0, 200),
+      action: f.action,
+      purpose: String(f.purpose ?? '').slice(0, 240),
+    })),
+    tasks: (plan.tasks ?? []).slice(0, 30).map((t) => ({
+      ...t,
+      title: String(t.title ?? '').slice(0, 240),
+      targetFiles: (t.targetFiles ?? []).slice(0, 20),
+      verificationCheck: String(t.verificationCheck ?? '').slice(0, 240),
+      error: t.error ? String(t.error).slice(0, 500) : undefined,
+      fallbackNote: t.fallbackNote ? String(t.fallbackNote).slice(0, 300) : undefined,
+    })),
+    verificationErrors: (plan.verificationErrors ?? []).slice(0, 25).map((e) => String(e).slice(0, 500)),
+    subagentTraces: (plan.subagentTraces ?? []).slice(-30),
+  });
+}
+
+function sanitizeCodingSession(session?: CodingSessionState): CodingSessionState | undefined {
+  if (!session || typeof session !== 'object') return undefined;
+  const files: Record<string, WorkspaceFileEntry> = {};
+  for (const [k, f] of Object.entries(session.files ?? {}).slice(0, 40)) {
+    if (!f) continue;
+    files[k] = stripUndefined({
+      path: String(f.path ?? k).slice(0, 200),
+      content: String(f.content ?? '').slice(0, 24000),
+      language: String(f.language ?? 'plaintext').slice(0, 40),
+      status: f.status,
+      updatedAt: Number(f.updatedAt) || Date.now(),
+    });
+  }
+  const diffs: Record<string, WorkspaceDiffEntry> = {};
+  for (const [k, d] of Object.entries(session.diffs ?? {}).slice(0, 40)) {
+    if (!d) continue;
+    diffs[k] = stripUndefined({
+      path: String(d.path ?? k).slice(0, 200),
+      before: String(d.before ?? '').slice(0, 16000),
+      after: String(d.after ?? '').slice(0, 16000),
+      action: d.action ?? 'modify',
+      status: d.status,
+      taskId: d.taskId ? String(d.taskId).slice(0, 80) : undefined,
+      checkpointId: d.checkpointId ? String(d.checkpointId).slice(0, 80) : undefined,
+      updatedAt: Number(d.updatedAt) || Date.now(),
+    });
+  }
+  const checkpoints = (session.checkpoints ?? []).slice(-8).map((cp) => {
+    const cpFiles: Record<string, string> = {};
+    for (const [fk, fv] of Object.entries(cp.files ?? {}).slice(0, 25)) {
+      cpFiles[fk] = String(fv ?? '').slice(0, 12000);
+    }
+    return stripUndefined({
+      id: String(cp.id),
+      label: String(cp.label ?? '').slice(0, 120),
+      ...(cp.taskId ? { taskId: String(cp.taskId).slice(0, 80) } : {}),
+      createdAt: Number(cp.createdAt) || Date.now(),
+      files: cpFiles,
+    });
+  });
+
+  return stripUndefined({
+    activePlan: sanitizeCodingPlan(session.activePlan) ?? null,
+    files,
+    diffs,
+    checkpoints,
+    toolTrace: (session.toolTrace ?? []).slice(-80).map((t) =>
+      stripUndefined({
+        ...t,
+        outputPreview: String(t.outputPreview ?? '').slice(0, 500),
+      })
+    ),
+    contextStats: session.contextStats ?? {
+      estimatedTokens: 0,
+      contextWindow: 128_000,
+      ratio: 0,
+      compacted: false,
+    },
+  });
+}
+
 export function sanitizeConversationForSync(conv: Conversation): Conversation {
+  const effort =
+    conv.effort === 'low' || conv.effort === 'high' ? conv.effort : ('medium' as const);
+  const chatMode =
+    conv.chatMode === 'general' ||
+    conv.chatMode === 'professional' ||
+    conv.chatMode === 'study' ||
+    conv.chatMode === 'coding'
+      ? conv.chatMode
+      : ('professional' as const);
+  const knowledgeSource =
+    conv.knowledgeSource === 'auto' ||
+    conv.knowledgeSource === 'uploaded' ||
+    conv.knowledgeSource === 'web' ||
+    conv.knowledgeSource === 'general'
+      ? conv.knowledgeSource
+      : ('auto' as const);
+  const forkedFrom =
+    conv.forkedFrom &&
+    typeof conv.forkedFrom.conversationId === 'string' &&
+    conv.forkedFrom.conversationId.trim()
+      ? stripUndefined({
+          conversationId: conv.forkedFrom.conversationId.trim().slice(0, 128),
+          messageId: conv.forkedFrom.messageId
+            ? String(conv.forkedFrom.messageId).slice(0, 128)
+            : undefined,
+        })
+      : undefined;
+
   return stripUndefined({
     ...conv,
     id: sanitizeDocId(conv.id, 'conv'),
     title: (conv.title || 'New Chat').trim().slice(0, 200) || 'New Chat',
-    agentId: (conv.agentId || 'agent_general').slice(0, 128),
-    modelId: (conv.modelId || 'demo-sandbox').slice(0, 160),
-    effort: conv.effort ?? 'medium',
-    chatMode: conv.chatMode ?? 'professional',
-    knowledgeSource: conv.knowledgeSource ?? 'auto',
+    agentId: (conv.agentId || '').trim().slice(0, 128) || 'agent_general',
+    modelId: (conv.modelId || '').trim().slice(0, 160) || 'demo-sandbox',
+    effort,
+    chatMode,
+    knowledgeSource,
     studyInstructions: String(conv.studyInstructions ?? '').slice(0, 4000),
     projectId: conv.projectId ? String(conv.projectId).slice(0, 128) : undefined,
+    forkedFrom,
+    codingSession: sanitizeCodingSession(conv.codingSession),
     messages: (conv.messages ?? []).slice(-150).map((m) =>
       stripUndefined({
         ...m,
         content: String(m.content ?? '').slice(0, 60000),
         reasoning: m.reasoning ? m.reasoning.slice(0, 12000) : undefined,
         attachments: sanitizeAttachments(m.attachments),
+        codingPlan: sanitizeCodingPlan(m.codingPlan),
         runTrace: m.runTrace
           ? {
               ...m.runTrace,
@@ -246,10 +400,16 @@ export function computeStateSignature(statePart: {
 export function computeConversationSignature(conv: Conversation): string {
   const lastMsg = conv.messages[conv.messages.length - 1];
   const widgetSigLen = conv.messages.reduce(
-    (sum, m) => sum + (m.a2uiWidgetState ? JSON.stringify(m.a2uiWidgetState).length : 0),
+    (sum, m) =>
+      sum +
+      (m.a2uiWidgetState ? JSON.stringify(m.a2uiWidgetState).length : 0) +
+      (m.codingPlan ? `${m.codingPlan.phase}:${m.codingPlan.updatedAt}:${m.codingPlan.requirements.length}`.length : 0),
     0
   );
-  return `${conv.updatedAt}:${conv.messages.length}:${conv.title}:${conv.agentId}:${conv.modelId}:${conv.effort}:${conv.chatMode ?? ''}:${conv.knowledgeSource ?? ''}:${conv.projectId ?? ''}:${conv.studyInstructions?.length ?? 0}:${widgetSigLen}:${lastMsg?.id ?? ''}:${lastMsg?.content.length ?? 0}`;
+  const codeSig = conv.codingSession
+    ? `${conv.codingSession.activePlan?.phase ?? ''}:${conv.codingSession.activePlan?.updatedAt ?? 0}:${Object.keys(conv.codingSession.files).length}:${Object.keys(conv.codingSession.diffs).length}`
+    : '';
+  return `${conv.updatedAt}:${conv.messages.length}:${conv.title}:${conv.agentId}:${conv.modelId}:${conv.effort}:${conv.chatMode ?? ''}:${conv.knowledgeSource ?? ''}:${conv.projectId ?? ''}:${conv.studyInstructions?.length ?? 0}:${widgetSigLen}:${codeSig}:${lastMsg?.id ?? ''}:${lastMsg?.content.length ?? 0}`;
 }
 
 export function computeStudyNoteSignature(note: SavedStudyNote): string {

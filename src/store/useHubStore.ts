@@ -8,10 +8,17 @@ import {
   runAgentLoop,
 } from '../services/llm/agentLoop';
 import {
+  createInitialCodingSession,
+  runCodingExecutionPhase,
+  runCodingPlanPhase,
+} from '../services/llm/codingOrchestrator';
+import { WorkspaceVfs } from '../services/llm/toolHarness';
+import {
   classifyProviderFailure,
   dispatchStreamCompletion,
   getApiKeyForProvider,
   getAvailableModels,
+  hasConfiguredCloudKey,
   isModelManuallyOverridden,
   syncLiveProviderModels,
   preserveCatalogForSameCredentials,
@@ -64,6 +71,12 @@ import type {
   ChatMessage,
   ChatMode,
   CloudProvider,
+  CodeOrchestrationMode,
+  CodeOrchestrationSettings,
+  CodingPlan,
+  CodingPlanRequirement,
+  CodingRole,
+  CodingSessionState,
   Conversation,
   EffortLevel,
   GroundingCitation,
@@ -222,6 +235,15 @@ function readPersistedMeta(scope = 'guest'): PersistedMeta {
           a2uiEnabled: migratedA2uiMode !== 'off',
           alwaysAllowedRules: prunedRules,
           alwaysAllowedTools: mergedSettings.alwaysAllowedTools.filter((k) => !expiredKeys.has(k)),
+          codeOrchestration: {
+            mode: mergedSettings.codeOrchestration?.mode === 'single' ? 'single' : 'custom',
+            roles: {
+              architect: mergedSettings.codeOrchestration?.roles?.architect ?? null,
+              coder: mergedSettings.codeOrchestration?.roles?.coder ?? null,
+              reviewer: mergedSettings.codeOrchestration?.roles?.reviewer ?? null,
+            },
+            autoRun: Boolean(mergedSettings.codeOrchestration?.autoRun),
+          },
         },
         dynamicModels: parsed.dynamicModels ?? [],
         dismissedDefaultServerIds: dismissed,
@@ -448,6 +470,20 @@ export interface HubState {
     item: CompareResultItem,
     attachments?: ChatAttachment[]
   ) => Promise<void>;
+
+  // Code Mode Orchestration & Workspace VFS
+  approveCodingPlan: (messageId: string) => Promise<void>;
+  updateCodingPlanRequirements: (
+    messageId: string,
+    requirements: CodingPlanRequirement[],
+    extraInstruction?: string
+  ) => Promise<void>;
+  toggleCodeAutoRun: () => void;
+  setCodeOrchestrationMode: (mode: CodeOrchestrationMode) => void;
+  setCodeRoleAssignment: (role: CodingRole, modelId: string | null) => void;
+  acceptWorkspaceDiff: (path: string) => Promise<void>;
+  rejectWorkspaceDiff: (path: string) => Promise<void>;
+  revertWorkspaceCheckpoint: (checkpointId: string) => Promise<void>;
 }
 
 const initialMeta = readPersistedMeta('guest');
@@ -580,7 +616,10 @@ export const useHubStore = create<HubState>((set, get) => {
       if (mergedConvs.length === 0) {
         const keys = get().providerKeys;
         const defaultAgent = merged.agents[0] ?? BUILT_IN_AGENTS[0];
-        const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+        const hasAnyRealKey = Boolean(
+          keys.gemini || keys.groq || keys.openrouter || keys.nvidia || keys.modelscope || keys.amd ||
+          hasConfiguredCloudKey('cloudflare', keys)
+        );
         const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
         mergedConvs = [createNewConversation(defaultAgent, firstModel)];
       }
@@ -656,7 +695,10 @@ export const useHubStore = create<HubState>((set, get) => {
       if (get().conversations.length === 0) {
         const keys = get().providerKeys;
         const defaultAgent = get().agents[0] ?? BUILT_IN_AGENTS[0];
-        const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+        const hasAnyRealKey = Boolean(
+          keys.gemini || keys.groq || keys.openrouter || keys.nvidia || keys.modelscope || keys.amd ||
+          hasConfiguredCloudKey('cloudflare', keys)
+        );
         const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
         const fresh = createNewConversation(defaultAgent, firstModel);
         await historyDb.saveConversation(fresh, scope);
@@ -683,7 +725,10 @@ export const useHubStore = create<HubState>((set, get) => {
     if (guestConvs.length === 0) {
       const keys = get().providerKeys;
       const defaultAgent = guestMeta.agents[0] ?? BUILT_IN_AGENTS[0];
-      const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+      const hasAnyRealKey = Boolean(
+        keys.gemini || keys.groq || keys.openrouter || keys.nvidia || keys.modelscope || keys.amd ||
+        hasConfiguredCloudKey('cloudflare', keys)
+      );
       const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
       const fresh = createNewConversation(defaultAgent, firstModel);
       guestConvs = [fresh];
@@ -829,7 +874,10 @@ export const useHubStore = create<HubState>((set, get) => {
       let nextConvs = convs;
       if (!activeConvId) {
         const defaultAgent = state.agents[0] ?? BUILT_IN_AGENTS[0];
-        const hasAnyRealKey = Boolean(keys.gemini || keys.groq || keys.openrouter);
+        const hasAnyRealKey = Boolean(
+          keys.gemini || keys.groq || keys.openrouter || keys.nvidia || keys.modelscope || keys.amd ||
+          hasConfiguredCloudKey('cloudflare', keys)
+        );
         const firstModel = hasAnyRealKey || defaultAgent.defaultChatMode === 'coding' ? 'cloud-auto' : 'demo-sandbox';
         const fresh = createNewConversation(defaultAgent, firstModel);
         nextConvs = [fresh];
@@ -1079,11 +1127,19 @@ export const useHubStore = create<HubState>((set, get) => {
         if (get().providerKeys === keys && activeScope() === scope && !get().vaultLocked) {
           const previous = get().dynamicModels;
           const verified = retainTransientCatalogRoutes(models, previous, transientProviders, keys);
-          const preservedUnrouted = previous.filter(
-            (model) =>
-              (model.description === 'Custom user model' || !model.routes?.length) &&
-              !verified.some((fresh) => fresh.id === model.id)
-          );
+          const verifiedIds = new Set(verified.map((fresh) => normalizeModelId(fresh.id)));
+          const preservedUnrouted = previous
+            .filter((model) => {
+              if (verifiedIds.has(normalizeModelId(model.id))) return false;
+              if (model.description === 'Custom user model' || !model.routes?.length) return true;
+              return (
+                model.provider !== 'local' &&
+                model.provider !== 'demo' &&
+                model.provider !== 'kilo' &&
+                hasConfiguredCloudKey(model.provider, keys)
+              );
+            })
+            .map((model) => (model.routes?.length ? { ...model, routes: undefined } : model));
           set({ dynamicModels: [...verified, ...preservedUnrouted], pendingFreeModels: pending });
           persist();
         }
@@ -1531,8 +1587,12 @@ export const useHubStore = create<HubState>((set, get) => {
         conversations: s.conversations.map((c) => {
           if (c.id !== convId) return c;
           updated = {
-            ...c, chatMode,
+            ...c,
+            chatMode,
             modelId: chatMode === 'coding' && c.chatMode !== 'coding' ? 'cloud-auto' : c.modelId,
+            ...(chatMode === 'coding' && !c.codingSession
+              ? { codingSession: createInitialCodingSession() }
+              : {}),
             updatedAt: Date.now(),
           };
           return updated;
@@ -2367,6 +2427,223 @@ export const useHubStore = create<HubState>((set, get) => {
           void tools;
         }
 
+        if (chatMode === 'coding') {
+          const initialSession: CodingSessionState =
+            conv.codingSession ?? createInitialCodingSession();
+          const orchestration: CodeOrchestrationSettings = get().settings.codeOrchestration ?? {
+            mode: 'custom',
+            roles: { architect: null, coder: null, reviewer: null },
+            autoRun: false,
+          };
+
+          const updateCodingState = (plan: CodingPlan, nextSession?: CodingSessionState) => {
+            patchConv((c) => ({
+              ...c,
+              updatedAt: Date.now(),
+              codingSession: nextSession ?? c.codingSession ?? initialSession,
+              messages: c.messages.map((m) =>
+                m.id === assistantMsgId ? { ...m, codingPlan: plan } : m
+              ),
+            }));
+          };
+
+          const codingCallbacks = {
+            onPlanUpdated: (plan: CodingPlan) => {
+              updateCodingState(plan);
+            },
+            onSessionUpdated: (nextSession: CodingSessionState) => {
+              patchConv((c) => ({
+                ...c,
+                updatedAt: Date.now(),
+                codingSession: nextSession,
+              }));
+            },
+            onTextDelta: (fullText: string) => {
+              pendingText = fullText;
+              scheduleDeltaFlush();
+            },
+            onReasoningDelta: (fullReasoning: string) => {
+              if (thinkingStartMs === null) {
+                thinkingStartMs = Date.now();
+              }
+              pendingReasoning = fullReasoning;
+              scheduleDeltaFlush();
+            },
+            onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => {
+              flushPendingDeltas();
+              updateAssistantMsg({ toolCalls });
+            },
+            onCitationsUpdated: (citations: GroundingCitation[]) => {
+              flushPendingDeltas();
+              updateAssistantMsg({ citations });
+            },
+            onTraceUpdated: (liveTrace: RunTrace) => {
+              updateAssistantMsg({ runTrace: liveTrace });
+            },
+            onFallbackNotice: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => {
+              flushPendingDeltas();
+              const shortReason = reason.includes('503')
+                ? 'high demand (503)'
+                : reason.includes('429')
+                  ? 'a rate limit (429)'
+                  : 'a provider error';
+              const noticeMsg: ChatMessage = {
+                id: `msg_notice_${Date.now()}`,
+                role: 'system_notice',
+                content: `${fromModel.label} via ${fromModel.provider} hit ${shortReason}. Switched to ${toModel.label} via ${toModel.provider}.`,
+                createdAt: Date.now(),
+              };
+              patchConv((c) => {
+                const idx = c.messages.findIndex((m) => m.id === assistantMsgId);
+                const copy = [...c.messages];
+                if (idx >= 0) copy.splice(idx, 0, noticeMsg);
+                else copy.push(noticeMsg);
+                return { ...c, messages: copy };
+              });
+            },
+            requestApproval: (approval: Omit<PendingApproval, 'resolve'>) => {
+              flushPendingDeltas();
+              return new Promise<ApprovalDecision | ApprovalResolution>((resolve) => {
+                set({
+                  pendingApproval: {
+                    ...approval,
+                    resolve,
+                  },
+                });
+              });
+            },
+            onAlwaysAllowTool: (qualifiedKey, opts) => {
+              const existingTools = get().settings.alwaysAllowedTools;
+              const existingRules = pruneExpiredAlwaysAllowRules(
+                get().settings.alwaysAllowedRules ?? []
+              );
+              const nextRule = {
+                qualifiedKey,
+                expiresAt: durationToExpiresAt(opts?.duration),
+                argPattern: opts?.argPattern,
+              };
+              const filteredRules = existingRules.filter(
+                (r) => !(r.qualifiedKey === qualifiedKey && r.argPattern === opts?.argPattern)
+              );
+              get().updateSettings({
+                alwaysAllowedTools: existingTools.includes(qualifiedKey)
+                  ? existingTools
+                  : [...existingTools, qualifiedKey],
+                alwaysAllowedRules: [...filteredRules, nextRule],
+              });
+            },
+            getServerSecrets: (srvId: string) => loadServerSecrets(srvId),
+            saveServerSecrets: async (srvId: string, updated: ServerSecretPayload) => {
+              await saveServerSecrets(srvId, updated);
+            },
+          };
+
+          const planResult = await runCodingPlanPhase({
+            prompt: text,
+            attachments,
+            session: initialSession,
+            orchestration,
+            activeModelId: conv.modelId,
+            effort: conv.effort,
+            agent,
+            project: activeProject,
+            keys: get().providerKeys,
+            dynamicModels: get().dynamicModels,
+            manualModelOverrides: get().settings.manualModelOverrides ?? [],
+            providerValidation: get().providerValidation,
+            modelFailures: get().modelFailures,
+            allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
+            servers: get().servers,
+            confirmBeforeWrite: options?.autoApproveWrites
+              ? false
+              : get().settings.confirmBeforeWrite,
+            alwaysAllowedTools: get().settings.alwaysAllowedTools,
+            alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
+            toolPolicies: get().settings.toolPolicies ?? [],
+            toolOutputBudgetChars: get().settings.toolOutputBudgetChars ?? 8000,
+            signal: abortController.signal,
+            callbacks: codingCallbacks,
+          });
+
+          flushPendingDeltas();
+
+          if (!planResult.plan.autoRun || abortController.signal.aborted) {
+            const pausedConv = patchConv((c) => ({
+              ...c,
+              updatedAt: Date.now(),
+              codingSession: planResult.session,
+              messages: c.messages.map((m) =>
+                m.id === assistantMsgId
+                  ? {
+                      ...m,
+                      content: planResult.summaryText,
+                      codingPlan: planResult.plan,
+                      isStreaming: false,
+                    }
+                  : m
+              ),
+            }));
+            if (pausedConv) {
+              await historyDb.saveConversation(pausedConv, scope);
+              scheduleRemoteSync();
+            }
+            return;
+          }
+
+          const execResult = await runCodingExecutionPhase({
+            plan: planResult.plan,
+            session: planResult.session,
+            orchestration,
+            activeModelId: conv.modelId,
+            effort: conv.effort,
+            agent,
+            project: activeProject,
+            keys: get().providerKeys,
+            dynamicModels: get().dynamicModels,
+            manualModelOverrides: get().settings.manualModelOverrides ?? [],
+            providerValidation: get().providerValidation,
+            modelFailures: get().modelFailures,
+            allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
+            servers: get().servers,
+            confirmBeforeWrite: options?.autoApproveWrites
+              ? false
+              : get().settings.confirmBeforeWrite,
+            alwaysAllowedTools: get().settings.alwaysAllowedTools,
+            alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
+            toolPolicies: get().settings.toolPolicies ?? [],
+            toolOutputBudgetChars: get().settings.toolOutputBudgetChars ?? 8000,
+            signal: abortController.signal,
+            callbacks: codingCallbacks,
+          });
+
+          flushPendingDeltas();
+          const finalDuration =
+            thinkingDurationMs ??
+            (thinkingStartMs !== null ? Math.max(100, Date.now() - thinkingStartMs) : undefined);
+
+          const doneConv = patchConv((c) => ({
+            ...c,
+            updatedAt: Date.now(),
+            codingSession: execResult.session,
+            messages: c.messages.map((m) =>
+              m.id === assistantMsgId
+                ? {
+                    ...m,
+                    content: execResult.finalText,
+                    codingPlan: execResult.plan,
+                    ...(finalDuration !== undefined ? { thinkingDurationMs: finalDuration } : {}),
+                    isStreaming: false,
+                  }
+                : m
+            ),
+          }));
+          if (doneConv) {
+            await historyDb.saveConversation(doneConv, scope);
+            scheduleRemoteSync();
+          }
+          return;
+        }
+
         const result = await runAgentLoop({
           agent,
           modelId: conv.modelId,
@@ -2542,6 +2819,407 @@ export const useHubStore = create<HubState>((set, get) => {
       } finally {
         if (flushTimer !== null) clearTimeout(flushTimer);
         set({ isRunning: false, abortController: null, pendingApproval: null });
+      }
+    },
+
+    approveCodingPlan: async (messageId) => {
+      if (get().isRunning) return;
+      const scope = activeScope();
+      const state = get();
+      const conv = state.conversations.find((c) => c.id === state.activeConversationId);
+      if (!conv) return;
+      const targetMsg = conv.messages.find((m) => m.id === messageId && m.codingPlan);
+      if (!targetMsg?.codingPlan) return;
+
+      const agent = state.agents.find((a) => a.id === conv.agentId) ?? state.agents[0];
+      const activeProject = conv.projectId
+        ? state.projects.find((p) => p.id === conv.projectId) ?? null
+        : null;
+      const orchestration: CodeOrchestrationSettings = state.settings.codeOrchestration ?? {
+        mode: 'custom',
+        roles: { architect: null, coder: null, reviewer: null },
+        autoRun: false,
+      };
+      const initialSession: CodingSessionState =
+        conv.codingSession ?? createInitialCodingSession();
+
+      const abortController = new AbortController();
+      set({ isRunning: true, abortController });
+
+      const patchConv = (updater: (c: Conversation) => Conversation) => {
+        let latest: Conversation | undefined;
+        set((s) => ({
+          conversations: s.conversations.map((c) => {
+            if (c.id !== conv.id) return c;
+            latest = updater(c);
+            return latest;
+          }),
+        }));
+        return latest;
+      };
+
+      patchConv((c) => ({
+        ...c,
+        updatedAt: Date.now(),
+        messages: c.messages.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                isStreaming: true,
+                error: undefined,
+                codingPlan: m.codingPlan
+                  ? { ...m.codingPlan, phase: 'executing', updatedAt: Date.now() }
+                  : m.codingPlan,
+              }
+            : m
+        ),
+      }));
+
+      try {
+        const execResult = await runCodingExecutionPhase({
+          plan: targetMsg.codingPlan,
+          session: initialSession,
+          orchestration,
+          activeModelId: conv.modelId,
+          effort: conv.effort,
+          agent,
+          project: activeProject,
+          keys: get().providerKeys,
+          dynamicModels: get().dynamicModels,
+          manualModelOverrides: get().settings.manualModelOverrides ?? [],
+          providerValidation: get().providerValidation,
+          modelFailures: get().modelFailures,
+          allowLocalTools: Boolean(get().settings.localModelToolsEnabled),
+          servers: get().servers,
+          confirmBeforeWrite: get().settings.confirmBeforeWrite,
+          alwaysAllowedTools: get().settings.alwaysAllowedTools,
+          alwaysAllowedRules: get().settings.alwaysAllowedRules ?? [],
+          toolPolicies: get().settings.toolPolicies ?? [],
+          toolOutputBudgetChars: get().settings.toolOutputBudgetChars ?? 8000,
+          signal: abortController.signal,
+          callbacks: {
+            onPlanUpdated: (plan) => {
+              patchConv((c) => ({
+                ...c,
+                updatedAt: Date.now(),
+                messages: c.messages.map((m) =>
+                  m.id === messageId ? { ...m, codingPlan: plan } : m
+                ),
+              }));
+            },
+            onSessionUpdated: (nextSession) => {
+              patchConv((c) => ({
+                ...c,
+                updatedAt: Date.now(),
+                codingSession: nextSession,
+              }));
+            },
+            onTextDelta: (fullText) => {
+              patchConv((c) => ({
+                ...c,
+                updatedAt: Date.now(),
+                messages: c.messages.map((m) =>
+                  m.id === messageId ? { ...m, content: fullText } : m
+                ),
+              }));
+            },
+            onReasoningDelta: (fullReasoning) => {
+              patchConv((c) => ({
+                ...c,
+                updatedAt: Date.now(),
+                messages: c.messages.map((m) =>
+                  m.id === messageId ? { ...m, reasoning: fullReasoning } : m
+                ),
+              }));
+            },
+            onToolCallsUpdated: (toolCalls) => {
+              patchConv((c) => ({
+                ...c,
+                updatedAt: Date.now(),
+                messages: c.messages.map((m) =>
+                  m.id === messageId ? { ...m, toolCalls } : m
+                ),
+              }));
+            },
+            onFallbackNotice: (fromModel, toModel, reason) => {
+              const shortReason = reason.includes('503')
+                ? 'high demand (503)'
+                : reason.includes('429')
+                  ? 'a rate limit (429)'
+                  : 'a provider error';
+              const noticeMsg: ChatMessage = {
+                id: `msg_notice_${Date.now()}`,
+                role: 'system_notice',
+                content: `${fromModel.label} via ${fromModel.provider} hit ${shortReason}. Switched to ${toModel.label} via ${toModel.provider}.`,
+                createdAt: Date.now(),
+              };
+              patchConv((c) => {
+                const idx = c.messages.findIndex((m) => m.id === messageId);
+                const copy = [...c.messages];
+                if (idx >= 0) copy.splice(idx, 0, noticeMsg);
+                else copy.push(noticeMsg);
+                return { ...c, messages: copy };
+              });
+            },
+            requestApproval: (approval) =>
+              new Promise((resolve) => {
+                set({
+                  pendingApproval: {
+                    ...approval,
+                    resolve,
+                  },
+                });
+              }),
+            onAlwaysAllowTool: (qualifiedKey, opts) => {
+              const existingTools = get().settings.alwaysAllowedTools;
+              const existingRules = pruneExpiredAlwaysAllowRules(
+                get().settings.alwaysAllowedRules ?? []
+              );
+              const nextRule = {
+                qualifiedKey,
+                expiresAt: durationToExpiresAt(opts?.duration),
+                argPattern: opts?.argPattern,
+              };
+              const filteredRules = existingRules.filter(
+                (r) => !(r.qualifiedKey === qualifiedKey && r.argPattern === opts?.argPattern)
+              );
+              get().updateSettings({
+                alwaysAllowedTools: existingTools.includes(qualifiedKey)
+                  ? existingTools
+                  : [...existingTools, qualifiedKey],
+                alwaysAllowedRules: [...filteredRules, nextRule],
+              });
+            },
+            getServerSecrets: (srvId) => loadServerSecrets(srvId),
+            saveServerSecrets: async (srvId, updated) => {
+              await saveServerSecrets(srvId, updated);
+            },
+          },
+        });
+
+        const doneConv = patchConv((c) => ({
+          ...c,
+          updatedAt: Date.now(),
+          codingSession: execResult.session,
+          messages: c.messages.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  content: execResult.finalText,
+                  codingPlan: execResult.plan,
+                  isStreaming: false,
+                }
+              : m
+          ),
+        }));
+        if (doneConv) {
+          await historyDb.saveConversation(doneConv, scope);
+          scheduleRemoteSync();
+        }
+      } catch (err) {
+        const keys = get().providerKeys;
+        const errMsg = safeErrorMessage(
+          err,
+          Object.values(keys).filter((key): key is string => Boolean(key))
+        );
+        const failConv = patchConv((c) => ({
+          ...c,
+          updatedAt: Date.now(),
+          messages: c.messages.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  isStreaming: false,
+                  error: errMsg,
+                  codingPlan: m.codingPlan
+                    ? { ...m.codingPlan, phase: 'failed', updatedAt: Date.now() }
+                    : m.codingPlan,
+                }
+              : m
+          ),
+        }));
+        if (failConv) {
+          await historyDb.saveConversation(failConv, scope);
+          scheduleRemoteSync();
+        }
+      } finally {
+        set({ isRunning: false, abortController: null, pendingApproval: null });
+      }
+    },
+
+    updateCodingPlanRequirements: async (messageId, requirements, extraInstruction) => {
+      const convId = get().activeConversationId;
+      if (!convId) return;
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          let updatedPlan: CodingPlan | null = c.codingSession?.activePlan ?? null;
+          const nextMessages = c.messages.map((m) => {
+            if (m.id !== messageId || !m.codingPlan) return m;
+            const trimmedNote = extraInstruction?.trim();
+            const nextPrompt = trimmedNote
+              ? `${m.codingPlan.prompt}\n\n[User edit]: ${trimmedNote}`
+              : m.codingPlan.prompt;
+            const nextReqs = trimmedNote
+              ? [
+                  ...requirements,
+                  { id: `req_note_${Date.now()}`, text: trimmedNote, checked: false },
+                ]
+              : requirements;
+            updatedPlan = {
+              ...m.codingPlan,
+              prompt: nextPrompt,
+              requirements: nextReqs,
+              updatedAt: Date.now(),
+            };
+            return { ...m, codingPlan: updatedPlan };
+          });
+          updated = {
+            ...c,
+            updatedAt: Date.now(),
+            messages: nextMessages,
+            codingSession: c.codingSession
+              ? { ...c.codingSession, activePlan: updatedPlan }
+              : c.codingSession,
+          };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        await historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
+    },
+
+    toggleCodeAutoRun: () => {
+      const curr = get().settings.codeOrchestration ?? {
+        mode: 'custom' as const,
+        roles: { architect: null, coder: null, reviewer: null },
+        autoRun: false,
+      };
+      get().updateSettings({
+        codeOrchestration: {
+          ...curr,
+          autoRun: !curr.autoRun,
+        },
+      });
+    },
+
+    setCodeOrchestrationMode: (mode) => {
+      const curr = get().settings.codeOrchestration ?? {
+        mode: 'custom' as const,
+        roles: { architect: null, coder: null, reviewer: null },
+        autoRun: false,
+      };
+      get().updateSettings({
+        codeOrchestration: {
+          ...curr,
+          mode,
+        },
+      });
+    },
+
+    setCodeRoleAssignment: (role, modelId) => {
+      const curr = get().settings.codeOrchestration ?? {
+        mode: 'custom' as const,
+        roles: { architect: null, coder: null, reviewer: null },
+        autoRun: false,
+      };
+      get().updateSettings({
+        codeOrchestration: {
+          ...curr,
+          mode: 'custom',
+          roles: {
+            ...curr.roles,
+            [role]: modelId,
+          },
+        },
+      });
+    },
+
+    acceptWorkspaceDiff: async (path) => {
+      const conv = get().conversations.find((c) => c.id === get().activeConversationId);
+      if (!conv?.codingSession) return;
+      const vfs = new WorkspaceVfs({
+        files: conv.codingSession.files,
+        diffs: conv.codingSession.diffs,
+        checkpoints: conv.codingSession.checkpoints,
+      });
+      if (!vfs.acceptDiff(path)) return;
+      const nextSession: CodingSessionState = {
+        ...conv.codingSession,
+        files: vfs.getFilesSnapshot(),
+        diffs: vfs.getDiffsSnapshot(),
+      };
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv.id) return c;
+          updated = { ...c, codingSession: nextSession, updatedAt: Date.now() };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        await historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
+    },
+
+    rejectWorkspaceDiff: async (path) => {
+      const conv = get().conversations.find((c) => c.id === get().activeConversationId);
+      if (!conv?.codingSession) return;
+      const vfs = new WorkspaceVfs({
+        files: conv.codingSession.files,
+        diffs: conv.codingSession.diffs,
+        checkpoints: conv.codingSession.checkpoints,
+      });
+      if (!vfs.rejectDiff(path)) return;
+      const nextSession: CodingSessionState = {
+        ...conv.codingSession,
+        files: vfs.getFilesSnapshot(),
+        diffs: vfs.getDiffsSnapshot(),
+      };
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv.id) return c;
+          updated = { ...c, codingSession: nextSession, updatedAt: Date.now() };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        await historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
+      }
+    },
+
+    revertWorkspaceCheckpoint: async (checkpointId) => {
+      const conv = get().conversations.find((c) => c.id === get().activeConversationId);
+      if (!conv?.codingSession) return;
+      const vfs = new WorkspaceVfs({
+        files: conv.codingSession.files,
+        diffs: conv.codingSession.diffs,
+        checkpoints: conv.codingSession.checkpoints,
+      });
+      if (!vfs.revertCheckpoint(checkpointId)) return;
+      const nextSession: CodingSessionState = {
+        ...conv.codingSession,
+        files: vfs.getFilesSnapshot(),
+        diffs: vfs.getDiffsSnapshot(),
+        checkpoints: vfs.getCheckpointsSnapshot(),
+      };
+      let updated: Conversation | undefined;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== conv.id) return c;
+          updated = { ...c, codingSession: nextSession, updatedAt: Date.now() };
+          return updated;
+        }),
+      }));
+      if (updated) {
+        await historyDb.saveConversation(updated, activeScope());
+        scheduleRemoteSync();
       }
     },
   };

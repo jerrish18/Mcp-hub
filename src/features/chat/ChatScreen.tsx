@@ -58,9 +58,9 @@ import {
 import { getModelById, getShortModelName } from '../../config/models';
 import { buildAgentToolCatalog } from '../../services/llm/agentLoop';
 import { getMcpPrompt, readMcpResource } from '../../services/mcp/client';
-import { getAvailableModels } from '../../services/llm/provider';
+import { getAvailableModels, getOrchestratorModels } from '../../services/llm/provider';
 import { loadServerSecrets, saveServerSecrets } from '../../services/storage/secureStorage';
-import { DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
+import { DEFAULT_SETTINGS, DEFAULT_STUDY_INSTRUCTIONS, STUDY_INSTRUCTION_PRESETS } from '../../store/defaults';
 import { type CompareResultItem, useHubStore } from '../../store/useHubStore';
 import type {
   A2uiMode,
@@ -104,6 +104,9 @@ import {
 import { QuickConnectSheet } from '../servers/QuickConnectSheet';
 import { ChatActionGroup } from './ChatActionGroup';
 import { AgentSwitcherSheet } from './AgentSwitcherSheet';
+import { CodeOrchestrationBar } from './CodeOrchestrationBar';
+import { CodeWorkspaceDrawer } from './CodeWorkspaceDrawer';
+import { CodingPlanCard } from './CodingPlanCard';
 import { CommandPaletteModal } from './CommandPaletteModal';
 import { CompareModelsPane } from './CompareModelsPane';
 import { HistoryListContent, HistorySheet } from './HistorySheet';
@@ -112,6 +115,7 @@ import { ModelSwitcherSheet } from './ModelSwitcherSheet';
 import { ProCanvasPanel } from './ProCanvasPanel';
 import { useCanvasDraft } from './useCanvasDraft';
 import { getAccountScope } from '../../services/storage/accountSync';
+import { parseAppArtifactBlock } from '../../utils/appArtifact';
 import { ProjectsModal } from './ProjectsModal';
 import { PromptMacrosSheet } from './PromptMacrosSheet';
 import { RunTraceSheet, type ConversationTraceEntry } from './RunTraceSheet';
@@ -287,6 +291,14 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     forkConversationFromMessage,
     retryToolCall,
     updateSettings,
+    approveCodingPlan,
+    updateCodingPlanRequirements,
+    toggleCodeAutoRun,
+    setCodeOrchestrationMode,
+    setCodeRoleAssignment,
+    acceptWorkspaceDiff,
+    rejectWorkspaceDiff,
+    revertWorkspaceCheckpoint,
   } = useHubStore();
 
   const [input, setInput] = useState('');
@@ -318,6 +330,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Pro Canvas & Document Export state
   const [canvasOpen, setCanvasOpen] = useState(false);
+  const [codeWorkspaceOpen, setCodeWorkspaceOpen] = useState(false);
   const canvasScope = getAccountScope(authUser);
   const {
     artifact: canvasArtifact, change: setCanvasArtifact, saveFailed: canvasSaveFailed,
@@ -400,6 +413,17 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const allCatalogModels = useMemo(
     () => getAvailableModels(providerKeys, dynamicModels, settings.manualModelOverrides ?? []),
     [dynamicModels, providerKeys, settings.manualModelOverrides]
+  );
+  const orchestratorModels = useMemo(
+    () =>
+      getOrchestratorModels({
+        keys: providerKeys,
+        dynamicModels,
+        manualModelOverrides: settings.manualModelOverrides ?? [],
+        providerValidation,
+        modelFailures,
+      }),
+    [dynamicModels, modelFailures, providerKeys, providerValidation, settings.manualModelOverrides]
   );
   const activeModel = getModelById(activeConv?.modelId ?? activeAgent.defaultModelId, dynamicModels);
   const activeModelShort = getShortModelName(activeModel);
@@ -541,6 +565,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setIsListening(false);
     setSourceMenuOpen(false);
     setCanvasOpen(false);
+    setCodeWorkspaceOpen(false);
     setVoiceReplies(false);
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   }, [activeConversationId]);
@@ -970,6 +995,16 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     return -1;
   }, [activeConv?.messages]);
 
+  const latestCodingPlanMessageId = useMemo(() => {
+    const msgs = activeConv?.messages ?? [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].codingPlan) return msgs[i].id;
+    }
+    return undefined;
+  }, [activeConv?.messages]);
+
+  const codeOrchestration = settings.codeOrchestration ?? DEFAULT_SETTINGS.codeOrchestration!;
+
   return (
     <div
       style={{ backgroundColor: 'var(--m3-surface)' }}
@@ -995,7 +1030,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           backgroundColor: 'var(--m3-surface-container)',
           borderColor: 'var(--m3-outline)',
         }}
-        className={`${canvasOpen || settings.chatLayout === 'focus' ? 'hidden' : 'hidden xl:flex'} chat-history shrink-0 flex-col border-r`}
+        className={`${canvasOpen || codeWorkspaceOpen || settings.chatLayout === 'focus' ? 'hidden' : 'hidden xl:flex'} chat-history shrink-0 flex-col border-r`}
       >
         <div className="mb-3">
           <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
@@ -1283,7 +1318,7 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   </>
                 )}
 
-                {(activeChatMode === 'professional' || activeChatMode === 'coding') && (
+                {activeChatMode === 'professional' && (
                   <button
                     type="button"
                     data-testid="pro-plan-toggle"
@@ -1488,6 +1523,26 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             </div>
           )}
         </header>
+
+        {activeChatMode === 'coding' && (
+          <CodeOrchestrationBar
+            orchestration={codeOrchestration}
+            availableModels={orchestratorModels}
+            activeModelId={activeModel.id}
+            codingSession={activeConv?.codingSession}
+            workspaceOpen={codeWorkspaceOpen}
+            onToggleWorkspace={() => {
+              setCodeWorkspaceOpen((v) => {
+                const next = !v;
+                if (next) setCanvasOpen(false);
+                return next;
+              });
+            }}
+            onSetOrchestrationMode={setCodeOrchestrationMode}
+            onSetRoleAssignment={setCodeRoleAssignment}
+            onToggleAutoRun={toggleCodeAutoRun}
+          />
+        )}
 
         {compareEnabled && (
           <CompareModelsPane
@@ -1819,6 +1874,24 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       <ToolCallCard key={tc.id} record={tc} />
                     ))}
                   </div>
+                )}
+
+                {msg.codingPlan && (
+                  <CodingPlanCard
+                    plan={msg.codingPlan}
+                    messageId={msg.id}
+                    dynamicModels={dynamicModels}
+                    isRunning={isRunning}
+                    onApprovePlan={(id) => void approveCodingPlan(id)}
+                    onUpdateRequirements={(id, reqs, extra) =>
+                      void updateCodingPlanRequirements(id, reqs, extra)
+                    }
+                    onToggleAutoRun={toggleCodeAutoRun}
+                    onOpenWorkspace={() => {
+                      setCanvasOpen(false);
+                      setCodeWorkspaceOpen(true);
+                    }}
+                  />
                 )}
 
                 {msg.content && (
@@ -2923,6 +2996,31 @@ export function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           void handleQuickPrompt(promptText, label);
         }}
         onClose={() => { saveCanvasDraft(); setCanvasOpen(false); }}
+      />
+
+      <CodeWorkspaceDrawer
+        open={codeWorkspaceOpen}
+        onClose={() => setCodeWorkspaceOpen(false)}
+        session={activeConv?.codingSession}
+        dynamicModels={dynamicModels}
+        isRunning={isRunning}
+        activePlanMessageId={latestCodingPlanMessageId}
+        onApprovePlan={(id) => void approveCodingPlan(id)}
+        onAcceptDiff={(path) => void acceptWorkspaceDiff(path)}
+        onRejectDiff={(path) => void rejectWorkspaceDiff(path)}
+        onRevertCheckpoint={(cpId) => void revertWorkspaceCheckpoint(cpId)}
+        onOpenPreviewInCanvas={(artifactJson) => {
+          const parsed = parseAppArtifactBlock('artifact-app', artifactJson);
+          if (!parsed) return;
+          setCanvasArtifact({
+            kind: 'app',
+            id: `workspace_${activeConv?.id ?? 'code'}`,
+            title: parsed.title,
+            spec: parsed,
+          });
+          setCodeWorkspaceOpen(false);
+          setCanvasOpen(true);
+        }}
       />
 
       <QuickConnectSheet

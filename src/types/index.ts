@@ -403,6 +403,162 @@ export interface MessageVerification {
   checkedAt: number;
 }
 
+export type CodingRole = 'architect' | 'coder' | 'reviewer';
+
+export type CodeOrchestrationMode = 'custom' | 'single';
+
+export type CodeRoleAssignments = Record<CodingRole, string | null>;
+
+export interface CodeOrchestrationSettings {
+  mode: CodeOrchestrationMode;
+  roles: CodeRoleAssignments;
+  autoRun: boolean;
+}
+
+export type CodingPhase =
+  | 'idle'
+  | 'planning'
+  | 'awaiting_approval'
+  | 'executing'
+  | 'verifying'
+  | 'completed'
+  | 'failed';
+
+export interface CodingPlanRequirement {
+  id: string;
+  text: string;
+  checked: boolean;
+}
+
+export type CodingPlanFileAction = 'create' | 'modify' | 'delete';
+
+export interface CodingPlanFileItem {
+  path: string;
+  action: CodingPlanFileAction;
+  purpose: string;
+}
+
+export type CodingPlanTaskStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'verifying'
+  | 'completed'
+  | 'failed';
+
+export interface CodingPlanTask {
+  id: string;
+  title: string;
+  targetFiles: string[];
+  verificationCheck: string;
+  status: CodingPlanTaskStatus;
+  modelId?: string;
+  provider?: ProviderId;
+  tokens?: number;
+  durationMs?: number;
+  fallbackNote?: string;
+  error?: string;
+}
+
+export interface CodingSubagentTrace {
+  id: string;
+  phase: 'planning' | 'executing' | 'verifying';
+  role: CodingRole;
+  taskId?: string;
+  modelId: string;
+  provider: ProviderId;
+  tokens: number;
+  durationMs: number;
+  fallbackFrom?: string;
+  status: 'ok' | 'error' | 'fallback';
+}
+
+export interface CodingPlan {
+  id: string;
+  prompt: string;
+  summary: string;
+  phase: CodingPhase;
+  autoRun: boolean;
+  requirements: CodingPlanRequirement[];
+  fileManifest: CodingPlanFileItem[];
+  tasks: CodingPlanTask[];
+  repairAttempts: number;
+  maxRepairAttempts: number;
+  verificationErrors: string[];
+  subagentTraces: CodingSubagentTrace[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type WorkspaceFileStatus = 'unmodified' | 'created' | 'modified' | 'deleted';
+
+export interface WorkspaceFileEntry {
+  path: string;
+  content: string;
+  language: string;
+  status: WorkspaceFileStatus;
+  updatedAt: number;
+}
+
+export type WorkspaceDiffStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface WorkspaceDiffEntry {
+  path: string;
+  before: string;
+  after: string;
+  action: CodingPlanFileAction;
+  status: WorkspaceDiffStatus;
+  taskId?: string;
+  checkpointId?: string;
+  updatedAt: number;
+}
+
+export interface CodeCheckpoint {
+  id: string;
+  label: string;
+  taskId?: string;
+  createdAt: number;
+  files: Record<string, string>;
+}
+
+export type ToolHarnessValidationStatus =
+  | 'valid'
+  | 'coerced'
+  | 'repaired'
+  | 'rejected'
+  | 'blocked';
+
+export interface ToolTraceEntry {
+  id: string;
+  toolName: string;
+  resolvedToolName?: string;
+  args: Record<string, unknown>;
+  validationStatus: ToolHarnessValidationStatus;
+  repairAttempts: number;
+  durationMs: number;
+  outputPreview: string;
+  isError: boolean;
+  isReadOnly: boolean;
+  timestamp: number;
+  role?: CodingRole;
+  modelId?: string;
+}
+
+export interface CodingContextStats {
+  estimatedTokens: number;
+  contextWindow: number;
+  ratio: number;
+  compacted: boolean;
+}
+
+export interface CodingSessionState {
+  activePlan: CodingPlan | null;
+  files: Record<string, WorkspaceFileEntry>;
+  diffs: Record<string, WorkspaceDiffEntry>;
+  checkpoints: CodeCheckpoint[];
+  toolTrace: ToolTraceEntry[];
+  contextStats: CodingContextStats;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system_notice';
@@ -421,6 +577,7 @@ export interface ChatMessage {
   runTrace?: RunTrace;
   a2uiWidgetState?: A2uiWidgetState;
   verification?: MessageVerification;
+  codingPlan?: CodingPlan;
   canvasEdit?: { artifactId: string; kind: string };
   createdAt: number;
   isStreaming?: boolean;
@@ -438,6 +595,7 @@ export interface Conversation {
   studyInstructions: string;
   projectId?: string | null;
   forkedFrom?: { conversationId: string; messageId?: string };
+  codingSession?: CodingSessionState;
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
@@ -518,4 +676,5 @@ export interface AppSettings {
   onboardingCompleted: boolean;
   localModelToolsEnabled?: boolean;
   manualModelOverrides?: string[];
+  codeOrchestration?: CodeOrchestrationSettings;
 }

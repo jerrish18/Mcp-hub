@@ -71,12 +71,15 @@ export interface WorkspaceSnapshot {
 }
 
 const remoteBaselines = new Map<string, RemoteSyncBaseline>();
+const hydratedUids = new Set<string>();
 
 export function resetRemoteSyncBaseline(uid?: string): void {
   if (uid) {
     remoteBaselines.delete(uid);
+    hydratedUids.delete(uid);
   } else {
     remoteBaselines.clear();
+    hydratedUids.clear();
   }
 }
 
@@ -303,6 +306,12 @@ export async function fetchRemoteWorkspace(
       knowledgeSource: (data.knowledgeSource ?? 'auto') as Conversation['knowledgeSource'],
       studyInstructions: String(data.studyInstructions ?? ''),
       projectId: typeof data.projectId === 'string' ? data.projectId : data.projectId === null ? null : undefined,
+      ...(data.forkedFrom && typeof data.forkedFrom === 'object'
+        ? { forkedFrom: data.forkedFrom as Conversation['forkedFrom'] }
+        : {}),
+      ...(data.codingSession && typeof data.codingSession === 'object'
+        ? { codingSession: data.codingSession as Conversation['codingSession'] }
+        : {}),
       messages: Array.isArray(data.messages) ? (data.messages as Conversation['messages']) : [],
       createdAt: Number(data.clientCreatedAt ?? Date.now()),
       updatedAt: Number(data.clientUpdatedAt ?? Date.now()),
@@ -362,6 +371,7 @@ export async function fetchRemoteWorkspace(
   } else {
     baseline.stateSignature = null;
   }
+  hydratedUids.add(uid);
 
   if (!stateData && conversations.length === 0 && savedStudyNotes.length === 0) {
     return null;
@@ -410,7 +420,10 @@ export async function pushRemoteWorkspace(
     agents: stripUndefined(snapshot.agents.slice(0, 50)),
     servers: sanitizeServersForSync(snapshot.servers),
     dynamicModels: stripUndefined(snapshot.dynamicModels.slice(0, 100)),
-    dismissedDefaultServerIds: snapshot.dismissedDefaultServerIds.slice(0, 50),
+    dismissedDefaultServerIds: snapshot.dismissedDefaultServerIds
+      .filter((id): id is string => typeof id === 'string')
+      .map((id) => id.slice(0, 128))
+      .slice(0, 50),
     savedPrompts: sanitizeSavedPromptsForSync(snapshot.savedPrompts ?? []),
     projects: sanitizeProjectsForSync(snapshot.projects ?? []),
     conversations: snapshot.conversations.slice(0, 150).map(sanitizeConversationForSync),
@@ -443,6 +456,10 @@ export async function pushRemoteWorkspace(
     return Date.now();
   }
   const uid = fbUser.uid;
+  if (!hydratedUids.has(uid)) {
+    // Populate remote baseline before deciding create vs update so existing docs are never overwritten with set()+createdAt.
+    await fetchRemoteWorkspace(user);
+  }
   const baseline = getOrCreateBaseline(uid);
   const plan = computeDirtySyncPlan(cleanPayload, baseline);
   const writeItems: BatchWriteItem[] = [];
@@ -476,6 +493,10 @@ export async function pushRemoteWorkspace(
   for (const item of plan.dirtyConversations) {
     const conv = item.conv;
     const convRef = doc(db, 'users', uid, 'conversations', conv.id);
+    const clientUpdatedAt =
+      Number.isFinite(conv.updatedAt) && conv.updatedAt > 0 ? conv.updatedAt : Date.now();
+    const clientCreatedAt =
+      Number.isFinite(conv.createdAt) && conv.createdAt > 0 ? conv.createdAt : clientUpdatedAt;
     const mutableFields: Record<string, unknown> = {
       title: conv.title,
       agentId: conv.agentId,
@@ -484,15 +505,13 @@ export async function pushRemoteWorkspace(
       chatMode: conv.chatMode,
       knowledgeSource: conv.knowledgeSource,
       studyInstructions: conv.studyInstructions,
+      projectId: conv.projectId ? conv.projectId : null,
+      forkedFrom: conv.forkedFrom ?? null,
+      codingSession: conv.codingSession ?? null,
       messages: conv.messages,
-      clientUpdatedAt: conv.updatedAt || Date.now(),
+      clientUpdatedAt,
       updatedAt: serverTimestamp(),
     };
-    if (conv.projectId) {
-      mutableFields.projectId = conv.projectId;
-    } else {
-      mutableFields.projectId = null;
-    }
     writeItems.push({
       op: item.op,
       ref: convRef,
@@ -502,7 +521,7 @@ export async function pushRemoteWorkspace(
               ownerId: uid,
               id: conv.id,
               ...mutableFields,
-              clientCreatedAt: conv.createdAt || Date.now(),
+              clientCreatedAt,
               createdAt: serverTimestamp(),
             }
           : mutableFields,
@@ -515,6 +534,8 @@ export async function pushRemoteWorkspace(
   for (const item of plan.dirtyNotes) {
     const note = item.note;
     const noteRef = doc(db, 'users', uid, 'studyNotes', note.id);
+    const noteCreatedAt =
+      Number.isFinite(note.createdAt) && note.createdAt > 0 ? note.createdAt : Date.now();
     const mutableFields: Record<string, unknown> = {
       title: note.title,
       content: note.content,
@@ -531,7 +552,7 @@ export async function pushRemoteWorkspace(
               ownerId: uid,
               id: note.id,
               ...mutableFields,
-              clientCreatedAt: note.createdAt || Date.now(),
+              clientCreatedAt: noteCreatedAt,
               createdAt: serverTimestamp(),
             }
           : mutableFields,

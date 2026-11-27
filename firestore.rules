@@ -65,6 +65,22 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidCodeOrchestration(orch) {
+      return orch is map
+        && orch.keys().hasAll(['mode', 'roles', 'autoRun'])
+        && orch.keys().hasOnly(['mode', 'roles', 'autoRun'])
+        && orch.mode is string
+        && orch.mode.size() <= 16
+        && orch.mode in ['custom', 'single']
+        && orch.autoRun is bool
+        && orch.roles is map
+        && orch.roles.keys().hasAll(['architect', 'coder', 'reviewer'])
+        && orch.roles.keys().hasOnly(['architect', 'coder', 'reviewer'])
+        && (orch.roles.architect == null || (orch.roles.architect is string && orch.roles.architect.size() <= 160))
+        && (orch.roles.coder == null || (orch.roles.coder is string && orch.roles.coder.size() <= 160))
+        && (orch.roles.reviewer == null || (orch.roles.reviewer is string && orch.roles.reviewer.size() <= 160));
+    }
+
     function isValidWorkspaceSettings(settings) {
       return settings is map
         && settings.keys().hasOnly([
@@ -84,10 +100,27 @@ service cloud.firestore {
           'hapticsEnabled',
           'onboardingCompleted',
           'localModelToolsEnabled',
-          'manualModelOverrides'
+          'manualModelOverrides',
+          'codeOrchestration'
         ])
+        && (!('theme' in settings) || (settings.theme is string && settings.theme.size() <= 16 && settings.theme in ['system', 'light', 'dark']))
+        && (!('accentTheme' in settings) || (settings.accentTheme is string && settings.accentTheme.size() <= 32 && settings.accentTheme in ['pixel_blue', 'sage', 'clay', 'lavender', 'monochrome']))
+        && (!('chatLayout' in settings) || (settings.chatLayout is string && settings.chatLayout.size() <= 16 && settings.chatLayout in ['standard', 'focus']))
+        && (!('oledDark' in settings) || settings.oledDark is bool)
+        && (!('a2uiEnabled' in settings) || settings.a2uiEnabled is bool)
+        && (!('a2uiMode' in settings) || (settings.a2uiMode is string && settings.a2uiMode.size() <= 16 && settings.a2uiMode in ['off', 'smart', 'always']))
+        && (!('confirmBeforeWrite' in settings) || settings.confirmBeforeWrite is bool)
+        && (!('maxAgentSteps' in settings) || (settings.maxAgentSteps is number && settings.maxAgentSteps >= 1 && settings.maxAgentSteps <= 25))
+        && (!('toolOutputBudgetChars' in settings) || (settings.toolOutputBudgetChars is number && settings.toolOutputBudgetChars >= 1000 && settings.toolOutputBudgetChars <= 32000))
+        && (!('alwaysAllowedTools' in settings) || (settings.alwaysAllowedTools is list && settings.alwaysAllowedTools.size() <= 100 && (settings.alwaysAllowedTools.size() == 0 || settings.alwaysAllowedTools[0] is string)))
+        && (!('alwaysAllowedRules' in settings) || (settings.alwaysAllowedRules is list && settings.alwaysAllowedRules.size() <= 100 && (settings.alwaysAllowedRules.size() == 0 || settings.alwaysAllowedRules[0] is map)))
+        && (!('toolPolicies' in settings) || (settings.toolPolicies is list && settings.toolPolicies.size() <= 100 && (settings.toolPolicies.size() == 0 || settings.toolPolicies[0] is map)))
+        && (!('biometricLockEnabled' in settings) || settings.biometricLockEnabled is bool)
+        && (!('hapticsEnabled' in settings) || settings.hapticsEnabled is bool)
+        && (!('onboardingCompleted' in settings) || settings.onboardingCompleted is bool)
         && (!('localModelToolsEnabled' in settings) || settings.localModelToolsEnabled is bool)
-        && (!('manualModelOverrides' in settings) || (settings.manualModelOverrides is list && settings.manualModelOverrides.size() <= 100));
+        && (!('manualModelOverrides' in settings) || (settings.manualModelOverrides is list && settings.manualModelOverrides.size() <= 100 && (settings.manualModelOverrides.size() == 0 || settings.manualModelOverrides[0] is string)))
+        && (!('codeOrchestration' in settings) || isValidCodeOrchestration(settings.codeOrchestration));
     }
 
     function isValidWorkspaceState(data, userId) {
@@ -135,6 +168,36 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidForkedFrom(forkedFrom) {
+      return forkedFrom == null || (
+        forkedFrom is map
+        && forkedFrom.keys().hasAll(['conversationId'])
+        && forkedFrom.keys().hasOnly(['conversationId', 'messageId'])
+        && forkedFrom.conversationId is string
+        && forkedFrom.conversationId.size() >= 1
+        && forkedFrom.conversationId.size() <= 128
+        && (!('messageId' in forkedFrom) || (forkedFrom.messageId is string && forkedFrom.messageId.size() <= 128))
+      );
+    }
+
+    function isValidCodingSession(session) {
+      return session == null || (
+        session is map
+        && session.keys().hasAll(['activePlan', 'files', 'diffs', 'checkpoints', 'toolTrace', 'contextStats'])
+        && session.keys().hasOnly(['activePlan', 'files', 'diffs', 'checkpoints', 'toolTrace', 'contextStats'])
+        && (session.activePlan == null || session.activePlan is map)
+        && session.files is map
+        && session.diffs is map
+        && session.checkpoints is list
+        && session.checkpoints.size() <= 10
+        && (session.checkpoints.size() == 0 || session.checkpoints[0] is map)
+        && session.toolTrace is list
+        && session.toolTrace.size() <= 100
+        && (session.toolTrace.size() == 0 || session.toolTrace[0] is map)
+        && session.contextStats is map
+      );
+    }
+
     function isValidConversationDoc(data, userId, convId) {
       return data.keys().hasAll([
           'ownerId',
@@ -163,6 +226,8 @@ service cloud.firestore {
           'knowledgeSource',
           'studyInstructions',
           'projectId',
+          'forkedFrom',
+          'codingSession',
           'messages',
           'clientCreatedAt',
           'clientUpdatedAt',
@@ -195,6 +260,8 @@ service cloud.firestore {
         && data.studyInstructions is string
         && data.studyInstructions.size() <= 4000
         && (!('projectId' in data) || data.projectId == null || (data.projectId is string && data.projectId.size() <= 128))
+        && (!('forkedFrom' in data) || isValidForkedFrom(data.forkedFrom))
+        && (!('codingSession' in data) || isValidCodingSession(data.codingSession))
         && data.messages is list
         && data.messages.size() <= 300
         && (data.messages.size() == 0 || data.messages[0] is map)
@@ -340,6 +407,8 @@ service cloud.firestore {
           'knowledgeSource',
           'studyInstructions',
           'projectId',
+          'forkedFrom',
+          'codingSession',
           'messages',
           'clientUpdatedAt',
           'updatedAt'

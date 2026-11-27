@@ -8,6 +8,8 @@ import type {
   ApprovalResolution,
   ChatAttachment,
   ChatMode,
+  CodingContextStats,
+  CodingRole,
   EffortLevel,
   GroundingCitation,
   KnowledgeSourceMode,
@@ -23,6 +25,8 @@ import type {
   ToolCallRecord,
   ToolPermissionPolicy,
   ToolPolicyRule,
+  ToolTraceEntry,
+  WorkspaceFileEntry,
 } from '../../types';
 import { shouldOfferA2ui } from '../../utils/a2ui';
 import { applyLocalRagToMessages } from '../../utils/localRag';
@@ -35,6 +39,11 @@ import {
 } from '../../utils/studyImages';
 import { callMcpTool } from '../mcp/client';
 import { getFallbackModelCandidates, streamWithRateLimitFallback } from './provider';
+import {
+  PerKeyAsyncMutex,
+  validateAndNormalizeToolCall,
+  WORKSPACE_VIRTUAL_SERVER_ID,
+} from './toolHarness';
 import type { LlmConversationItem, LlmToolCall, LlmToolDefinition } from './types';
 
 export const DEFAULT_TOOL_OUTPUT_BUDGET_CHARS = 8000;
@@ -212,15 +221,32 @@ export function estimateMessagesTokens(messages: LlmConversationItem[]): number 
   return Math.ceil(chars / 3.5);
 }
 
+export interface CodingContextPin {
+  planSummary?: string;
+  files?: Record<string, WorkspaceFileEntry>;
+}
+
 export function compactConversationHistory(
   messages: LlmConversationItem[],
   maxContextTokens: number,
-  thresholdRatio = 0.75
-): { messages: LlmConversationItem[]; compacted: boolean } {
+  thresholdRatio = 0.75,
+  codingContextPin?: CodingContextPin
+): { messages: LlmConversationItem[]; compacted: boolean; stats: CodingContextStats } {
   const safeMax = Math.max(1000, maxContextTokens || 32_000);
   const budget = Math.floor(safeMax * thresholdRatio);
-  if (estimateMessagesTokens(messages) <= budget || messages.length <= 6) {
-    return { messages, compacted: false };
+  const initialTokens = estimateMessagesTokens(messages);
+
+  if (initialTokens <= budget || messages.length <= 6) {
+    return {
+      messages,
+      compacted: false,
+      stats: {
+        estimatedTokens: initialTokens,
+        contextWindow: safeMax,
+        ratio: Math.min(1, initialTokens / safeMax),
+        compacted: false,
+      },
+    };
   }
 
   // Keep the first user message + safe tail group (never split assistant toolCalls from its tool responses)
@@ -232,9 +258,17 @@ export function compactConversationHistory(
   while (tailStart > headEnd && messages[tailStart]?.role === 'tool') {
     tailStart--;
   }
-  // Ensure we don't start tail on an orphaned assistant tool-call message without preceding user context if needed
   if (tailStart <= headEnd + 1) {
-    return { messages, compacted: false };
+    return {
+      messages,
+      compacted: false,
+      stats: {
+        estimatedTokens: initialTokens,
+        contextWindow: safeMax,
+        ratio: Math.min(1, initialTokens / safeMax),
+        compacted: false,
+      },
+    };
   }
 
   const dropped = messages.slice(headEnd, tailStart);
@@ -257,16 +291,45 @@ export function compactConversationHistory(
     }
   }
 
+  const pinnedSections: string[] = [];
+  if (codingContextPin?.planSummary) {
+    pinnedSections.push(`[Pinned Coding Plan]\n${codingContextPin.planSummary.slice(0, 1800)}`);
+  }
+  if (codingContextPin?.files) {
+    const activeFiles = Object.values(codingContextPin.files)
+      .filter((f) => f.status !== 'deleted')
+      .slice(0, 12);
+    if (activeFiles.length > 0) {
+      const fileOverview = activeFiles
+        .map(
+          (f) =>
+            `• ${f.path} (${f.status}, ${f.content.length} chars)\n${f.content.slice(0, 400)}`
+        )
+        .join('\n');
+      pinnedSections.push(`[Pinned Latest Workspace Files]\n${fileOverview}`);
+    }
+  }
+
   const summaryMessage: LlmConversationItem = {
     role: 'user',
-    text: `[Conversation Summary — ${dropped.length} earlier messages compacted to fit context budget]\n${summaryLines
-      .slice(-14)
-      .join('\n')}`,
+    text:
+      `[Conversation Summary — ${dropped.length} earlier messages compacted to fit context budget]\n` +
+      summaryLines.slice(-14).join('\n') +
+      (pinnedSections.length > 0 ? `\n\n${pinnedSections.join('\n\n')}` : ''),
   };
 
+  const nextMessages = [...head, summaryMessage, ...messages.slice(tailStart)];
+  const nextTokens = estimateMessagesTokens(nextMessages);
+
   return {
-    messages: [...head, summaryMessage, ...messages.slice(tailStart)],
+    messages: nextMessages,
     compacted: true,
+    stats: {
+      estimatedTokens: nextTokens,
+      contextWindow: safeMax,
+      ratio: Math.min(1, nextTokens / safeMax),
+      compacted: true,
+    },
   };
 }
 
@@ -465,6 +528,8 @@ export interface AgentLoopCallbacks {
   onToolCallsUpdated: (toolCalls: ToolCallRecord[]) => void;
   onCitationsUpdated?: (citations: GroundingCitation[]) => void;
   onTraceUpdated?: (trace: RunTrace) => void;
+  onToolTraceEntry?: (entry: ToolTraceEntry) => void;
+  onContextStats?: (stats: CodingContextStats) => void;
   onFallbackNotice: (fromModel: ModelConfig, toModel: ModelConfig, reason: string) => void;
   requestApproval: (
     approval: Omit<PendingApproval, 'resolve'>
@@ -493,6 +558,17 @@ export interface RunAgentLoopParams {
   manualModelOverrides?: string[];
   allowLocalTools?: boolean;
   servers: McpServerConfig[];
+  extraTools?: LlmToolDefinition[];
+  customToolExecutor?: (
+    def: LlmToolDefinition,
+    args: Record<string, unknown>,
+    callId: string
+  ) => Promise<{ ok: boolean; text: string; code?: string }>;
+  codingContextPin?: CodingContextPin;
+  codingRole?: CodingRole;
+  fallbackModelIds?: string[];
+  allowKeyLinkedModels?: boolean;
+  maxSilentRepairs?: number;
   history: LlmConversationItem[];
   maxSteps: number;
   confirmBeforeWrite: boolean;
@@ -515,6 +591,7 @@ export interface AgentLoopResult {
   stoppedByUser: boolean;
   stepsExecuted: number;
   runTrace: RunTrace;
+  contextStats?: CodingContextStats;
 }
 
 export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoopResult> {
@@ -563,13 +640,27 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
   // Share the existing MCP catalog and approval rules between Professional and Coding modes.
   const built = buildAgentToolCatalog(agent, servers, project?.allowedServerIds ?? null);
   const localModel = getModelById(modelId, dynamicModels).provider === 'local';
-  const buildingWebsite = /\b(?:build|create|generate|implement|design|rebuild|make)\b[\s\S]{0,120}\b(?:website|web app|html|dashboard|landing page)\b/i.test(lastUserText);
+  const buildingWebsite =
+    !params.codingRole &&
+    /\b(?:build|create|generate|implement|design|rebuild|make)\b[\s\S]{0,120}\b(?:website|web app|html|dashboard|landing page)\b/i.test(
+      lastUserText
+    );
   const explicitlySavingNote = /\b(?:save|create|store)\b[\s\S]{0,40}\bnotes?\b/i.test(lastUserText);
-  const tools = (!localModel || allowLocalTools) && (chatMode === 'professional' || chatMode === 'coding')
+  const mcpTools = (!localModel || allowLocalTools) && (chatMode === 'professional' || chatMode === 'coding')
     ? built.tools.filter((tool) => !buildingWebsite || explicitlySavingNote || tool.originalName !== 'workspace_create_note')
     : [];
+  const extraTools = params.extraTools ?? [];
+  const tools = [...mcpTools, ...extraTools];
   const exposedTools = new Set(tools.map((tool) => tool.qualifiedName));
-  const lookup = new Map([...built.lookup].filter(([name]) => exposedTools.has(name)));
+  const lookup = new Map<string, LlmToolDefinition>([
+    ...[...built.lookup].filter(([name]) => exposedTools.has(name)),
+    ...extraTools.map((t) => [t.qualifiedName, t] as const),
+  ]);
+  const perFileMutex = new PerKeyAsyncMutex();
+  const maxSilentRepairs = params.maxSilentRepairs ?? 2;
+  let silentRepairCount = 0;
+  let everCompacted = false;
+  let latestContextStats: CodingContextStats | undefined;
   let effectiveSystemPrompt = composeEffectiveSystemPrompt({
     basePrompt: agent.systemPrompt,
     chatMode,
@@ -736,10 +827,21 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     }
 
     const activeModel = getModelById(activeModelId, dynamicModels);
-    const compacted = compactConversationHistory(workingMessages, activeModel.contextWindow);
+    const compacted = compactConversationHistory(
+      workingMessages,
+      activeModel.contextWindow,
+      0.75,
+      params.codingContextPin
+    );
     if (compacted.compacted) {
+      everCompacted = true;
       workingMessages.splice(0, workingMessages.length, ...compacted.messages);
     }
+    latestContextStats = {
+      ...compacted.stats,
+      compacted: everCompacted || compacted.stats.compacted,
+    };
+    callbacks.onContextStats?.(latestContextStats);
 
     stepsExecuted++;
     let stepText = '';
@@ -763,10 +865,13 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     try {
       const { usedModel } = await streamWithRateLimitFallback({
         primaryModelId: activeModelId,
+        fallbackModelIds: params.fallbackModelIds,
         keys,
         dynamicModels,
         manualModelOverrides,
+        allowKeyLinkedModels: params.allowKeyLinkedModels,
         allowLocalTools,
+        toolsOptional: params.codingRole === 'architect',
         systemPrompt: effectiveSystemPrompt,
         effort,
         chatMode,
@@ -775,7 +880,13 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         websiteBuild: buildingWebsite,
         routeFixture: params.routeFixture,
         messages: workingMessages,
-        prepareMessages: (model) => compactConversationHistory(workingMessages, model.contextWindow).messages,
+        prepareMessages: (model) =>
+          compactConversationHistory(
+            workingMessages,
+            model.contextWindow,
+            0.75,
+            params.codingContextPin
+          ).messages,
         tools,
         signal,
         fetchFn,
@@ -895,12 +1006,21 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           policy: ToolPermissionPolicy;
           needsApproval: boolean;
           record: ToolCallRecord;
+          validationStatus: ToolTraceEntry['validationStatus'];
         };
+
+    const RECOVERABLE_VFS_CODES = new Set([
+      'READ_BEFORE_EDIT_REQUIRED',
+      'PATCH_NO_MATCH',
+      'PATCH_AMBIGUOUS_MATCH',
+      'FILE_NOT_FOUND',
+      'EMPTY_PATCH_SEARCH',
+    ]);
 
     const executePreparedCall = async (
       item: Extract<PreparedToolItem, { kind: 'execute' }>
     ): Promise<{ aborted: boolean; message?: LlmConversationItem }> => {
-      const { call, def, server, record } = item;
+      const { call, def, server, record, validationStatus } = item;
       record.status = 'running';
       record.startedAt = Date.now();
       const toolStep: Extract<RunTraceStep, { kind: 'tool_call' }> = {
@@ -921,24 +1041,41 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       emitLiveTrace();
 
       try {
-        const secrets = await callbacks.getServerSecrets(server.id);
-        const toolRes = await callMcpTool({
-          server,
-          secrets,
-          saveUpdatedSecrets: (updated) => callbacks.saveServerSecrets(server.id, updated),
-          toolName: def.originalName,
-          args: record.arguments,
-          signal,
-          onProgress: (update) => {
-            record.progress = update.progress;
-            record.progressTotal = update.total;
-            record.progressMessage = update.message;
-            callbacks.onToolCallsUpdated([...allToolRecords]);
-          },
-          fetchFn,
-        });
+        let toolResText = '';
+        let toolResIsError = false;
+        let toolResMediaBlocks = record.mediaBlocks ?? [];
+        let toolResStructured: unknown;
+        let recoverableError = false;
 
-        const injectionSignals = detectPromptInjectionSignals(toolRes.text);
+        if (def.serverId === WORKSPACE_VIRTUAL_SERVER_ID && params.customToolExecutor) {
+          const customOut = await params.customToolExecutor(def, record.arguments, call.id);
+          toolResText = customOut.text;
+          toolResIsError = !customOut.ok;
+          recoverableError = Boolean(customOut.code && RECOVERABLE_VFS_CODES.has(customOut.code));
+        } else {
+          const secrets = await callbacks.getServerSecrets(server.id);
+          const toolRes = await callMcpTool({
+            server,
+            secrets,
+            saveUpdatedSecrets: (updated) => callbacks.saveServerSecrets(server.id, updated),
+            toolName: def.originalName,
+            args: record.arguments,
+            signal,
+            onProgress: (update) => {
+              record.progress = update.progress;
+              record.progressTotal = update.total;
+              record.progressMessage = update.message;
+              callbacks.onToolCallsUpdated([...allToolRecords]);
+            },
+            fetchFn,
+          });
+          toolResText = toolRes.text;
+          toolResIsError = toolRes.isError;
+          toolResMediaBlocks = toolRes.mediaBlocks;
+          toolResStructured = toolRes.structuredContent;
+        }
+
+        const injectionSignals = detectPromptInjectionSignals(toolResText);
         if (injectionSignals.length > 0) {
           taintedInjectionWarning = `Untrusted output from ${server.name}/${def.originalName} triggered prompt-injection guard (${injectionSignals.join(', ')}). Verify all write arguments carefully.`;
           traceSteps.push({
@@ -952,27 +1089,79 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           });
         }
 
-        const budgeted = truncateToolOutput(toolRes.text, toolOutputBudgetChars);
+        const budgeted = truncateToolOutput(toolResText, toolOutputBudgetChars);
         record.durationMs = Date.now() - record.startedAt;
         record.result = budgeted.text;
         record.truncated = budgeted.truncated || undefined;
-        record.mediaBlocks = toolRes.mediaBlocks.length > 0 ? toolRes.mediaBlocks : undefined;
-        record.structuredContent = toolRes.structuredContent;
-        record.isError = toolRes.isError;
-        record.status = toolRes.isError ? 'error' : 'success';
+        record.mediaBlocks = toolResMediaBlocks.length > 0 ? toolResMediaBlocks : undefined;
+        record.structuredContent = toolResStructured;
+        record.isError = toolResIsError;
+        record.status = toolResIsError ? 'error' : 'success';
+
+        if (recoverableError && silentRepairCount < maxSilentRepairs) {
+          silentRepairCount++;
+          callbacks.onToolTraceEntry?.({
+            id: call.id,
+            toolName: call.name,
+            resolvedToolName: def.originalName,
+            args: record.arguments,
+            validationStatus: 'repaired',
+            repairAttempts: silentRepairCount,
+            durationMs: record.durationMs,
+            outputPreview: redactAndPreview(budgeted.text, 500, knownSecrets),
+            isError: true,
+            isReadOnly: def.isReadOnly,
+            timestamp: record.startedAt,
+            role: params.codingRole,
+            modelId: activeModelId,
+          });
+          // Drop temporary failed record so user sees a clean resolved call after self-repair
+          const recIdx = allToolRecords.indexOf(record);
+          if (recIdx !== -1) allToolRecords.splice(recIdx, 1);
+          callbacks.onToolCallsUpdated([...allToolRecords]);
+          return {
+            aborted: false,
+            message: {
+              role: 'tool',
+              toolCallId: call.id,
+              toolName: call.name,
+              content: budgeted.text,
+              isError: true,
+            },
+          };
+        }
 
         toolStep.durationMs = record.durationMs;
         toolStep.status = record.status;
         toolStep.truncated = record.truncated;
         toolStep.resultPreview = redactAndPreview(budgeted.text, 1200, knownSecrets);
-        if (toolRes.isError) {
+        if (toolResIsError) {
           toolStep.error = redactAndPreview(budgeted.text, 240, knownSecrets);
         }
+
+        callbacks.onToolTraceEntry?.({
+          id: call.id,
+          toolName: call.name,
+          resolvedToolName: def.originalName,
+          args: record.arguments,
+          validationStatus,
+          repairAttempts: 0,
+          durationMs: record.durationMs,
+          outputPreview: redactAndPreview(budgeted.text, 500, knownSecrets),
+          isError: toolResIsError,
+          isReadOnly: def.isReadOnly,
+          timestamp: record.startedAt,
+          role: params.codingRole,
+          modelId: activeModelId,
+        });
 
         callbacks.onToolCallsUpdated([...allToolRecords]);
         emitLiveTrace();
 
-        const wrappedText = wrapUntrustedToolOutput(budgeted.text, def.originalName, server.name);
+        const wrappedText =
+          def.serverId === WORKSPACE_VIRTUAL_SERVER_ID
+            ? budgeted.text
+            : wrapUntrustedToolOutput(budgeted.text, def.originalName, server.name);
         return {
           aborted: false,
           message: {
@@ -981,7 +1170,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
             toolName: call.name,
             content: wrappedText,
             mediaBlocks: record.mediaBlocks,
-            isError: toolRes.isError,
+            isError: toolResIsError,
           },
         };
       } catch (err) {
@@ -1005,6 +1194,21 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         toolStep.durationMs = record.durationMs;
         toolStep.status = 'error';
         toolStep.error = msg;
+        callbacks.onToolTraceEntry?.({
+          id: call.id,
+          toolName: call.name,
+          resolvedToolName: def.originalName,
+          args: record.arguments,
+          validationStatus,
+          repairAttempts: 0,
+          durationMs: record.durationMs,
+          outputPreview: msg,
+          isError: true,
+          isReadOnly: def.isReadOnly,
+          timestamp: record.startedAt,
+          role: params.codingRole,
+          modelId: activeModelId,
+        });
         callbacks.onToolCallsUpdated([...allToolRecords]);
         emitLiveTrace();
         return {
@@ -1020,71 +1224,109 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
       }
     };
 
-    // Prepare items and group consecutive parallelizable read-only batches
+    // Prepare items with pre-execution schema/name validation & silent self-repair gating
     const prepared: PreparedToolItem[] = [];
     for (const call of proposedCalls) {
-      const def = lookup.get(call.name);
-      if (!def) {
+      const validation = validateAndNormalizeToolCall(call, tools);
+      const def = validation.def ?? lookup.get(call.name) ?? null;
+
+      if (!validation.ok || !def) {
+        const errorText =
+          validation.structuredErrorJson ?? `Tool "${call.name}" is unavailable or invalid.`;
+
+        if (silentRepairCount < maxSilentRepairs) {
+          silentRepairCount++;
+          callbacks.onToolTraceEntry?.({
+            id: call.id,
+            toolName: call.name,
+            resolvedToolName: def?.originalName,
+            args: validation.args,
+            validationStatus: 'repaired',
+            repairAttempts: silentRepairCount,
+            durationMs: 0,
+            outputPreview: errorText.slice(0, 400),
+            isError: true,
+            isReadOnly: def?.isReadOnly ?? true,
+            timestamp: Date.now(),
+            role: params.codingRole,
+            modelId: activeModelId,
+          });
+          prepared.push({
+            kind: 'immediate_message',
+            message: {
+              role: 'tool',
+              toolCallId: call.id,
+              toolName: call.name,
+              content: errorText,
+              isError: true,
+            },
+          });
+          continue;
+        }
+
         const record: ToolCallRecord = {
+          id: call.id,
+          toolName: def?.originalName ?? call.name,
+          serverId: def?.serverId ?? 'unknown',
+          serverName: def?.serverName ?? 'Unknown Server',
+          arguments: validation.args,
+          result: errorText,
+          isError: true,
+          durationMs: 0,
+          status: 'error',
+          isReadOnly: def?.isReadOnly ?? true,
+          startedAt: Date.now(),
+        };
+        allToolRecords.push(record);
+        callbacks.onToolTraceEntry?.({
           id: call.id,
           toolName: call.name,
-          serverId: 'unknown',
-          serverName: 'Unknown Server',
-          arguments: call.parsedArguments ?? {},
-          result: `Tool "${call.name}" is unavailable or disabled.`,
-          isError: true,
+          resolvedToolName: def?.originalName,
+          args: validation.args,
+          validationStatus: 'rejected',
+          repairAttempts: silentRepairCount,
           durationMs: 0,
-          status: 'error',
-          isReadOnly: true,
-          startedAt: Date.now(),
-        };
-        allToolRecords.push(record);
+          outputPreview: errorText.slice(0, 400),
+          isError: true,
+          isReadOnly: def?.isReadOnly ?? true,
+          timestamp: record.startedAt,
+          role: params.codingRole,
+          modelId: activeModelId,
+        });
         prepared.push({
           kind: 'immediate_message',
           message: {
             role: 'tool',
             toolCallId: call.id,
             toolName: call.name,
-            content: record.result!,
+            content: errorText,
             isError: true,
           },
         });
         continue;
       }
 
-      if (call.parseError) {
-        const record: ToolCallRecord = {
-          id: call.id,
-          toolName: def.originalName,
-          serverId: def.serverId,
-          serverName: def.serverName,
-          arguments: {},
-          result: `Malformed tool arguments JSON: ${call.parseError}`,
-          isError: true,
-          durationMs: 0,
-          status: 'error',
-          isReadOnly: def.isReadOnly,
-          startedAt: Date.now(),
-        };
-        allToolRecords.push(record);
-        prepared.push({
-          kind: 'immediate_message',
-          message: {
-            role: 'tool',
-            toolCallId: call.id,
-            toolName: call.name,
-            content: record.result!,
-            isError: true,
-          },
-        });
-        continue;
-      }
-
-      const server = servers.find((s) => s.id === def.serverId);
+      const virtualWorkspaceServer: McpServerConfig | undefined =
+        def.serverId === WORKSPACE_VIRTUAL_SERVER_ID
+          ? {
+              id: WORKSPACE_VIRTUAL_SERVER_ID,
+              name: def.serverName,
+              url: 'virtual://code-workspace',
+              authType: 'none',
+              enabled: true,
+              transportPreference: 'auto',
+              status: 'connected',
+              tools: [],
+              resources: [],
+              prompts: [],
+              disabledTools: [],
+            }
+          : undefined;
+      const server = virtualWorkspaceServer ?? servers.find((s) => s.id === def.serverId);
       if (!server) continue;
 
       const qualifiedKey = `${server.id}:${def.originalName}`;
-      const args = call.parsedArguments ?? {};
+      const args = validation.args;
       const policy = resolveToolPermissionPolicy({
         agent,
         qualifiedKey,
@@ -1156,6 +1398,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         policy,
         needsApproval,
         record,
+        validationStatus: validation.validationStatus,
       });
     }
 
@@ -1356,7 +1599,11 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
         emitLiveTrace();
       }
 
-      const outcome = await executePreparedCall(current);
+      const mutexKey =
+        typeof current.record.arguments.path === 'string' && current.record.arguments.path.trim()
+          ? current.record.arguments.path.trim()
+          : current.qualifiedKey;
+      const outcome = await perFileMutex.runExclusive(mutexKey, () => executePreparedCall(current));
       if (outcome.aborted) {
         return {
           finalText: accumulatedText,
@@ -1367,6 +1614,7 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
           stoppedByUser: true,
           stepsExecuted,
           runTrace: buildTrace(true),
+          contextStats: latestContextStats,
         };
       }
       if (outcome.message) {
@@ -1392,5 +1640,6 @@ export async function runAgentLoop(params: RunAgentLoopParams): Promise<AgentLoo
     stoppedByUser: false,
     stepsExecuted,
     runTrace: buildTrace(false),
+    contextStats: latestContextStats,
   };
 }

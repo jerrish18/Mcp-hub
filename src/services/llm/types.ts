@@ -68,6 +68,7 @@ export interface StreamCompletionRequest {
   isProbe?: boolean;
   manualOverride?: boolean;
   allowLocalTools?: boolean;
+  toolsOptional?: boolean;
   messages: LlmConversationItem[];
   tools: LlmToolDefinition[];
   signal?: AbortSignal;

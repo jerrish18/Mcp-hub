@@ -99,6 +99,121 @@ test('sanitizeSettingsForSync and sanitizeConversationForSync preserve coding mo
   const codingConv = sanitizeConversationForSync({
     ...makeConv('c_code', 4000, 1),
     chatMode: 'coding',
+    codingSession: {
+      activePlan: {
+        id: 'plan_1',
+        prompt: 'Build app',
+        summary: 'Modular web app',
+        phase: 'completed',
+        autoRun: false,
+        requirements: [{ id: 'req_1', text: 'Semantic HTML', checked: true }],
+        fileManifest: [{ path: 'index.html', action: 'create', purpose: 'Entry' }],
+        tasks: [
+          {
+            id: 't1',
+            title: 'Create entry',
+            targetFiles: ['index.html'],
+            verificationCheck: 'Balanced tags',
+            status: 'completed',
+          },
+        ],
+        repairAttempts: 0,
+        maxRepairAttempts: 3,
+        verificationErrors: [],
+        subagentTraces: [],
+        createdAt: 4000,
+        updatedAt: 4050,
+      },
+      files: {
+        'index.html': {
+          path: 'index.html',
+          content: '<h1>App</h1>',
+          language: 'html',
+          status: 'created',
+          updatedAt: 4050,
+        },
+      },
+      diffs: {},
+      checkpoints: [],
+      toolTrace: [],
+      contextStats: {
+        estimatedTokens: 200,
+        contextWindow: 128000,
+        ratio: 0.002,
+        compacted: false,
+      },
+    },
   });
   assert.equal(codingConv.chatMode, 'coding');
+  assert.equal(codingConv.codingSession?.files['index.html'].path, 'index.html');
+  assert.equal(codingConv.codingSession?.activePlan?.phase, 'completed');
+
+  const orchSettings = sanitizeSettingsForSync({
+    ...DEFAULT_SETTINGS,
+    codeOrchestration: {
+      mode: 'custom',
+      roles: { architect: 'gemini-4-neon', coder: 'qwen/qwen3-coder', reviewer: null },
+      autoRun: true,
+    },
+  });
+  assert.equal(orchSettings.codeOrchestration?.autoRun, true);
+  assert.equal(orchSettings.codeOrchestration?.roles.architect, 'gemini-4-neon');
+  assert.equal(orchSettings.codeOrchestration?.roles.reviewer, null);
 });
+
+test('sanitized workspace settings and conversations only emit Firestore-allowlisted keys and valid enums', () => {
+  const allowedSettingsKeys = new Set([
+    'theme',
+    'accentTheme',
+    'chatLayout',
+    'oledDark',
+    'a2uiEnabled',
+    'a2uiMode',
+    'confirmBeforeWrite',
+    'maxAgentSteps',
+    'toolOutputBudgetChars',
+    'alwaysAllowedTools',
+    'alwaysAllowedRules',
+    'toolPolicies',
+    'biometricLockEnabled',
+    'hapticsEnabled',
+    'onboardingCompleted',
+    'localModelToolsEnabled',
+    'manualModelOverrides',
+    'codeOrchestration',
+  ]);
+
+  const sanitizedSettings = sanitizeSettingsForSync({
+    ...DEFAULT_SETTINGS,
+    theme: 'invalid-theme' as typeof DEFAULT_SETTINGS.theme,
+    accentTheme: 'invalid-accent' as typeof DEFAULT_SETTINGS.accentTheme,
+  });
+
+  for (const key of Object.keys(sanitizedSettings)) {
+    assert.equal(allowedSettingsKeys.has(key), true, `Unexpected settings key: ${key}`);
+  }
+  assert.equal(sanitizedSettings.theme, 'system');
+  assert.equal(sanitizedSettings.accentTheme, 'pixel_blue');
+  assert.deepEqual(Object.keys(sanitizedSettings.codeOrchestration ?? {}).sort(), [
+    'autoRun',
+    'mode',
+    'roles',
+  ]);
+
+  const sanitizedConv = sanitizeConversationForSync({
+    ...makeConv('conv:bad/id', 5000, 1),
+    effort: 'extreme' as Conversation['effort'],
+    chatMode: 'unknown' as Conversation['chatMode'],
+    knowledgeSource: 'unknown' as Conversation['knowledgeSource'],
+    forkedFrom: { conversationId: 'conv_parent', messageId: 'm_0' },
+  });
+  assert.match(sanitizedConv.id, /^[a-zA-Z0-9_-]+$/);
+  assert.equal(sanitizedConv.effort, 'medium');
+  assert.equal(sanitizedConv.chatMode, 'professional');
+  assert.equal(sanitizedConv.knowledgeSource, 'auto');
+  assert.deepEqual(sanitizedConv.forkedFrom, {
+    conversationId: 'conv_parent',
+    messageId: 'm_0',
+  });
+});
+

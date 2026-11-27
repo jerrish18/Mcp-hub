@@ -1,6 +1,7 @@
 import { streamSseData } from './sse';
 import { PROVIDER_INFO } from '../../config/models';
 import { redactSecrets } from '../../utils/redact';
+import { normalizeToolSchemaForProvider } from './toolSchemaNormalizer';
 import {
   extractReadableApiError,
   type LlmToolCall,
@@ -10,46 +11,6 @@ import {
   type StreamCompletionRequest,
 } from './types';
 import type { GroundingCitation } from '../../types';
-
-function sanitizeGeminiSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  const clone: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(schema)) {
-    if (k === '$schema' || k === 'additionalProperties') continue;
-    if (k === 'properties' && v && typeof v === 'object') {
-      const props: Record<string, unknown> = {};
-      for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) {
-        if (pv && typeof pv === 'object') {
-          props[pk] = sanitizeGeminiSchema(pv as Record<string, unknown>);
-        }
-      }
-      clone.properties = props;
-    } else if (k === 'items' && v && typeof v === 'object') {
-      clone.items = sanitizeGeminiSchema(v as Record<string, unknown>);
-    } else {
-      clone[k] = v;
-    }
-  }
-  if (!clone.type) {
-    clone.type = 'object';
-  }
-  if (clone.type === 'object') {
-    if (!clone.properties || Object.keys(clone.properties as object).length === 0) {
-      clone.properties = { _placeholder: { type: 'string', description: 'Optional unused parameter' } };
-      delete clone.required;
-    } else if (Array.isArray(clone.required)) {
-      const propKeys = new Set(Object.keys(clone.properties as object));
-      const validRequired = (clone.required as unknown[]).filter(
-        (key): key is string => typeof key === 'string' && propKeys.has(key)
-      );
-      if (validRequired.length > 0) {
-        clone.required = validRequired;
-      } else {
-        delete clone.required;
-      }
-    }
-  }
-  return clone;
-}
 
 function mapEffortToGeminiThinkingLevel(
   effort: 'low' | 'medium' | 'high',
@@ -219,7 +180,7 @@ export async function streamGeminiCompletion(req: StreamCompletionRequest): Prom
       functionDeclarations: tools.map((t) => ({
         name: t.qualifiedName,
         description: t.description,
-        parameters: sanitizeGeminiSchema(t.parameters),
+        parameters: normalizeToolSchemaForProvider(t.parameters, 'gemini'),
       })),
     });
   }

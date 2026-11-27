@@ -94,7 +94,7 @@
         },
         "settings": {
           "type": "object",
-          "description": "Sanitized application settings map"
+          "description": "Sanitized application settings map (including codeOrchestration and manualModelOverrides)"
         },
         "agents": {
           "type": "array",
@@ -205,6 +205,14 @@
           "description": "Optional associated workspace Project ID",
           "minLength": 0,
           "maxLength": 128
+        },
+        "forkedFrom": {
+          "type": "object",
+          "description": "Optional source conversation and message reference when forked"
+        },
+        "codingSession": {
+          "type": "object",
+          "description": "Optional Code Mode session state (activePlan, files, diffs, checkpoints, toolTrace, contextStats)"
         },
         "messages": {
           "type": "array",
